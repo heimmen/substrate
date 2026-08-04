@@ -16,10 +16,16 @@ suspends and resumes.
 - The mf-cc image built locally as `mf-cc:latest` (see
   `docker-build.sh` in the cc-haha repo). The image must be reachable by the
   cluster nodes.
-- A GCS bucket for storing snapshots (configured via `BUCKET_NAME` env var).
+
+> [!NOTE]
+> **No real GCS bucket is needed on a local cluster.** Snapshots go to the
+> in-cluster object store (rustfs) on kind/k3s; `BUCKET_NAME` is just a logical
+> bucket name inside it, and `install-ate-kind.sh` already sets it to
+> `ate-snapshots`. A real GCS bucket (`gs://${BUCKET_NAME}`) is only used on
+> GKE.
 
 > [!IMPORTANT]
-> On a kind cluster the nodes cannot reach external registries, so both the
+> On a local cluster the nodes cannot reach external registries, so both the
 > mf-cc image **and** the pause image must be pushed to the local registry
 > (`localhost:5001`). The deploy script resolves their digests automatically
 > once they are present.
@@ -46,15 +52,15 @@ Set the provider env vars (see `.env` in the cc-haha repo for reference), then
 deploy:
 
 ```bash
-# On GKE:
+# On GKE (BUCKET_NAME = real GCS bucket):
 BUCKET_NAME=<bucket> \
 ANTHROPIC_AUTH_TOKEN=<token> \
 ANTHROPIC_BASE_URL=<base-url> \
 ANTHROPIC_MODEL=<model> \
 ./hack/install-ate.sh --deploy-demo-mf-cc
 
-# On kind (sets KO_DOCKER_REPO=localhost:5001, BUCKET_NAME=ate-snapshots):
-BUCKET_NAME=ate-snapshots \
+# On kind/k3s (install-ate-kind.sh sets KO_DOCKER_REPO=localhost:5001 and
+# BUCKET_NAME=ate-snapshots for the in-cluster rustfs store):
 ANTHROPIC_AUTH_TOKEN=<token> \
 ANTHROPIC_BASE_URL=<base-url> \
 ANTHROPIC_MODEL=<model> \
