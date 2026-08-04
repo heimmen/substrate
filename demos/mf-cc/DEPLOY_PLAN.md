@@ -6,6 +6,17 @@
 
 本环境是 **kind 本地集群**（context `kind-kind`），配置了 `kind-registry` 映射到 `localhost:5001`。**重要限制**：集群节点无法访问外网 registry（之前 `--delete-demo-counter` 失败根因就是节点拉取 `registry.k8s.io/pause:3.10.2@sha256:f548...` 超时），所以**所有镜像（含 pause）必须推送到 localhost:5001**。
 
+## 任务进度
+
+- [x] 编写并提交本部署方案（commit `c46734b6`）
+- [x] 步骤 1：本地化 pause + mf-cc 镜像到 `localhost:5001`
+- [x] 步骤 2：创建 `demos/mf-cc/mf-cc.yaml.tmpl`
+- [x] 步骤 3：创建 `hack/install-demo-mf-cc.sh`
+- [x] 步骤 4：在 `hack/install-ate.sh` 注册 demo
+- [x] 步骤 5：部署 `--deploy-demo-mf-cc`
+- [x] 步骤 6：创建 actor 并通过 router 访问 Web UI
+- [x] 验证：HTTP `/health`、WebSocket、暂停/恢复后数据持久
+
 ## 已确认的决策
 
 | 决策 | 选择 | 依据 |
@@ -240,7 +251,10 @@ open http://mfcc.mfcc.actors.resources.substrate.ate.dev:8080
 
 ## 风险与注意
 
-- **WebSocket 走 Envoy**：HCM 未显式配置 `upgradeConfigs`，Envoy HTTP/1.1 默认放行 upgrade，但 ext_proc filter 与 DFP 组合需实测；若失败需在 `cmd/atenet/internal/router/xds.go` 增加 WebSocket upgrade 配置。
+- **WebSocket 走 Envoy**：~~HCM 未显式配置 `upgradeConfigs`，Envoy HTTP/1.1 默认放行 upgrade，但 ext_proc filter 与 DFP 组合需实测~~。**已修复**：在 `cmd/atenet/internal/router/xds.go` 的 `buildRoutes` 给 RouteAction 加了 `UpgradeConfigs: [{UpgradeType: "websocket"}]`，否则 Envoy 对 `Upgrade: websocket` 返回 403。修复后 WS 握手返回 101。
 - **actor 暂停/恢复**：mf-cc 是长驻 web server，`onPause: Data` 只快照 durableDir，恢复后进程重启（内存不保留），WebSocket 连接会断，需前端重连或刷新页面。这是可接受的行为。
 - **镜像大小**：mf-cc 1.67GB，push/拉取较慢属正常。
 - **durableDir 数据宿主路径**：恢复后数据在节点本地盘，若节点重建会丢；生产需用 externalVolumeTemplate（本环境 kind 用 durableDir 足够）。
+- **secretKeyRef 需要 RBAC**：ate-api-server 解析容器 env 的 secretKeyRef 时要读 Secret，需在 demo namespace 里给 `system:serviceaccount:ate-system:ate-api-server` 建 Role + RoleBinding（见 `demos/agent-secret/agent-secret.yaml.tmpl` 的 `ate-api-server-env-sources` 模式）。
+- **Substrate 强制容器 Cwd="/"**：actor 容器忽略镜像的 WORKDIR，所以 entrypoint 必须用绝对路径（mf-cc 用 `command: [/usr/local/bin/bun, run, /app/src/server/index.ts]`）。
+- **`run_kubectl delete` 不校验镜像**：delete 时模板占位符不会被 k8s 校验（claude-code-multiplex 注释已说明），可安全用 placeholder。

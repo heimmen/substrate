@@ -401,6 +401,16 @@ func (x *XdsServer) buildRoutes() *routev3.RouteConfiguration {
 									Cluster: "dynamic_forward_proxy_cluster",
 								},
 								Timeout: durationpb.New(10 * time.Second),
+								// Allow WebSocket upgrades so actors that
+								// serve on /ws (e.g. the mf-cc demo) can
+								// be reached through the router. Without
+								// this Envoy rejects Upgrade: websocket
+								// requests with 403.
+								UpgradeConfigs: []*routev3.RouteAction_UpgradeConfig{
+									{
+										UpgradeType: "websocket",
+									},
+								},
 							},
 						},
 					},

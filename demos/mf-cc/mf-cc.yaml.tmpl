@@ -1,0 +1,135 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# cc-haha (mf-cc) Web UI deployed as an actor. The container listens on
+# port 80 (atenet-router forwards all traffic there). Pause and workload
+# images are pinned by digest and must be pushed to ${KO_DOCKER_REPO}
+# (localhost:5001 in a kind environment) — the cluster nodes cannot reach
+# external registries.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-demo-mf-cc
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mf-cc-provider-config
+  namespace: ate-demo-mf-cc
+type: Opaque
+stringData:
+  ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN}"
+  ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL}"
+  ANTHROPIC_MODEL: "${ANTHROPIC_MODEL}"
+
+---
+
+# Grant ate-api-server read access to the Secret that this demo's
+# ActorTemplate references for env resolution.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ate-api-server-env-sources
+  namespace: ate-demo-mf-cc
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["mf-cc-provider-config"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ate-api-server-env-sources
+  namespace: ate-demo-mf-cc
+subjects:
+- kind: ServiceAccount
+  name: ate-api-server
+  namespace: ate-system
+roleRef:
+  kind: Role
+  name: ate-api-server-env-sources
+  apiGroup: rbac.authorization.k8s.io
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: mf-cc-workerpool
+  namespace: ate-demo-mf-cc
+  labels:
+    workload: mf-cc
+spec:
+  replicas: 1
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: mf-cc
+  namespace: ate-demo-mf-cc
+spec:
+  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
+  containers:
+  - name: mf-cc
+    image: "localhost:5001/mf-cc@${MFCC_DIGEST}"
+    # Substrate runs actor containers with Cwd "/" (the image's WORKDIR /app
+    # is ignored), so the entrypoint must use absolute paths.
+    command:
+    - /usr/local/bin/bun
+    - run
+    - /app/src/server/index.ts
+    env:
+    # atenet-router forwards traffic to the actor on port 80.
+    - name: SERVER_PORT
+      value: "80"
+    - name: SERVER_HOST
+      value: "0.0.0.0"
+    - name: CLAUDE_H5_ALLOW_ALL_ORIGINS
+      value: "1"
+    - name: ANTHROPIC_AUTH_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: mf-cc-provider-config
+          key: ANTHROPIC_AUTH_TOKEN
+    - name: ANTHROPIC_BASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: mf-cc-provider-config
+          key: ANTHROPIC_BASE_URL
+    - name: ANTHROPIC_MODEL
+      valueFrom:
+        secretKeyRef:
+          name: mf-cc-provider-config
+          key: ANTHROPIC_MODEL
+    volumeMounts:
+    - name: cc-data
+      mountPath: /root/.claude
+  workerSelector:
+    matchLabels:
+      workload: mf-cc
+  snapshotsConfig:
+    # Data-only snapshots: this is a long-lived web server, a full memory
+    # snapshot on every pause would be slow. Sessions persist via durableDir.
+    onPause: Data
+    onCommit: Data
+    location: gs://${BUCKET_NAME}/ate-demo-mf-cc/
+  volumes:
+  - name: cc-data
+    durableDir: {}
