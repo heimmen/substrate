@@ -94,6 +94,13 @@ kubectl ate create atespace mfcc
 kubectl ate create actor mfcc -a mfcc --template ate-demo-mf-cc/mf-cc
 ```
 
+The actor starts as `STATUS_SUSPENDED` — it will auto-resume on the first
+request through the router (see step 4). Check the actor status with:
+
+```bash
+kubectl ate get actor mfcc -a mfcc
+```
+
 ### 4. Port-Forward the Router
 
 To reach the actor through the Substrate router:
@@ -126,13 +133,15 @@ The actor is reachable at the DNS name
    ```
 
 2. The first request through the router resumes the actor automatically.
-   Verify it is now `RUNNING` and assigned to a worker pod:
+   The initial response may be `503` while the server starts up — wait a few
+   seconds and retry. Verify the actor is now `STATUS_RUNNING` and assigned to a
+   worker pod:
 
    ```bash
    kubectl ate get actor mfcc -a mfcc
    ```
 
-3. Health check:
+3. Health check (should return `200` once the server is up):
 
    ```bash
    curl -H "Host: mfcc.mfcc.actors.resources.substrate.ate.dev" http://127.0.0.1:58880/health
