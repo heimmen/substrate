@@ -117,6 +117,48 @@ The actor is reachable at the DNS name
 
 ## How to Use
 
+The actor is reachable through the atenet-router port-forward. There are two
+ways to access it:
+
+- **Option A: mfcc-nginx proxy (recommended).** Build and run the local nginx
+  reverse proxy that sets the `Host` header automatically — no `/etc/hosts`
+  editing needed.
+- **Option B: /etc/hosts + Host header.** Manually set up the Host header
+  via `/etc/hosts` or curl.
+
+### Option A: mfcc-nginx proxy (recommended)
+
+The `mfcc-nginx` image is a thin nginx reverse proxy that forwards all requests
+to the atenet-router port-forward (`58880`) with the correct `Host` header
+(`mfcc.mfcc.actors.resources.substrate.ate.dev`). It listens on port `58881`.
+
+No `/etc/hosts` edits are required — just point your browser at
+`http://localhost:58881`.
+
+```bash
+# Build the image (from the demos/mf-cc directory)
+./build-image.sh
+
+# Run the container
+docker run -d -p 58881:58881 --name mfcc-nginx --network host mfcc-nginx
+```
+
+> [!NOTE]
+> The container uses `--network host` so it can reach the kubectl
+> port-forward on the host's loopback. If using Docker Desktop (macOS / Windows),
+> omit `--network host` and replace `127.0.0.11` in `nginx.conf` with
+> `host.docker.internal` (DNS resolver) and `mfcc.mfcc...:58880` with
+> `host.docker.internal:58880` (proxy target), then run:
+> `docker run -d -p 58881:58881 --name mfcc-nginx mfcc-nginx`.
+
+To stop and remove the container:
+
+```bash
+docker stop mfcc-nginx && docker rm mfcc-nginx
+```
+
+### Option B: /etc/hosts + Host header
+
 1. Point a browser at the actor's DNS name, either by adding an `/etc/hosts`
    entry or by using a tool that sends the `Host` header:
 
