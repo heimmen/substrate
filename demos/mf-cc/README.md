@@ -1,220 +1,208 @@
-# mf-cc Demo
+# mf-cc 演示
 
-This directory contains a demo that runs the **mf-cc** (cc-haha) web UI as an
-actor on Agent Substrate. mf-cc is a Bun HTTP + WebSocket server that serves a
-React-based AI coding workbench (REST API at `/api/*`, WebSocket at `/ws/*`,
-static frontend at `/*`).
+此目录包含将 **mf-cc**（cc-haha）Web UI 作为 Agent Substrate 上的 Actor 运行的演
+示。mf-cc 是一个基于 Bun 的 HTTP + WebSocket 服务器，提供基于 React 的 AI 编码工
+作台（REST API 在 `/api/*`，WebSocket 在 `/ws/*`，静态前端在 `/*`）。
 
-Running it as a Substrate actor gives it suspend/resume, snapshot, and
-persistent-storage behavior, so its sessions and configuration survive across
-suspends and resumes.
+将其作为 Substrate Actor 运行可获得挂起/恢复、快照和持久化存储的能力，使得会话和
+配置在挂起与恢复之间能够持续存在。
 
-## Prerequisites
+## 前提条件
 
-- A k8s cluster with Agent Substrate installed
-  (`./hack/install-ate.sh --deploy-ate-system`).
-- The mf-cc image built locally as `mf-cc:latest` (see
-  `docker-build.sh` in the cc-haha repo). The image must be reachable by the
-  cluster nodes.
+- 已安装 Agent Substrate 的 k8s 集群
+  （`./hack/install-ate.sh --deploy-ate-system`）。
+- 本地已构建的 mf-cc 镜像 `mf-cc:latest`（参见 cc-haha 仓库中的
+  `docker-build.sh`）。该镜像必须能被集群节点访问。
 
 > [!NOTE]
-> **No real GCS bucket is needed on a local cluster.** Snapshots go to the
-> in-cluster object store (rustfs) on kind/k3s; `BUCKET_NAME` is just a logical
-> bucket name inside it, and `install-ate-kind.sh` already sets it to
-> `ate-snapshots`. A real GCS bucket (`gs://${BUCKET_NAME}`) is only used on
-> GKE.
+> **本地集群不需要真实的 GCS bucket。** 在 kind/k3s 上，快照存储在集群内部的对象
+> 存储（rustfs）中；`BUCKET_NAME` 只是其中的逻辑 bucket 名称，
+> `install-ate-kind.sh` 已将其设置为 `ate-snapshots`。真实的 GCS bucket
+> （`gs://${BUCKET_NAME}`）仅在 GKE 上使用。
 
 > [!IMPORTANT]
-> On a local cluster the nodes cannot reach external registries, so both the
-> mf-cc image **and** the pause image must be pushed to the local registry
-> (`localhost:5001`). The deploy script resolves their digests automatically
-> once they are present.
+> 在本地集群上，节点无法访问外部镜像仓库，因此 mf-cc 镜像**和** pause 镜像都必
+> 须推送到本地仓库（`localhost:5001`）。部署脚本在镜像就位后会自动解析其摘要引
+> 用。
 
-## How to Run on Agent Substrate
+## 如何在 Agent Substrate 上运行
 
-### 1. Push the images to the cluster's registry
+### 1. 将镜像推送到集群的镜像仓库
 
-On a kind cluster (`KO_DOCKER_REPO=localhost:5001`), localize the images first:
+在 kind 集群上（`KO_DOCKER_REPO=localhost:5001`），先将镜像本地化：
 
 ```bash
-# mf-cc workload image (built by the cc-haha repo's docker-build.sh)
+# mf-cc 工作负载镜像（由 cc-haha 仓库的 docker-build.sh 构建）
 docker tag mf-cc:latest localhost:5001/mf-cc:latest
 docker push localhost:5001/mf-cc:latest
 
-# pause image (3.10.2; use any reachable mirror, e.g. rancher/mirrored-pause)
+# pause 镜像（3.10.2；可使用任意可访问的镜像源，例如 rancher/mirrored-pause）
 docker tag rancher/mirrored-pause:3.10.2 localhost:5001/pause:3.10.2
 docker push localhost:5001/pause:3.10.2
 ```
 
-### 2. Deploy
+### 2. 部署
 
-Set the provider env vars (see `.env` in the cc-haha repo for reference), then
-deploy:
+设置 provider 环境变量（参见 cc-haha 仓库中的 `.env` 文件），然后部署：
 
 ```bash
-# On GKE (BUCKET_NAME = real GCS bucket):
+# GKE 上（BUCKET_NAME = 真实的 GCS bucket）：
 BUCKET_NAME=<bucket> \
 ANTHROPIC_AUTH_TOKEN=<token> \
 ANTHROPIC_BASE_URL=<base-url> \
 ANTHROPIC_MODEL=<model> \
 ./hack/install-ate.sh --deploy-demo-mf-cc
 
-# On kind/k3s (install-ate-kind.sh sets KO_DOCKER_REPO=localhost:5001 and
-# BUCKET_NAME=ate-snapshots for the in-cluster rustfs store):
+# kind/k3s 上（install-ate-kind.sh 会设置 KO_DOCKER_REPO=localhost:5001 和
+# BUCKET_NAME=ate-snapshots 用于集群内 rustfs 存储）：
 ANTHROPIC_AUTH_TOKEN=<token> \
 ANTHROPIC_BASE_URL=<base-url> \
 ANTHROPIC_MODEL=<model> \
 ./hack/install-ate-kind.sh --deploy-demo-mf-cc
 ```
 
-This command will:
+此命令将会：
 
-- Resolve the digest-pinned mf-cc and pause image references from the registry.
-- Create the `ate-demo-mf-cc` namespace.
-- Create the provider-config `Secret` and the RBAC that lets
-  `ate-api-server` read it for env resolution.
-- Create the `WorkerPool` and `ActorTemplate`.
+- 从镜像仓库中解析 mf-cc 和 pause 镜像的摘要固定引用。
+- 创建 `ate-demo-mf-cc` 命名空间。
+- 创建 provider-config `Secret` 以及允许 `ate-api-server` 读取它用于环境变量解析
+  的 RBAC 规则。
+- 创建 `WorkerPool` 和 `ActorTemplate`。
 
-The provider config is stored in a Secret and referenced via
-`valueFrom.secretKeyRef`, so keys never appear in git.
+Provider 配置存储在 Secret 中，并通过 `valueFrom.secretKeyRef` 引用，因此密钥不
+会出现在 git 中。
 
-### 3. Create an Actor
+### 3. 创建 Actor
 
-Actors live in an **atespace**, which must exist before you create actors in
-it. Create one (e.g., `mfcc`), then create the mf-cc actor:
+Actor 存在于 **atespace** 中，在创建 Actor 之前必须先创建 atespace。创建一个
+（例如 `mfcc`），然后创建 mf-cc Actor：
 
 ```bash
-# Install the CLI as a kubectl plugin if not already installed
+# 如果尚未安装，将 CLI 安装为 kubectl 插件
 go install ./cmd/kubectl-ate
 
-# Create the atespace (required before creating actors).
+# 创建 atespace（创建 Actor 前必须存在）。
 kubectl ate create atespace mfcc
 
-# Create the actor in the atespace, using the mf-cc template.
+# 在 atespace 中创建 Actor，使用 mf-cc 模板。
 kubectl ate create actor mfcc -a mfcc --template ate-demo-mf-cc/mf-cc
 ```
 
-The actor starts as `STATUS_SUSPENDED` — it will auto-resume on the first
-request through the router (see step 4). Check the actor status with:
+Actor 初始状态为 `STATUS_SUSPENDED` — 它将在通过路由器发出第一个请求时自动恢复
+（参见第 4 步）。使用以下命令检查 Actor 状态：
 
 ```bash
 kubectl ate get actor mfcc -a mfcc
 ```
 
-### 4. Port-Forward the Router
+### 4. 端口转发路由器
 
-To reach the actor through the Substrate router:
+通过 Substrate 路由器访问 Actor：
 
 ```bash
-# Port-forward the Atenet Router. Pick a free host port (8080 may already be
-# taken by a local service, so 58880 is a safe choice).
+# 端口转发 Atenet 路由器。选择一个空闲的主机端口（8080 可能已被本地服务占用，
+# 因此 58880 是一个安全的选择）。
 kubectl port-forward -n ate-system svc/atenet-router 58880:80
 ```
 
-The actor is reachable at the DNS name
-`<actor-name>.<atespace>.actors.resources.substrate.ate.dev`, i.e.
-`mfcc.mfcc.actors.resources.substrate.ate.dev`.
+Actor 的 DNS 地址为
+`<actor-name>.<atespace>.actors.resources.substrate.ate.dev`，即
+`mfcc.mfcc.actors.resources.substrate.ate.dev`。
 
-## How to Use
+## 如何使用
 
-The actor is reachable through the atenet-router port-forward. There are two
-ways to access it:
+Actor 可通过 atenet-router 端口转发访问。有两种访问方式：
 
-- **Option A: mfcc-nginx proxy (recommended).** Build and run the local nginx
-  reverse proxy that sets the `Host` header automatically — no `/etc/hosts`
-  editing needed.
-- **Option B: /etc/hosts + Host header.** Manually set up the Host header
-  via `/etc/hosts` or curl.
+- **方案 A：mfcc-nginx 代理（推荐）。** 构建并运行本地 nginx 反向代理，自动设
+  置 `Host` 请求头 — 无需编辑 `/etc/hosts`。
+- **方案 B：/etc/hosts + Host 请求头。** 通过 `/etc/hosts` 或 curl 手动设置
+  Host 请求头。
 
-### Option A: mfcc-nginx proxy (recommended)
+### 方案 A：mfcc-nginx 代理（推荐）
 
-The `mfcc-nginx` image is a thin nginx reverse proxy that forwards all requests
-to the atenet-router port-forward (`58880`) with the correct `Host` header
-(`mfcc.mfcc.actors.resources.substrate.ate.dev`). It listens on port `58881`.
+`mfcc-nginx` 镜像是一个轻量级的 nginx 反向代理，将所有请求转发到
+atenet-router 的端口转发地址（`58880`），并携带正确的 `Host` 请求头
+（`mfcc.mfcc.actors.resources.substrate.ate.dev`）。它监听 `58881` 端口。
 
-No `/etc/hosts` edits are required — just point your browser at
-`http://localhost:58881`.
+无需编辑 `/etc/hosts` — 只需在浏览器中打开 `http://localhost:58881`。
 
 ```bash
-# Build and run (from the demos/mf-cc directory)
+# 构建并运行（在 demos/mf-cc 目录中执行）
 ./build-image.sh
 ./run-nginx.sh
 ```
 
 > [!NOTE]
-> The container uses `--network host` so it can reach the kubectl
-> port-forward on the host's loopback. If using Docker Desktop (macOS / Windows),
-> omit `--network host` and replace `127.0.0.1:58880` in `nginx.conf` with
-> `host.docker.internal:58880` (proxy target), then run:
-> `docker run -d -p 58881:58881 --name mfcc-nginx mfcc-nginx`.
+> 容器使用 `--network host` 以访问宿主机环回地址上的 kubectl 端口转发。如果使用
+> Docker Desktop（macOS / Windows），请去掉 `--network host` 并将
+> `nginx.conf` 中的 `127.0.0.1:58880` 替换为 `host.docker.internal:58880`
+> （代理目标），然后运行：
+> `docker run -d -p 58881:58881 --name mfcc-nginx mfcc-nginx`。
 
-To stop and remove the container:
+停止并移除容器：
 
 ```bash
 docker stop mfcc-nginx && docker rm mfcc-nginx
 ```
 
-### Option B: /etc/hosts + Host header
+### 方案 B：/etc/hosts + Host 请求头
 
-1. Point a browser at the actor's DNS name, either by adding an `/etc/hosts`
-   entry or by using a tool that sends the `Host` header:
+1. 通过添加 `/etc/hosts` 条目或使用发送 `Host` 请求头的工具，将浏览器指向 Actor
+   的 DNS 地址：
 
    ```bash
-   # /etc/hosts (one-time):
+   # /etc/hosts（一次性操作）：
    echo "127.0.0.1 mfcc.mfcc.actors.resources.substrate.ate.dev" | sudo tee -a /etc/hosts
-   # then open http://mfcc.mfcc.actors.resources.substrate.ate.dev:58880
+   # 然后打开 http://mfcc.mfcc.actors.resources.substrate.ate.dev:58880
    ```
 
-   Or with curl, using the `Host` header instead of `/etc/hosts`:
+   或使用 curl 直接携带 `Host` 请求头：
 
    ```bash
    curl -H "Host: mfcc.mfcc.actors.resources.substrate.ate.dev" http://127.0.0.1:58880/
    ```
 
-2. The first request through the router resumes the actor automatically.
-   The initial response may be `503` while the server starts up — wait a few
-   seconds and retry. Verify the actor is now `STATUS_RUNNING` and assigned to a
-   worker pod:
+2. 通过路由器发出的第一个请求会自动恢复 Actor。初始响应可能为 `503`，因为服务
+   器正在启动 — 等待几秒后重试。确认 Actor 已变为 `STATUS_RUNNING` 并已分配到
+   某个 worker pod：
 
    ```bash
    kubectl ate get actor mfcc -a mfcc
    ```
 
-3. Health check (should return `200` once the server is up):
+3. 健康检查（服务器启动后应返回 `200`）：
 
    ```bash
    curl -H "Host: mfcc.mfcc.actors.resources.substrate.ate.dev" http://127.0.0.1:58880/health
    ```
 
-4. The web UI and WebSocket (session chat at `/ws/<sessionId>`) work through the
-   router — WebSocket upgrades are allowed by the router's RouteAction
-   `upgradeConfigs`.
+4. Web UI 和 WebSocket（`/ws/<sessionId>` 的会话聊天）均可通过路由器工作 —
+   路由器的 RouteAction `upgradeConfigs` 允许 WebSocket 升级。
 
-### Verify persistence
+### 验证持久化
 
-Session data lives in the `durableDir` mounted at `/root/.claude`. To confirm
-it survives a suspend/resume:
+会话数据存储在挂载于 `/root/.claude` 的 `durableDir` 中。确认它在挂起/恢复后仍
+然存在：
 
 ```bash
-# Create some state in the UI (settings, a project, …), then suspend:
+# 在 UI 中创建一些状态（设置、项目等），然后挂起：
 kubectl ate suspend actor mfcc -a mfcc
-# Resume it again:
+# 再将其恢复：
 kubectl ate resume actor mfcc -a mfcc
 ```
 
-The saved state should still be present after resume.
+恢复后之前保存的状态应该仍然存在。
 
-## How to Uninstall
+## 如何卸载
 
-To remove the mf-cc demo resources from your cluster:
+从集群中移除 mf-cc 演示资源：
 
 ```bash
 ./hack/install-ate.sh --delete-demo-mf-cc
 ```
 
 > [!NOTE]
-> The demo uses `onPause: Data` / `onCommit: Data` snapshots. Because mf-cc is
-> a long-lived web server, a full memory snapshot on every pause would be slow;
-> sessions persist via the `durableDir` instead. On resume the process restarts
-> from the snapshot and reads its persisted state from disk, so active
-> WebSocket connections drop and the page should be refreshed.
+> 此演示使用 `onPause: Data` / `onCommit: Data` 快照。由于 mf-cc 是一个长期运
+> 行的 Web 服务器，每次挂起时进行完整的内存快照会很慢；会话数据改为通过
+> `durableDir` 持久化。恢复时进程从快照重新启动，并从磁盘读取其持久化状态，因此
+> 活跃的 WebSocket 连接会断开，需要刷新页面。
