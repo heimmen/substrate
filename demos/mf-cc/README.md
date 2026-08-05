@@ -136,11 +136,9 @@ No `/etc/hosts` edits are required — just point your browser at
 `http://localhost:58881`.
 
 ```bash
-# Build the image (from the demos/mf-cc directory)
+# Build and run (from the demos/mf-cc directory)
 ./build-image.sh
-
-# Run the container
-docker run -d -p 58881:58881 --name mfcc-nginx --network host mfcc-nginx
+./run-nginx.sh
 ```
 
 > [!NOTE]
