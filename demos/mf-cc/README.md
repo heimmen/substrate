@@ -146,8 +146,7 @@ docker run -d -p 58881:58881 --name mfcc-nginx --network host mfcc-nginx
 > [!NOTE]
 > The container uses `--network host` so it can reach the kubectl
 > port-forward on the host's loopback. If using Docker Desktop (macOS / Windows),
-> omit `--network host` and replace `127.0.0.11` in `nginx.conf` with
-> `host.docker.internal` (DNS resolver) and `mfcc.mfcc...:58880` with
+> omit `--network host` and replace `127.0.0.1:58880` in `nginx.conf` with
 > `host.docker.internal:58880` (proxy target), then run:
 > `docker run -d -p 58881:58881 --name mfcc-nginx mfcc-nginx`.
 
