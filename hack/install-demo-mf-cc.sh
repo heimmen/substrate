@@ -60,12 +60,18 @@ demo-mf-cc_deploy() {
   log_step "  workload image: ${MFCC_IMAGE}"
   log_step "  pause image: ${PAUSE_IMAGE}"
 
+  # Number of physical workers; bounds max concurrently-active users.
+  # Defaults to 4 when unset (per MULTI_USER_PLAN.md).
+  MFCC_WORKER_REPLICAS="${MFCC_WORKER_REPLICAS:-4}"
+  log_step "  worker replicas: ${MFCC_WORKER_REPLICAS}"
+
   sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
       -e "s|\${ANTHROPIC_AUTH_TOKEN}|${ANTHROPIC_AUTH_TOKEN}|g" \
       -e "s|\${ANTHROPIC_BASE_URL}|${ANTHROPIC_BASE_URL}|g" \
       -e "s|\${ANTHROPIC_MODEL}|${ANTHROPIC_MODEL}|g" \
       -e "s|\${MFCC_DIGEST}|${MFCC_DIGEST}|g" \
       -e "s|\${PAUSE_DIGEST}|${PAUSE_DIGEST}|g" \
+      -e "s|\${MFCC_WORKER_REPLICAS}|${MFCC_WORKER_REPLICAS}|g" \
       demos/mf-cc/mf-cc.yaml.tmpl \
     | run_ko apply -f -
 }
@@ -82,6 +88,7 @@ demo-mf-cc_delete() {
       -e "s|\${ANTHROPIC_MODEL}|placeholder|g" \
       -e "s|\${MFCC_DIGEST}|placeholder|g" \
       -e "s|\${PAUSE_DIGEST}|placeholder|g" \
+      -e "s|\${MFCC_WORKER_REPLICAS}|1|g" \
       demos/mf-cc/mf-cc.yaml.tmpl \
     | run_kubectl delete --ignore-not-found -f -
 }
@@ -89,5 +96,6 @@ demo-mf-cc_delete() {
 demo-mf-cc_usage() {
   echo ""
   echo "  Required env: ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, BUCKET_NAME, KO_DOCKER_REPO"
+  echo "  Optional env: MFCC_WORKER_REPLICAS (default 4; max concurrently-active users)"
   echo "  See demos/mf-cc/DEPLOY_PLAN.md for the walkthrough."
 }

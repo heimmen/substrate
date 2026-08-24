@@ -74,7 +74,9 @@ metadata:
   labels:
     workload: mf-cc
 spec:
-  replicas: 1
+  # Number of physical workers; bounds the max number of concurrently-active
+  # (non-suspended) users. Configurable via ${MFCC_WORKER_REPLICAS} (default 4).
+  replicas: ${MFCC_WORKER_REPLICAS}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
 ---
@@ -103,6 +105,11 @@ spec:
       value: "0.0.0.0"
     - name: CLAUDE_H5_ALLOW_ALL_ORIGINS
       value: "1"
+    # Anchor cc-haha (Claude Code) config + chat history to the durableDir
+    # mount (/root/.claude) so sessions persist across suspend/resume. History
+    # lives under <CLAUDE_CONFIG_DIR>/projects/<sanitized-cwd>/<sessionId>.jsonl.
+    - name: CLAUDE_CONFIG_DIR
+      value: /root/.claude
     - name: ANTHROPIC_AUTH_TOKEN
       valueFrom:
         secretKeyRef:
