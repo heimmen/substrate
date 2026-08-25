@@ -1,0 +1,321 @@
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>mf-cc 用户管理</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --border: #e2e5ea;
+    --text: #1f2329;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --danger: #dc2626;
+    --green: #16a34a;
+    --green-bg: #dcfce7;
+    --gray: #6b7280;
+    --gray-bg: #f3f4f6;
+    --blue: #2563eb;
+    --blue-bg: #dbeafe;
+    --red: #dc2626;
+    --red-bg: #fee2e2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .container { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  form { display: flex; gap: 8px; }
+  input[type="text"] {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  button {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+    background: var(--accent);
+    color: #fff;
+  }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  button.secondary { background: #eef0f3; color: var(--text); }
+  button.danger { background: var(--danger); }
+  button.mini { padding: 4px 10px; font-size: 13px; }
+  #msg {
+    padding: 10px 12px;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 14px;
+    display: none;
+  }
+  #msg.ok { display: block; background: var(--green-bg); color: var(--green); }
+  #msg.err { display: block; background: var(--red-bg); color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.green { background: var(--green-bg); color: var(--green); }
+  .badge.gray { background: var(--gray-bg); color: var(--gray); }
+  .badge.blue { background: var(--blue-bg); color: var(--blue); }
+  .badge.red { background: var(--red-bg); color: var(--red); }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+  #empty { color: var(--muted); text-align: center; padding: 24px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>mf-cc 用户管理</h1>
+    <div class="sub" id="atespace-info">正在加载 atespace 信息…</div>
+  </div>
+  <div class="toolbar" style="margin-bottom: 0">
+    <button class="secondary" id="refresh-btn">刷新</button>
+  </div>
+</header>
+
+<div class="container">
+  <div id="msg"></div>
+
+  <div class="card">
+    <h2>添加用户</h2>
+    <form id="add-form">
+      <input type="text" id="name-input" placeholder="用户名（DNS-1123：小写字母、数字、中划线）"
+             autocomplete="off" spellcheck="false" />
+      <button type="submit">添加</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>用户列表</h2>
+    <div id="empty" style="display:none">暂无用户</div>
+    <table id="user-table" style="display:none">
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>状态</th>
+          <th>模板</th>
+          <th>ATEOM Pod</th>
+          <th>IP</th>
+          <th>版本</th>
+          <th>年龄</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="user-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var atespace = null;
+
+  function showMsg(text, isErr) {
+    var el = document.getElementById("msg");
+    el.className = isErr ? "err" : "ok";
+    el.textContent = text;
+  }
+
+  function clearMsg() {
+    document.getElementById("msg").className = "";
+    document.getElementById("msg").textContent = "";
+  }
+
+  function badgeClass(status) {
+    if (status === "STATUS_RUNNING") return "green";
+    if (status === "STATUS_SUSPENDED") return "gray";
+    if (status === "STATUS_SUSPENDING" || status === "STATUS_PAUSING" ||
+        status === "STATUS_RESUMING") return "blue";
+    if (status === "STATUS_CRASHED") return "red";
+    return "gray";
+  }
+
+  function statusLabel(status) {
+    var labels = {
+      STATUS_RUNNING: "运行中",
+      STATUS_SUSPENDED: "已挂起",
+      STATUS_SUSPENDING: "挂起中",
+      STATUS_PAUSING: "暂停中",
+      STATUS_PAUSED: "已暂停",
+      STATUS_RESUMING: "恢复中",
+      STATUS_CRASHED: "崩溃"
+    };
+    return labels[status] || status;
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function renderUsers(users) {
+    var table = document.getElementById("user-table");
+    var empty = document.getElementById("empty");
+    var body = document.getElementById("user-body");
+    body.innerHTML = "";
+
+    if (!users || users.length === 0) {
+      table.style.display = "none";
+      empty.style.display = "block";
+      return;
+    }
+    table.style.display = "table";
+    empty.style.display = "none";
+
+    users.forEach(function (u) {
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="mono">' + esc(u.name) + "</td>" +
+        '<td><span class="badge ' + badgeClass(u.status) + '">' + esc(statusLabel(u.status)) + "</span></td>" +
+        '<td class="mono">' + esc(u.template) + "</td>" +
+        '<td class="mono">' + esc(u.ateomPod) + "</td>" +
+        '<td class="mono">' + esc(u.ip) + "</td>" +
+        "<td>" + esc(u.version) + "</td>" +
+        "<td>" + esc(u.age) + "</td>" +
+        '<td><button class="danger mini" data-name="' + esc(u.name) + '">删除</button></td>';
+      tr.querySelector("button").addEventListener("click", function () {
+        deleteUser(u.name);
+      });
+      body.appendChild(tr);
+    });
+  }
+
+  function listUsers() {
+    fetch("api/users")
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (j) {
+            throw new Error((j && j.error) || ("HTTP " + res.status));
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        atespace = data.atespace;
+        document.getElementById("atespace-info").textContent =
+          "atespace: " + esc(data.atespace) + " · 每 5 秒自动刷新";
+        renderUsers(data.users);
+      })
+      .catch(function (err) {
+        showMsg("列出用户失败：" + err.message, true);
+      });
+  }
+
+  function deleteUser(name) {
+    if (!window.confirm("确认删除用户 \"" + name + "\"？其 durableDir / 历史会话将一并删除。")) {
+      return;
+    }
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name), { method: "DELETE" })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("删除成功：" + (j.message || name));
+        listUsers();
+      })
+      .catch(function (err) {
+        showMsg("删除失败：" + err.message, true);
+      });
+  }
+
+  function createUser(name) {
+    clearMsg();
+    fetch("api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name })
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("添加用户：" + (j.message || "成功"));
+        document.getElementById("name-input").value = "";
+        listUsers();
+      })
+      .catch(function (err) {
+        showMsg("添加失败：" + err.message, true);
+      });
+  }
+
+  document.getElementById("add-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var input = document.getElementById("name-input");
+    var name = input.value.trim();
+    if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name)) {
+      showMsg("非法用户名：必须匹配 DNS-1123（小写字母、数字、中划线）", true);
+      return;
+    }
+    createUser(name);
+  });
+
+  document.getElementById("refresh-btn").addEventListener("click", listUsers);
+
+  listUsers();
+  setInterval(listUsers, 5000);
+})();
+</script>
+</body>
+</html>

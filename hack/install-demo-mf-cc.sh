@@ -74,6 +74,11 @@ demo-mf-cc_deploy() {
       -e "s|\${MFCC_WORKER_REPLICAS}|${MFCC_WORKER_REPLICAS}|g" \
       demos/mf-cc/mf-cc.yaml.tmpl \
     | run_ko apply -f -
+
+  # The user-management UI pod is part of the same template; wait for it so
+  # the proxy at /usermanagement/ has an upstream by the time deploy returns.
+  log_step "Waiting for mfcc-admin to be ready..."
+  run_kubectl rollout status deployment/mfcc-admin -n ate-demo-mf-cc --timeout=120s
 }
 
 demo-mf-cc_delete() {
@@ -97,5 +102,7 @@ demo-mf-cc_usage() {
   echo ""
   echo "  Required env: ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, BUCKET_NAME, KO_DOCKER_REPO"
   echo "  Optional env: MFCC_WORKER_REPLICAS (default 4; max concurrently-active users)"
+  echo "  Deploys: mf-cc actors + the mfcc-admin user-management UI"
+  echo "  UI access: http://<hostname>:58881/usermanagement/ (via run-nginx.sh)"
   echo "  See demos/mf-cc/DEPLOY_PLAN.md for the walkthrough."
 }

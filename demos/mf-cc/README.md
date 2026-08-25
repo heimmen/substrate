@@ -71,6 +71,8 @@ MFCC_WORKER_REPLICAS=4 \
 - 创建 provider-config `Secret` 以及允许 `ate-api-server` 读取它用于环境变量解析
   的 RBAC 规则。
 - 创建 `WorkerPool` 和 `ActorTemplate`。
+- 创建 `mfcc-admin` Deployment 与 Service（用户管理 Web UI，见下文
+  [用户管理 UI（Web 界面）](#用户管理-uiweb-界面)）。
 
 Provider 配置存储在 Secret 中，并通过 `valueFrom.secretKeyRef` 引用，因此密钥不
 会出现在 git 中。
@@ -117,6 +119,10 @@ kubectl ate get actor alice -a mfcc
 kubectl port-forward -n ate-system svc/atenet-router 58880:80
 ```
 
+> [!NOTE]
+> 也可直接运行 `./run-nginx.sh`，它会自动启动上述 port-forward（以及管理 UI 的
+> `58882` port-forward）并运行 nginx 代理，无需手动执行。
+
 每个用户的 Actor 的 DNS 地址为
 `<username>.<atespace>.actors.resources.substrate.ate.dev`，即
 `alice.mfcc.actors.resources.substrate.ate.dev`。
@@ -145,6 +151,10 @@ mf-cc 现在支持**多用户**：每个用户对应一个独立 Actor，拥有�
 ```
 
 > [!NOTE]
+> `run-nginx.sh` 会自动启动两个 kubectl port-forward（`58880` → atenet-router、
+> `58882` → mfcc-admin 管理 UI；已被占用的端口会跳过），再运行 nginx 容器。
+
+> [!NOTE]
 > 容器使用 `--network host` 以访问宿主机环回地址上的 kubectl 端口转发。如果使用
 > Docker Desktop（macOS / Windows），请去掉 `--network host` 并将
 > `nginx.conf` 中的 `127.0.0.1:58880` 替换为 `host.docker.internal:58880`
@@ -171,8 +181,8 @@ mf-cc 前端对 API / WebSocket / 静态资源的请求都是**相对 origin** �
 
 > [!NOTE]
 > **保留名**：`api`、`assets`、`ws`、`sdk`、`callback`、`auth`、`proxy`、
-> `preview-fs`、`local-file`、`health` 为系统保留前缀，不能作为用户名（路径模式
-> 下会被当作系统路径处理）。
+> `preview-fs`、`local-file`、`health`、`usermanagement` 为系统保留前缀，不能作为
+> 用户名（路径模式下会被当作系统路径处理）。
 
 ### 方式二：免 nginx 直连（curl + Host 头）
 
@@ -222,6 +232,36 @@ Web UI 和 WebSocket（`/ws/<sessionId>` 的会话聊天）均可通过路由器
 > **幂等语义**：`create-user.sh` 先检查 actor 是否已存在，存在则提示"reusing
 > existing session"并跳过创建。这保证了"无实例则建、有实例则复用原历史"。直接对
 > 已存在的 actor 名重复 `kubectl ate create actor` 会返回 `AlreadyExists` 错误。
+
+### 用户管理 UI（Web 界面）
+
+除脚本外，还提供了一个**基于 Web 的用户管理界面**。它随
+`--deploy-demo-mf-cc` 一并部署（`mfcc-admin` Deployment + Service，一个纯 Go
+HTTP 服务器，直接通过 gRPC 调用 ate-api-server），功能与三个脚本一致：
+
+- **列出用户**：名称、状态、模板、ATEOM Pod、IP、版本、年龄（对应 `list-users.sh`）
+- **添加用户**：幂等，已存在则复用现有会话（对应 `create-user.sh`）
+- **删除用户**：先挂起再删除（对应 `delete-user.sh`）
+
+访问方式：`http://<hostname>:58881/usermanagement/`（经 mfcc-nginx 代理转发到
+`mfcc-admin` Service）。
+
+```bash
+# 一条命令：启动 58880 / 58882 两个 port-forward + nginx 代理
+./run-nginx.sh
+```
+
+等价的手动命令：
+
+```bash
+kubectl port-forward -n ate-system svc/atenet-router 58880:80
+kubectl port-forward -n ate-demo-mf-cc svc/mfcc-admin 58882:8080
+# 再构建并运行 nginx 代理：
+./build-image.sh && docker run -d -p 58881:58881 --name mfcc-nginx --network host mfcc-nginx
+```
+
+> [!NOTE]
+> `/usermanagement/` 是保留路径，**不能**作为用户名使用。
 
 ### 容量配置
 
@@ -299,9 +339,77 @@ Actor 初始为 `STATUS_SUSPENDED`，通过路由器发出第一个请求时才�
 仍在启动，**等待几秒后重试**即可。可通过 `./list-users.sh` 确认状态已变为
 `STATUS_RUNNING`。
 
+### Actor 卡在 `STATUS_RESUMING`（gVisor sandbox 启动失败）
+
+**现象**：Actor 一直处于 `STATUS_RESUMING`，无法恢复为 `STATUS_RUNNING`，且 worker
+pod 日志反复出现：
+
+```
+FATAL ERROR: creating container: cannot create sandbox: cannot read client sync file: waiting for sandbox to start: EOF
+```
+
+**原因**：`ateom-gvisor` 工作负载镜像被错误地构建在过小的基础镜像（如
+`pause`/scratch）之上，导致 gVisor sandbox 无法在该 rootfs 上初始化。这通常发生在
+离线环境（无法访问 `gcr.io`）下，用 `KO_DEFAULTBASEIMAGE` 覆盖基础镜像时——该变量
+会作用于**所有** ko 构建的镜像（包括 `ateom-gvisor`），从而把 worker 镜像也重建到
+了错误的 base 上。
+
+**解决**：用正确的基础镜像重建 `ateom-gvisor`，并把 WorkerPool 指回新镜像：
+
+```bash
+# 1) 把本地已缓存的基础镜像推入本地仓库（离线环境下 gcr.io 不可达）
+docker tag gcr.io/distroless/static-debian13:latest localhost:5001/distroless-static-debian13:latest
+docker push localhost:5001/distroless-static-debian13:latest
+
+# 2) 用正确的 base 重建 ateom-gvisor（记下输出的 @sha256:... digest）
+KO_DEFAULTBASEIMAGE=localhost:5001/distroless-static-debian13:latest \
+  KO_DOCKER_REPO=localhost:5001 \
+  ko build ./cmd/ateom-gvisor --platform=linux/amd64
+
+# 3) 把 WorkerPool 指回新镜像
+kubectl patch workerpool mf-cc-workerpool -n ate-demo-mf-cc --type=merge \
+  -p '{"spec":{"ateomImage":"localhost:5001/ateom-gvisor-...@sha256:<digest>"}}'
+
+# 4) 等待滚动更新完成，然后访问该用户触发恢复
+kubectl rollout status deployment mf-cc-workerpool -n ate-demo-mf-cc --timeout=120s
+```
+
+> [!NOTE]
+> 部署时若需覆盖基础镜像，务必指向**完整**的运行时（如
+> `distroless/static-debian13`），而不是 `pause` 之类的极简镜像。覆盖纯静态 Go 二
+> 进制（如管理 UI）的 base 是安全的，但覆盖 `ateom-gvisor` 会破坏 gVisor。
+
+### `/usermanagement/` 打不开（404 或被当作用户路径路由）
+
+**现象**：`http://<hostname>:58881/usermanagement/` 无法打开。
+
+**原因**：`mfcc-nginx` 镜像是根据 `nginx.conf` 构建的。修改 `nginx.conf`（例如新增
+`/usermanagement/` 路由）后**必须重新构建并重启该容器**，否则容器内仍是旧配置，
+`/usermanagement/` 会落入用户路径正则而被路由到错误的 actor。
+
+**解决**：
+
+```bash
+cd demos/mf-cc
+./build-image.sh        # 重建 mfcc-nginx 镜像
+docker rm -f mfcc-nginx # 移除旧容器
+./run-nginx.sh          # 重新运行（会自动启动两个 port-forward）
+```
+
+同时确认管理 UI 的 port-forward 存在：
+
+```bash
+kubectl port-forward -n ate-demo-mf-cc svc/mfcc-admin 58882:8080
+```
+
+> [!NOTE]
+> `/usermanagement/` 由 nginx 前缀 location 路由到 `127.0.0.1:58882`（管理 UI 的
+> port-forward），它不属于任何 actor，也**不能**作为用户名。
+
 ## 如何卸载
 
-从集群中移除 mf-cc 演示资源：
+从集群中移除 mf-cc 演示资源（包括 `mfcc-admin` 用户管理 UI 的
+Deployment / Service / RBAC）：
 
 ```bash
 ./hack/install-ate.sh --delete-demo-mf-cc

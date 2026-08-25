@@ -140,3 +140,85 @@ spec:
   volumes:
   - name: cc-data
     durableDir: {}
+
+---
+
+# mf-cc user-management UI. A tiny Go HTTP server that proxies to the
+# ateapi Control gRPC service to list/create/delete users (each user is one
+# Actor in the mfcc atespace). It is served through the mfcc-nginx proxy at
+# /usermanagement/. It authenticates in-cluster with a projected SA token
+# (audience api.ate-system.svc) and trusts the servicedns ClusterTrustBundle
+# for the ateapi serving cert — no extra RBAC is needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mfcc-admin
+  namespace: ate-demo-mf-cc
+  labels:
+    app: mfcc-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mfcc-admin
+  template:
+    metadata:
+      labels:
+        app: mfcc-admin
+    spec:
+      containers:
+      - name: mfcc-admin
+        image: ko://github.com/agent-substrate/substrate/demos/mf-cc/admin
+        ports:
+        - containerPort: 8080
+        env:
+        - name: ATESPACE
+          value: mfcc
+        - name: ACTOR_TEMPLATE_NAMESPACE
+          value: ate-demo-mf-cc
+        - name: ACTOR_TEMPLATE_NAME
+          value: mf-cc
+        - name: ATEAPI_ADDR
+          value: dns:///api.ate-system.svc:443
+        - name: ATEAPI_CA_FILE
+          value: /run/servicedns-ca/trust-bundle.pem
+        - name: ATEAPI_TOKEN_FILE
+          value: /run/ateapi-token/token
+        volumeMounts:
+        - name: ateapi-token
+          mountPath: /run/ateapi-token
+          readOnly: true
+        - name: servicedns-ca
+          mountPath: /run/servicedns-ca
+          readOnly: true
+      volumes:
+      - name: ateapi-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+      - name: servicedns-ca
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mfcc-admin
+  namespace: ate-demo-mf-cc
+spec:
+  selector:
+    app: mfcc-admin
+  ports:
+  - port: 8080
+    targetPort: 8080
