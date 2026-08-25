@@ -98,6 +98,8 @@ limitations under the License.
   th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  td a, td a:visited { color: var(--accent); text-decoration: none; }
+  td a:hover { text-decoration: underline; }
   .badge {
     display: inline-block;
     padding: 2px 10px;
@@ -219,8 +221,10 @@ limitations under the License.
 
     users.forEach(function (u) {
       var tr = document.createElement("tr");
+      // 用户名链接到对应的 agent 页面：http://<hostname>:58881/<username>/
+      var agentUrl = window.location.origin + "/" + encodeURIComponent(u.name) + "/";
       tr.innerHTML =
-        '<td class="mono">' + esc(u.name) + "</td>" +
+        '<td class="mono"><a href="' + esc(agentUrl) + '" target="_blank" rel="noopener" title="打开 agent 页面">' + esc(u.name) + "</a></td>" +
         '<td><span class="badge ' + badgeClass(u.status) + '">' + esc(statusLabel(u.status)) + "</span></td>" +
         '<td class="mono">' + esc(u.template) + "</td>" +
         '<td class="mono">' + esc(u.ateomPod) + "</td>" +
