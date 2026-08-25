@@ -35,9 +35,11 @@ type fakeControlClient struct {
 	actors           map[string]*ateapipb.Actor
 	atespaces        map[string]*ateapipb.Atespace
 	created          []*ateapipb.Actor
+	resumed          []string
 	suspended        []string
 	deleted          []string
 	atespacesCreated []string
+	resumeErr        error
 }
 
 func newFake() *fakeControlClient {
@@ -83,6 +85,19 @@ func (f *fakeControlClient) CreateActor(_ context.Context, req *ateapipb.CreateA
 	f.actors[actKey(a.GetMetadata().GetAtespace(), a.GetMetadata().GetName())] = a
 	f.created = append(f.created, a)
 	return a, nil
+}
+
+func (f *fakeControlClient) ResumeActor(_ context.Context, req *ateapipb.ResumeActorRequest, _ ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
+	a, ok := f.actors[actKey(req.GetActor().GetAtespace(), req.GetActor().GetName())]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "actor not found")
+	}
+	a.Status = ateapipb.Actor_STATUS_RUNNING
+	f.resumed = append(f.resumed, a.GetMetadata().GetName())
+	return &ateapipb.ResumeActorResponse{Actor: a}, nil
 }
 
 func (f *fakeControlClient) SuspendActor(_ context.Context, req *ateapipb.SuspendActorRequest, _ ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error) {
@@ -241,9 +256,61 @@ func TestHandleCreateUserAutoCreatesAtespace(t *testing.T) {
 	if _, ok := f.actors["mfcc/alice"]; !ok {
 		t.Errorf("actor mfcc/alice was not created")
 	}
+	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
+		t.Errorf("resumed = %v, want [alice]", f.resumed)
+	}
+	if got := f.actors["mfcc/alice"].GetStatus(); got != ateapipb.Actor_STATUS_RUNNING {
+		t.Errorf("alice status = %v, want STATUS_RUNNING", got)
+	}
 	resp := decode[map[string]any](t, rec)
 	if resp["message"] != "创建成功" {
 		t.Errorf("message = %v, want 创建成功", resp["message"])
+	}
+}
+
+func TestHandleCreateUserResumesActor(t *testing.T) {
+	f := newFake()
+	f.atespaces["mfcc"] = &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: "mfcc"}}
+	s := newTestServer(f)
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Message string      `json:"message"`
+		User    userSummary `json:"user"`
+	}](t, rec)
+	if resp.Message != "创建成功" {
+		t.Errorf("message = %q, want 创建成功", resp.Message)
+	}
+	if resp.User.Status != "STATUS_RUNNING" {
+		t.Errorf("user status = %q, want STATUS_RUNNING", resp.User.Status)
+	}
+}
+
+func TestHandleCreateUserResumeFailureStillSucceeds(t *testing.T) {
+	f := newFake()
+	f.atespaces["mfcc"] = &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: "mfcc"}}
+	f.resumeErr = status.Error(codes.FailedPrecondition, "no free workers available")
+	s := newTestServer(f)
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := f.actors["mfcc/alice"]; !ok {
+		t.Errorf("actor mfcc/alice was not created despite resume failure")
+	}
+	resp := decode[struct {
+		Message string      `json:"message"`
+		User    userSummary `json:"user"`
+	}](t, rec)
+	if !strings.Contains(resp.Message, "立即恢复失败") {
+		t.Errorf("message = %q, want to mention resume failure", resp.Message)
+	}
+	if resp.User.Status != "STATUS_SUSPENDED" {
+		t.Errorf("user status = %q, want STATUS_SUSPENDED", resp.User.Status)
 	}
 }
 

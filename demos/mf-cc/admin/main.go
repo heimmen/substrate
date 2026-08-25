@@ -77,6 +77,7 @@ type controlClient interface {
 	ListActors(ctx context.Context, req *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error)
 	GetActor(ctx context.Context, req *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
 	CreateActor(ctx context.Context, req *ateapipb.CreateActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
+	ResumeActor(ctx context.Context, req *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error)
 	DeleteActor(ctx context.Context, req *ateapipb.DeleteActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
 	SuspendActor(ctx context.Context, req *ateapipb.SuspendActorRequest, opts ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error)
 	GetAtespace(ctx context.Context, req *ateapipb.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error)
@@ -183,7 +184,9 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// Resume can block while the workload boots, so allow more time than the
+	// plain create path.
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 
 	// Ensure the atespace exists before creating actors in it.
@@ -221,7 +224,19 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建用户失败: " + err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"message": "创建成功", "user": s.summarize(actor)})
+
+	// Resume immediately so the user's agent page is openable without the
+	// lazy first-request 503. If resume fails (e.g. no free workers), the
+	// actor still exists and the page will lazily resume on first access.
+	resumed, err := s.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref})
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": "创建成功，但立即恢复失败（可稍后打开页面触发恢复）：" + err.Error(),
+			"user":    s.summarize(actor),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"message": "创建成功", "user": s.summarize(resumed.GetActor())})
 }
 
 // handleDeleteUser mirrors the fixed delete-user.sh: suspend first (the API
