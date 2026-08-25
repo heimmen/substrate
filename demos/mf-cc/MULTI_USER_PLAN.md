@@ -14,20 +14,28 @@
 - 路由器按 `Host` 头解析 `<actor>.<atespace>.actors.resources.substrate.ate.dev`，每个用户有自己的 DNS 名，如 `alice.mfcc.actors.resources.substrate.ate.dev`
 - Actor 首次请求自动恢复（`STATUS_SUSPENDED` → 自动 resume），空闲挂起释放 worker
 
-用户访问方式（已确认）：**子域名 per 用户**。`alice` 访问 `http://alice.localhost:58881`，nginx 用正则提取子域名 → 设置对应 `Host` 头 → 转发到 `127.0.0.1:58880`（kubectl port-forward）。
+用户访问方式（已确认）：**路径 per 用户 + cookie 路由**。`alice` 访问
+`http://<hostname>:58881/alice`，nginx 从路径第一段提取用户名 → 写入 `mfcc_user`
+cookie → 设置对应 `Host` 头 → 转发到 `127.0.0.1:58880`（kubectl port-forward）。
+后续 `/api`、`/ws`、`/assets` 等 origin-relative 请求靠 cookie 路由回同一 actor。
 
 ## 变更清单
 
-### 1. `demos/mf-cc/nginx.conf` — 子域名路由
+### 1. `demos/mf-cc/nginx.conf` — 路径路由 + cookie 路由
 
-重写为两个 server 块：
+重写为单个 server 块（路径访问 `http://<hostname>:58881/<username>`）：
 
-- **用户路由块**：`server_name ~^(?<username>[a-z0-9-]+)\.localhost$`
-  - `proxy_set_header Host $username.mfcc.actors.resources.substrate.ate.dev;`（atespace `mfcc` 用 `set` 变量保留，便于修改）
-  - `proxy_pass http://127.0.0.1:58880;`（静态 IP，无 DNS 解析问题）
-  - 保留 WebSocket 升级头（`proxy_http_version 1.1` + `Upgrade`/`Connection: upgrade`）
-- **默认/落地块**：`server_name localhost 127.0.0.1;` + `default_server`
-  - 返回纯文本提示页：说明访问方式 `http://<username>.localhost:58881` 及对应关系
+- **用户入口**：`location ~ ^/(?<username>[a-z0-9-]+)$`
+  - 写入 `mfcc_user` cookie，302 跳转到 `/<username>/`（规范化路径）
+- **用户范围路径**：`location ~ ^/(?<username>[a-z0-9-]+)/(?<rest>.*)$`
+  - 写 cookie、剥离 `/<username>` 前缀、
+    `proxy_set_header Host $username.mfcc.actors.resources.substrate.ate.dev;`
+  - `proxy_pass http://127.0.0.1:58880/$rest$is_args$args;`（静态 IP，无 DNS 解析问题）
+- **系统路径（保留前缀）**：`location ~ ^/(api|assets|ws|sdk|callback|auth|proxy|preview-fs|local-file|health)(/|$)`
+  - 读取 `mfcc_user` cookie 路由（mf-cc 前端的 `/api`、`/ws`、`/assets` 都是
+    origin-relative，URL 里不带用户名）
+- **落地页**：`location = /` 返回纯文本提示页，说明 `http://<hostname>:58881/<username>`
+- 所有代理 location 保留 WebSocket 升级头（`proxy_http_version 1.1` + `Upgrade`/`Connection: upgrade`）
 
 ### 2. `demos/mf-cc/mf-cc.yaml.tmpl` — WorkerPool 容量配置化 + 历史目录显式锚定
 
@@ -82,11 +90,12 @@
 
 ### 5. `demos/mf-cc/README.md` — 文档更新（中文）
 
-- "如何使用"章节改为多用户模式：`http://<username>.localhost:58881`
-- 说明 `*.localhost` 在 systemd-resolved / RFC 6761 下默认解析到 127.0.0.1；若无效则回退到 `/etc/hosts`（`127.0.0.1 alice.localhost`）
+- "如何使用"章节改为多用户路径模式：`http://<hostname>:58881/<username>`
+- 说明 cookie 路由原理（首次访问写 `mfcc_user` cookie，后续 `/api`/`/ws`/`/assets`
+  靠 cookie 路由）及系统保留用户名清单
 - 新增用户管理章节：`./create-user.sh alice`、`./list-users.sh`、`./delete-user.sh alice`
 - 部署章节注明 `MFCC_WORKER_REPLICAS`（默认 4，决定最大同时在线用户数）
-- 保留 "Option B: /etc/hosts + Host 头" 作为免 nginx 的直连方式（`alice.mfcc.actors.resources.substrate.ate.dev`）
+- 保留 "方式二：curl + Host 头" 作为免 nginx 的直连方式（`alice.mfcc.actors.resources.substrate.ate.dev`）
 
 ## 不需要改动的部分
 
@@ -111,10 +120,11 @@ cd demos/mf-cc
 # 4. 构建并启动 nginx 代理
 ./build-image.sh && ./run-nginx.sh
 
-# 5. 验证路由（*.localhost → 127.0.0.1）
-curl -s -o /dev/null -w "%{http_code}\n" http://alice.localhost:58881/          # 首次可能 503（actor 恢复中），重试应为 200
-curl -s -o /dev/null -w "%{http_code}\n" http://alice.localhost:58881/health    # 200
-curl -s -o /dev/null -w "%{http_code}\n" http://bob.localhost:58881/health      # 200（不同 Actor）
+# 5. 验证路径路由（http://<hostname>:58881/<username>）
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:58881/alice    # 302（写 cookie 后跳 /alice/）
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:58881/alice/   # 首次可能 503（actor 恢复中），重试应为 200
+curl -s -o /dev/null -w "%{http_code}\n" -H "Cookie: mfcc_user=alice" http://localhost:58881/health  # 200
+curl -s -o /dev/null -w "%{http_code}\n" -H "Cookie: mfcc_user=bob"   http://localhost:58881/health  # 200（不同 Actor）
 
 # 6. 验证数据隔离：alice 与 bob 的 /root/.claude 各自独立（各自有独立 durableDir）
 #    可在 UI 中为 alice 建立一次会话，确认 durableDir 中生成 JSONL：
@@ -127,7 +137,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://bob.localhost:58881/health      
 # 8. 验证历史会话加载：挂起/恢复后，alice 的会话历史仍在
 kubectl ate suspend actor alice -a mfcc
 kubectl ate resume actor alice -a mfcc
-#   重新打开 http://alice.localhost:58881，确认上次会话/历史仍可恢复
+#   重新打开 http://localhost:58881/alice，确认上次会话/历史仍可恢复
 
 # 9. 验证管理脚本
 ./list-users.sh    # 应列出 alice、bob
@@ -137,7 +147,7 @@ kubectl ate resume actor alice -a mfcc
 
 ## 进度清单
 
-- [x] 重写 nginx.conf 支持子域名路由（*.localhost → 对应 Actor）
+- [x] 重写 nginx.conf 支持路径路由 + cookie 路由（`http://<hostname>:58881/<username>` → 对应 Actor）
 - [x] mf-cc.yaml.tmpl：WorkerPool replicas 改为 ${MFCC_WORKER_REPLICAS}（默认 4）
 - [x] mf-cc.yaml.tmpl：容器 env 显式新增 CLAUDE_CONFIG_DIR=/root/.claude（锚定历史会话到 durableDir）
 - [x] install-demo-mf-cc.sh 支持 MFCC_WORKER_REPLICAS 变量替换

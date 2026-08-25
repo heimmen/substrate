@@ -126,28 +126,17 @@ kubectl port-forward -n ate-system svc/atenet-router 58880:80
 mf-cc 现在支持**多用户**：每个用户对应一个独立 Actor，拥有独立的
 `durableDir`（数据隔离），可加载各自的历史会话。
 
-用户通过**子域名**访问：`http://<username>.localhost:58881`。有两种方式：
+用户通过**路径**访问：`http://<hostname>:58881/<username>`（例如
+`http://localhost:58881/alice`）。
 
-- **方案 A：mfcc-nginx 代理（推荐）。** 构建并运行本地 nginx 反向代理，从子域名
-  自动提取用户名并设置对应 `Host` 头 — 无需编辑 `/etc/hosts`。
-- **方案 B：/etc/hosts + Host 请求头。** 通过 `/etc/hosts` 或 curl 手动设置
-  Host 请求头。
+### 方式一：mfcc-nginx 代理（推荐）
 
-### 方案 A：mfcc-nginx 代理（推荐）
+`mfcc-nginx` 镜像是一个轻量级的 nginx 反向代理，监听 `58881` 端口，将所有请求
+转发到 atenet-router 的端口转发地址（`58880`）。它从 URL 路径的第一段提取用户名
+并设置 `Host: <username>.mfcc.actors.resources.substrate.ate.dev`，使请求路由到对
+应用户的 Actor。
 
-`mfcc-nginx` 镜像是一个轻量级的 nginx 反向代理，将所有请求转发到
-atenet-router 的端口转发地址（`58880`）。它监听 `58881` 端口。
-
-它通过正则从子域名提取用户名（`~^(?<username>[a-z0-9-]+)\.localhost$`），并设置
-`Host: <username>.mfcc.actors.resources.substrate.ate.dev`，使请求路由到对应用户
-的 Actor。访问示例：`http://alice.localhost:58881`、`http://bob.localhost:58881`。
-
-无需编辑 `/etc/hosts` — 只需在浏览器中打开 `http://<username>.localhost:58881`。
-
-> [!NOTE]
-> **`*.localhost` 解析**：按 RFC 6761 / systemd-resolved，`*.localhost` 通常默认
-> 解析到 `127.0.0.1`。若你的环境不解析子域，可在 `/etc/hosts` 中显式添加：
-> `127.0.0.1 alice.localhost bob.localhost`。
+无需编辑 `/etc/hosts` — 直接在浏览器打开 `http://<hostname>:58881/<username>` 即可。
 
 ```bash
 # 构建并运行（在 demos/mf-cc 目录中执行）
@@ -168,7 +157,24 @@ atenet-router 的端口转发地址（`58880`）。它监听 `58881` 端口。
 docker stop mfcc-nginx && docker rm mfcc-nginx
 ```
 
-### 方案 B：/etc/hosts + Host 请求头
+#### 工作原理（cookie 路由）
+
+mf-cc 前端对 API / WebSocket / 静态资源的请求都是**相对 origin** 发出的
+（`/api/...`、`/ws/<sessionId>`、`/assets/...`），URL 里不带用户名。因此代理采用
+**cookie 路由**：
+
+1. 首次访问 `/<username>` → nginx 写入 `mfcc_user` cookie，302 跳转到
+   `/<username>/`（规范化路径，保证相对资源稳定解析）。
+2. `/<username>/<rest...>` → 剥离 `/<username>` 前缀，设置对应 `Host` 头转发。
+3. 后续 `/api/...`、`/ws/...`、`/assets/...`、`/health` 等系统路径 → 读取
+   `mfcc_user` cookie 路由回同一 actor。
+
+> [!NOTE]
+> **保留名**：`api`、`assets`、`ws`、`sdk`、`callback`、`auth`、`proxy`、
+> `preview-fs`、`local-file`、`health` 为系统保留前缀，不能作为用户名（路径模式
+> 下会被当作系统路径处理）。
+
+### 方式二：免 nginx 直连（curl + Host 头）
 
 每个用户的 Actor DNS 名为 `<username>.mfcc.actors.resources.substrate.ate.dev`。
 如需免 nginx 直连，可手动设置 Host 头：
@@ -176,14 +182,6 @@ docker stop mfcc-nginx && docker rm mfcc-nginx
 ```bash
 # 使用 curl 直接携带 Host 请求头（以 alice 为例）：
 curl -H "Host: alice.mfcc.actors.resources.substrate.ate.dev" http://127.0.0.1:58880/
-```
-
-或通过 `/etc/hosts` + 浏览器访问：
-
-```bash
-# /etc/hosts（一次性操作，可加多个用户）：
-echo "127.0.0.1 alice.mfcc.actors.resources.substrate.ate.dev" | sudo tee -a /etc/hosts
-# 然后打开 http://alice.mfcc.actors.resources.substrate.ate.dev:58880
 ```
 
 通过路由器发出的第一个请求会自动恢复 Actor。初始响应可能为 `503`，因为服务
@@ -196,11 +194,14 @@ kubectl ate get actor alice -a mfcc
 健康检查（服务器启动后应返回 `200`）：
 
 ```bash
+# 通过代理（需先访问过 /alice 以写入 cookie）：
+curl -H "Cookie: mfcc_user=alice" http://localhost:58881/health
+# 或直连（手动 Host 头）：
 curl -H "Host: alice.mfcc.actors.resources.substrate.ate.dev" http://127.0.0.1:58880/health
 ```
 
-4. Web UI 和 WebSocket（`/ws/<sessionId>` 的会话聊天）均可通过路由器工作 —
-   路由器的 RouteAction `upgradeConfigs` 允许 WebSocket 升级。
+Web UI 和 WebSocket（`/ws/<sessionId>` 的会话聊天）均可通过路由器工作 —
+路由器的 RouteAction `upgradeConfigs` 允许 WebSocket 升级。
 
 ### 用户管理
 
@@ -246,6 +247,57 @@ kubectl ate resume actor alice -a mfcc
 恢复后，alice 的聊天历史应仍可加载。历史以 JSONL 保存在
 `<CLAUDE_CONFIG_DIR>/projects/<sanitized-cwd>/<sessionId>.jsonl`（即
 `/root/.claude/projects/.../xxx.jsonl`）。
+
+## 故障排查
+
+### 访问用户时返回 503：`no free workers available`
+
+**现象**：浏览器打开 `http://<hostname>:58881/<username>`（或直连
+`curl -H "Host: <username>.mfcc.actors.resources.substrate.ate.dev" http://127.0.0.1:58880/`）
+返回 `503`，响应体为：
+
+```
+actor "<username>" unavailable: no free workers available
+```
+
+**原因**：WorkerPool 的 `replicas` 数量小于同时活跃（未挂起）的用户数。每个并发
+活跃用户占用一个 worker；当所有 worker 都被占满时，新用户无法被恢复。
+
+**排查**：
+
+```bash
+# 1) 查看 WorkerPool 副本数（DESIRED / REPLICAS）
+kubectl get workerpool -n ate-demo-mf-cc
+
+# 2) 查看当前有多少用户处于 STATUS_RUNNING（每个占用一个 worker）
+./list-users.sh
+```
+
+如果 `REPLICAS` 小于（或等于）处于 `STATUS_RUNNING` 的用户数，就会出现该错误。
+
+**解决**：
+
+```bash
+# 方式一：临时扩容（仅对当前集群生效；重新部署会被覆盖）
+kubectl scale workerpool mf-cc-workerpool -n ate-demo-mf-cc --replicas=4
+
+# 方式二：重新部署时设置 MFCC_WORKER_REPLICAS（持久化）
+MFCC_WORKER_REPLICAS=4 ./hack/install-ate-kind.sh --deploy-demo-mf-cc
+```
+
+扩容后再次访问该用户即可触发恢复。
+
+> [!NOTE]
+> 旧集群可能是在 `MFCC_WORKER_REPLICAS` 默认值（4）生效之前部署的，其
+> WorkerPool 可能仍是 `replicas: 1`。如果升级了 `install-demo-mf-cc.sh` 但未重新
+> 部署，请用上面的方式一直接扩容，或用方式二重新部署。
+
+### 首次访问返回 503（服务正在启动）
+
+Actor 初始为 `STATUS_SUSPENDED`，通过路由器发出第一个请求时才自动恢复。首次请求
+可能返回 `503`（如 `upstream connect error ... connection failure`），这是服务器
+仍在启动，**等待几秒后重试**即可。可通过 `./list-users.sh` 确认状态已变为
+`STATUS_RUNNING`。
 
 ## 如何卸载
 
