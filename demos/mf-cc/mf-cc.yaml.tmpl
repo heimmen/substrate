@@ -105,9 +105,6 @@ spec:
       value: "0.0.0.0"
     - name: CLAUDE_H5_ALLOW_ALL_ORIGINS
       value: "1"
-    # Anchor cc-haha (Claude Code) config + chat history to the durableDir
-    # mount (/root/.claude) so sessions persist across suspend/resume. History
-    # lives under <CLAUDE_CONFIG_DIR>/projects/<sanitized-cwd>/<sessionId>.jsonl.
     - name: CLAUDE_CONFIG_DIR
       value: /root/.claude
     - name: ANTHROPIC_AUTH_TOKEN
@@ -125,21 +122,16 @@ spec:
         secretKeyRef:
           name: mf-cc-provider-config
           key: ANTHROPIC_MODEL
-    volumeMounts:
-    - name: cc-data
-      mountPath: /root/.claude
   workerSelector:
     matchLabels:
       workload: mf-cc
   snapshotsConfig:
-    # Data-only snapshots: this is a long-lived web server, a full memory
-    # snapshot on every pause would be slow. Sessions persist via durableDir.
-    onPause: Data
-    onCommit: Data
+    # Full snapshots: this demo no longer mounts a durableDir volume, and Data
+    # snapshots require one, so we use Full (process memory + filesystem delta).
+    # A full snapshot on pause is slower but needs no durableDir.
+    onPause: Full
+    onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-cc/
-  volumes:
-  - name: cc-data
-    durableDir: {}
 
 ---
 
