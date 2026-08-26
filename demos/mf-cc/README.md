@@ -4,8 +4,8 @@
 示。mf-cc 是一个基于 Bun 的 HTTP + WebSocket 服务器，提供基于 React 的 AI 编码工
 作台（REST API 在 `/api/*`，WebSocket 在 `/ws/*`，静态前端在 `/*`）。
 
-将其作为 Substrate Actor 运行可获得挂起/恢复、快照和持久化存储的能力，使得会话和
-配置在挂起与恢复之间能够持续存在。
+将其作为 Substrate Actor 运行可获得挂起/恢复与快照的能力：挂起时对进程内存和容器
+文件系统做 Full 快照，恢复时原样还原，会话和配置因此在挂起与恢复之间持续存在。
 
 ## 前提条件
 
@@ -43,8 +43,35 @@ docker push localhost:5001/pause:3.10.2
 
 ### 2. 部署
 
-设置 provider 环境变量（参见 cc-haha 仓库中的 `.env` 文件），然后部署。可选设置
-`MFCC_WORKER_REPLICAS`（默认 `4`，决定最大同时活跃用户数）：
+#### 方式一：`./deploy.sh`（推荐）
+
+在 `demos/mf-cc` 目录下直接运行。所有配置均为可选，未设置时回退到
+kind/离线友好的默认值（`KO_DOCKER_REPO=localhost:5001`、
+`BUCKET_NAME=ate-snapshots`、`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`、
+`ANTHROPIC_MODEL=deepseek-v4-flash`、`MFCC_WORKER_REPLICAS=16`）。
+`ANTHROPIC_AUTH_TOKEN` 未导出时会尝试从上一次部署创建的
+`mf-cc-provider-config` Secret 中读取：
+
+```bash
+cd demos/mf-cc
+# 首次部署（或需要更换配置时）显式设置：
+ANTHROPIC_AUTH_TOKEN=<token> \
+ANTHROPIC_BASE_URL=<base-url> \
+ANTHROPIC_MODEL=<model> \
+./deploy.sh
+# 之后直接重跑即可（token 从既有 Secret 读取，配置不变）：
+./deploy.sh
+```
+
+> [!NOTE]
+> GKE 上请显式设置 `BUCKET_NAME=<真实的 GCS bucket>`；kind/k3s 上用默认值即可
+> （集群内 rustfs 存储）。
+
+#### 方式二：`hack/install-ate.sh`
+
+通过安装脚本部署（`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、
+`ANTHROPIC_MODEL`、`BUCKET_NAME`、`KO_DOCKER_REPO` 必须设置；
+`MFCC_WORKER_REPLICAS` 可选，默认 `4`，决定最大同时活跃用户数）：
 
 ```bash
 # GKE 上（BUCKET_NAME = 真实的 GCS bucket）：
@@ -64,7 +91,7 @@ MFCC_WORKER_REPLICAS=4 \
 ./hack/install-ate-kind.sh --deploy-demo-mf-cc
 ```
 
-此命令将会：
+两种方式都会：
 
 - 从镜像仓库中解析 mf-cc 和 pause 镜像的摘要固定引用。
 - 创建 `ate-demo-mf-cc` 命名空间。
@@ -102,8 +129,9 @@ kubectl ate create atespace mfcc
 kubectl ate create actor alice -a mfcc --template ate-demo-mf-cc/mf-cc
 ```
 
-Actor 初始状态为 `STATUS_SUSPENDED` — 它将在通过路由器发出第一个请求时自动恢复
-（参见第 4 步）。使用以下命令检查 Actor 状态：
+脚本创建的 Actor 初始状态为 `STATUS_SUSPENDED` — 它将在通过路由器发出第一个请
+求时自动恢复（参见第 4 步；管理 UI 添加的用户则会被立即恢复，见下文）。使用以下
+命令检查 Actor 状态：
 
 ```bash
 kubectl ate get actor alice -a mfcc
@@ -129,8 +157,8 @@ kubectl port-forward -n ate-system svc/atenet-router 58880:80
 
 ## 如何使用（多用户）
 
-mf-cc 现在支持**多用户**：每个用户对应一个独立 Actor，拥有独立的
-`durableDir`（数据隔离），可加载各自的历史会话。
+mf-cc 现在支持**多用户**：每个用户对应一个独立 Actor（数据彼此隔离），
+各自拥有独立的内存/文件系统状态，可加载自己的历史会话。
 
 用户通过**路径**访问：`http://<hostname>:58881/<username>`（例如
 `http://localhost:58881/alice`）。
@@ -225,7 +253,7 @@ Web UI 和 WebSocket（`/ws/<sessionId>` 的会话聊天）均可通过路由器
 # 列出所有用户
 ./list-users.sh
 
-# 删除用户 alice（连同其 durableDir / 历史一起删除）
+# 删除用户 alice（连同其快照 / 历史一起删除）
 ./delete-user.sh alice
 ```
 
@@ -235,12 +263,17 @@ Web UI 和 WebSocket（`/ws/<sessionId>` 的会话聊天）均可通过路由器
 
 ### 用户管理 UI（Web 界面）
 
-除脚本外，还提供了一个**基于 Web 的用户管理界面**。它随
-`--deploy-demo-mf-cc` 一并部署（`mfcc-admin` Deployment + Service，一个纯 Go
-HTTP 服务器，直接通过 gRPC 调用 ate-api-server），功能与三个脚本一致：
+除脚本外，还提供了一个**基于 Web 的用户管理界面**。它随演示一并部署
+（`deploy.sh` / `--deploy-demo-mf-cc`，`mfcc-admin` Deployment + Service，一个
+纯 Go HTTP 服务器，直接通过 gRPC 调用 ate-api-server），功能与三个脚本一致：
 
-- **列出用户**：名称、状态、模板、ATEOM Pod、IP、版本、年龄（对应 `list-users.sh`）
-- **添加用户**：幂等，已存在则复用现有会话（对应 `create-user.sh`）
+- **列出用户**：名称、状态、模板、ATEOM Pod、IP、版本、年龄（对应
+  `list-users.sh`）；用户名渲染为链接，点击在新标签页打开对应用户的
+  Agent 页面（`http://<hostname>:58881/<username>/`）
+- **添加用户**：幂等，已存在则复用现有会话；创建成功后会**立即恢复**该
+  Actor，新建用户的 Agent 页面无需等待懒恢复即可直接打开（对应
+  `create-user.sh`；若恢复失败——例如没有空闲 worker——用户仍会创建成功，
+  页面会在首次访问时再触发恢复）
 - **删除用户**：先挂起再删除（对应 `delete-user.sh`）
 
 访问方式：`http://<hostname>:58881/usermanagement/`（经 mfcc-nginx 代理转发到
@@ -265,17 +298,21 @@ kubectl port-forward -n ate-demo-mf-cc svc/mfcc-admin 58882:8080
 
 ### 容量配置
 
-`WorkerPool` 的副本数由环境变量 `MFCC_WORKER_REPLICAS` 控制（默认 `4`），决定
-**最大同时活跃（未挂起）用户数**。部署时设置：
+`WorkerPool` 的副本数由环境变量 `MFCC_WORKER_REPLICAS` 控制，决定
+**最大同时活跃（未挂起）用户数**：`./deploy.sh` 默认 `16`，
+`hack/install-ate.sh` 默认 `4`。部署时设置：
 
 ```bash
+MFCC_WORKER_REPLICAS=8 ./deploy.sh
+# 或
 MFCC_WORKER_REPLICAS=8 ... ./hack/install-ate.sh --deploy-demo-mf-cc
 ```
 
 ### 验证持久化
 
-会话历史与配置存储在挂载于 `/root/.claude` 的 `durableDir` 中（由
-`CLAUDE_CONFIG_DIR` 显式锚定）。确认它在挂起/恢复后仍然存在：
+本演示不再挂载 `durableDir` 卷，会话历史与配置随容器的文件系统一起保存在
+Full 快照中（`CLAUDE_CONFIG_DIR` 将其锚定在 `/root/.claude`）。确认它在
+挂起/恢复后仍然存在：
 
 ```bash
 # 在 UI 中为 alice 建立会话，然后挂起：
@@ -334,10 +371,10 @@ MFCC_WORKER_REPLICAS=4 ./hack/install-ate-kind.sh --deploy-demo-mf-cc
 
 ### 首次访问返回 503（服务正在启动）
 
-Actor 初始为 `STATUS_SUSPENDED`，通过路由器发出第一个请求时才自动恢复。首次请求
-可能返回 `503`（如 `upstream connect error ... connection failure`），这是服务器
-仍在启动，**等待几秒后重试**即可。可通过 `./list-users.sh` 确认状态已变为
-`STATUS_RUNNING`。
+脚本创建的 Actor 初始为 `STATUS_SUSPENDED`，通过路由器发出第一个请求时才自动恢
+复。首次请求可能返回 `503`（如 `upstream connect error ... connection failure`），
+这是服务器仍在启动，**等待几秒后重试**即可。可通过 `./list-users.sh` 确认状态已
+变为 `STATUS_RUNNING`。通过管理 UI 添加的用户会被立即恢复，通常不会遇到此情况。
 
 ### Actor 卡在 `STATUS_RESUMING`（gVisor sandbox 启动失败）
 
@@ -416,7 +453,7 @@ Deployment / Service / RBAC）：
 ```
 
 > [!NOTE]
-> 此演示使用 `onPause: Data` / `onCommit: Data` 快照。由于 mf-cc 是一个长期运
-> 行的 Web 服务器，每次挂起时进行完整的内存快照会很慢；会话数据改为通过
-> `durableDir` 持久化。恢复时进程从快照重新启动，并从磁盘读取其持久化状态，因此
-> 活跃的 WebSocket 连接会断开，需要刷新页面。
+> 此演示使用 `onPause: Full` / `onCommit: Full` 快照（进程内存 + 文件系统差量，
+> 不再挂载 `durableDir`）。mf-cc 是长期运行的 Web 服务器，完整的内存快照在挂起
+> 时较慢，但无需额外的持久卷。恢复时进程从快照原样还原，但活跃的 WebSocket
+> 连接会断开，需要刷新页面。
