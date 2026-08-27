@@ -231,8 +231,13 @@ limitations under the License.
         '<td class="mono">' + esc(u.ip) + "</td>" +
         "<td>" + esc(u.version) + "</td>" +
         "<td>" + esc(u.age) + "</td>" +
-        '<td><button class="danger mini" data-name="' + esc(u.name) + '">删除</button></td>';
-      tr.querySelector("button").addEventListener("click", function () {
+        '<td><button class="secondary mini" data-name="' + esc(u.name) + '">重置密码</button> ' +
+        '<button class="danger mini" data-name="' + esc(u.name) + '">删除</button></td>';
+      var buttons = tr.querySelectorAll("button");
+      buttons[0].addEventListener("click", function () {
+        resetPassword(u.name);
+      });
+      buttons[1].addEventListener("click", function () {
         deleteUser(u.name);
       });
       body.appendChild(tr);
@@ -281,6 +286,27 @@ limitations under the License.
       });
   }
 
+  function resetPassword(name) {
+    if (!window.confirm("确认重置用户 \"" + name + "\" 的访问密码？旧密码将立即失效。")) {
+      return;
+    }
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name) + "/password", { method: "POST" })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("用户 " + esc(j.name) + " 的新访问密码：" + j.password +
+          "（仅显示一次，请立即复制并告知用户）");
+      })
+      .catch(function (err) {
+        showMsg("重置密码失败：" + err.message, true);
+      });
+  }
+
   function createUser(name) {
     clearMsg();
     fetch("api/users", {
@@ -295,7 +321,11 @@ limitations under the License.
         });
       })
       .then(function (j) {
-        showMsg("添加用户：" + (j.message || "成功"));
+        var msg = "添加用户：" + (j.message || "成功");
+        if (j.password) {
+          msg += "；访问密码：" + j.password + "（仅显示一次，请立即复制并告知用户）";
+        }
+        showMsg(msg);
         document.getElementById("name-input").value = "";
         listUsers();
       })

@@ -40,9 +40,24 @@ port_forward() {
 port_forward 58880 ate-system atenet-router 80
 port_forward 58882 ate-demo-mf-cc mfcc-admin 8080
 
+# Fixed credentials for the /usermanagement/ Basic Auth. Override via env:
+#   ADMIN_USER=... ADMIN_PASSWORD=... ./run-nginx.sh
+ADMIN_USER="${ADMIN_USER:-admin}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-mf@pass2026}"
+
+# Generate an htpasswd file and bind-mount it over the baked-in default so the
+# env-overridden credentials take effect. Use a stable path (must outlive the
+# container) and make it world-readable (0644): the nginx worker runs as a
+# non-root user and cannot read a mktemp-created 0600 file.
+HTPASSWD_FILE="${TMPDIR:-/tmp}/mfcc-admin.htpasswd"
+printf '%s:%s\n' "$ADMIN_USER" "$(openssl passwd -apr1 "$ADMIN_PASSWORD")" > "$HTPASSWD_FILE"
+chmod 644 "$HTPASSWD_FILE"
+
 docker rm -f mfcc-nginx 2>/dev/null || true
-docker run -d -p 58881:58881 --name mfcc-nginx --network host mfcc-nginx
+docker run -d -p 58881:58881 --name mfcc-nginx --network host \
+  -v "$HTPASSWD_FILE:/etc/nginx/mfcc-admin.htpasswd:ro" \
+  mfcc-nginx
 
 echo "mfcc-nginx running."
 echo "  users:          http://localhost:58881/<username>"
-echo "  management UI:  http://localhost:58881/usermanagement/"
+echo "  management UI:  http://localhost:58881/usermanagement/ (login: ${ADMIN_USER}/${ADMIN_PASSWORD})"

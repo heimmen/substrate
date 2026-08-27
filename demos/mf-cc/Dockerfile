@@ -14,4 +14,5 @@
 
 FROM nginx:latest
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY mfcc-admin.htpasswd /etc/nginx/mfcc-admin.htpasswd
 EXPOSE 58881

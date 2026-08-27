@@ -210,7 +210,8 @@ mf-cc 前端对 API / WebSocket / 静态资源的请求都是**相对 origin** �
 > [!NOTE]
 > **保留名**：`api`、`assets`、`ws`、`sdk`、`callback`、`auth`、`proxy`、
 > `preview-fs`、`local-file`、`health`、`usermanagement` 为系统保留前缀，不能作为
-> 用户名（路径模式下会被当作系统路径处理）。
+> 用户名（路径模式下会被当作系统路径处理）。`_mfcc_auth` 为 nginx 内部鉴权
+> location（`internal`），不对外提供服务。
 
 ### 方式二：免 nginx 直连（curl + Host 头）
 
@@ -232,9 +233,10 @@ kubectl ate get actor alice -a mfcc
 健康检查（服务器启动后应返回 `200`）：
 
 ```bash
-# 通过代理（需先访问过 /alice 以写入 cookie）：
-curl -H "Cookie: mfcc_user=alice" http://localhost:58881/health
-# 或直连（手动 Host 头）：
+# 通过代理（需先访问过 /alice 以写入 cookie）。若 alice 是通过 Web UI 创建、有
+# 密码的用户，需携带 Basic Auth（用户名=alice，密码=分配的一次性密码）：
+curl -u alice:<password> -H "Cookie: mfcc_user=alice" http://localhost:58881/health
+# 或直连（手动 Host 头；绕过 nginx 鉴权）：
 curl -H "Host: alice.mfcc.actors.resources.substrate.ate.dev" http://127.0.0.1:58880/health
 ```
 
@@ -270,10 +272,10 @@ Web UI 和 WebSocket（`/ws/<sessionId>` 的会话聊天）均可通过路由器
 - **列出用户**：名称、状态、模板、ATEOM Pod、IP、版本、年龄（对应
   `list-users.sh`）；用户名渲染为链接，点击在新标签页打开对应用户的
   Agent 页面（`http://<hostname>:58881/<username>/`）
-- **添加用户**：幂等，已存在则复用现有会话；创建成功后会**立即恢复**该
-  Actor，新建用户的 Agent 页面无需等待懒恢复即可直接打开（对应
-  `create-user.sh`；若恢复失败——例如没有空闲 worker——用户仍会创建成功，
-  页面会在首次访问时再触发恢复）
+- **添加用户**：幂等，已存在则复用现有会话；创建成功后会**自动生成一次性访问
+  密码**（见下文「鉴权」），并**立即恢复**该 Actor，新建用户的 Agent 页面无需
+  等待懒恢复即可直接打开（对应 `create-user.sh`；若恢复失败——例如没有空闲
+  worker——用户仍会创建成功，页面会在首次访问时再触发恢复）
 - **删除用户**：先挂起再删除（对应 `delete-user.sh`）
 
 访问方式：`http://<hostname>:58881/usermanagement/`（经 mfcc-nginx 代理转发到
@@ -295,6 +297,26 @@ kubectl port-forward -n ate-demo-mf-cc svc/mfcc-admin 58882:8080
 
 > [!NOTE]
 > `/usermanagement/` 是保留路径，**不能**作为用户名使用。
+
+### 鉴权
+
+mfcc-nginx 为多用户 Web UI 提供了两层鉴权：
+
+- **管理页（`/usermanagement/`）**：固定 HTTP Basic Auth。默认账号密码为
+  `admin` / `mf@pass2026`，可在运行 `run-nginx.sh` 时通过环境变量覆盖：
+  `ADMIN_USER=... ADMIN_PASSWORD=... ./run-nginx.sh`。
+- **用户 agent 页（`/<username>/...`）**：通过 Web UI 添加用户时，系统会**自动
+  生成一个一次性密码**（在 UI 中只显示一次，请立即复制并告知该用户）。用户访问
+  `http://<hostname>:58881/<username>/` 时，浏览器会弹出 Basic Auth 提示，填入
+  **用户名 = `<username>`，密码 = 分配的一次性密码** 即可进入。
+
+> [!NOTE]
+> **所有用户的 agent 页都需要密码**。未分配密码的用户（例如通过 `create-user.sh`
+> 脚本创建、或在鉴权功能上线前创建的旧用户）会被拒绝访问，需先在管理页该用户所在
+> 行点击「**重置密码**」按钮生成密码后，才能进入。
+
+如果某个用户的一次性密码丢失，可在管理页该用户所在行点击「**重置密码**」按钮，
+生成一个新的密码（旧密码立即失效，新密码同样只显示一次）。
 
 ### 容量配置
 

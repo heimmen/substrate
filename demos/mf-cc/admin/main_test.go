@@ -139,12 +139,37 @@ func (f *fakeControlClient) CreateAtespace(_ context.Context, req *ateapipb.Crea
 
 var fixedNow = time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 
+// fakePasswordStore is an in-memory passwordStore for tests.
+type fakePasswordStore struct {
+	hashes map[string]string
+}
+
+func newFakePasswordStore() *fakePasswordStore {
+	return &fakePasswordStore{hashes: map[string]string{}}
+}
+
+func (s *fakePasswordStore) Get(name string) (string, bool) {
+	h, ok := s.hashes[name]
+	return h, ok
+}
+
+func (s *fakePasswordStore) Set(name, hash string) error {
+	s.hashes[name] = hash
+	return nil
+}
+
+func (s *fakePasswordStore) Delete(name string) error {
+	delete(s.hashes, name)
+	return nil
+}
+
 func newTestServer(f *fakeControlClient) *server {
 	return &server{
 		atespace:          "mfcc",
 		templateNamespace: "ate-demo-mf-cc",
 		templateName:      "mf-cc",
 		client:            f,
+		passwords:         newFakePasswordStore(),
 		now:               func() time.Time { return fixedNow },
 	}
 }
@@ -171,8 +196,8 @@ func doRequest(s *server, method, path, body string) *httptest.ResponseRecorder 
 		s.handleListUsers(rec, req)
 	case method == http.MethodPost && path == "/api/users":
 		s.handleCreateUser(rec, req)
-	case method == http.MethodDelete && strings.HasPrefix(path, "/api/users/"):
-		s.handleDeleteUser(rec, req)
+	case strings.HasPrefix(path, "/api/users/"):
+		s.handleUserSubresource(rec, req)
 	default:
 		http.NotFound(rec, req)
 	}
@@ -358,5 +383,208 @@ func TestHandleDeleteUserSuspendsThenDeletes(t *testing.T) {
 	}
 	if _, ok := f.actors["mfcc/alice"]; ok {
 		t.Errorf("actor mfcc/alice still present after delete")
+	}
+}
+
+func TestHandleCreateUserReturnsPassword(t *testing.T) {
+	f := newFake()
+	f.atespaces["mfcc"] = &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: "mfcc"}}
+	s := newTestServer(f)
+	store := newFakePasswordStore()
+	s.passwords = store
+
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Password string `json:"password"`
+	}](t, rec)
+	if resp.Password == "" {
+		t.Fatalf("password not returned in create response")
+	}
+	hash, ok := store.Get("alice")
+	if !ok {
+		t.Fatalf("password hash not stored for alice")
+	}
+	if !checkPassword(hash, resp.Password) {
+		t.Errorf("stored hash does not match returned password")
+	}
+}
+
+func TestHandleCreateUserDuplicateNoNewPassword(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfcc", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := newFakePasswordStore()
+	s.passwords = store
+
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[map[string]any](t, rec)
+	if _, hasPw := resp["password"]; hasPw {
+		t.Errorf("unexpected password in duplicate-create response: %v", resp["password"])
+	}
+	if _, ok := store.Get("alice"); ok {
+		t.Errorf("password assigned on duplicate create")
+	}
+}
+
+func TestHandleResetPassword(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfcc", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := newFakePasswordStore()
+	s.passwords = store
+
+	oldHash, _ := hashPassword("old-secret")
+	store.Set("alice", oldHash)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/password", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Password string `json:"password"`
+	}](t, rec)
+	if resp.Password == "" {
+		t.Fatalf("new password not returned")
+	}
+	hash, ok := store.Get("alice")
+	if !ok {
+		t.Fatalf("password hash missing after reset")
+	}
+	if hash == oldHash {
+		t.Errorf("hash unchanged after reset")
+	}
+	if checkPassword(oldHash, resp.Password) {
+		t.Errorf("old hash still accepts new password")
+	}
+	if !checkPassword(hash, resp.Password) {
+		t.Errorf("new hash does not accept new password")
+	}
+}
+
+func authReq(path, cookieUser, user, pass string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/_mfcc_auth", nil)
+	if path != "" {
+		req.Header.Set("X-Original-URI", path)
+	}
+	if cookieUser != "" {
+		req.Header.Set("X-Mfcc-User", cookieUser)
+	}
+	if user != "" || pass != "" {
+		req.SetBasicAuth(user, pass)
+	}
+	return req
+}
+
+func doAuth(s *server, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	s.handleAuth(rec, req)
+	return rec
+}
+
+func TestHandleAuthDeniesUserWithoutPassword(t *testing.T) {
+	s := newTestServer(newFake())
+	rec := doAuth(s, authReq("/alice/", "", "alice", "whatever"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (no stored password -> deny)", rec.Code)
+	}
+}
+
+func TestHandleAuthCorrectPassword(t *testing.T) {
+	s := newTestServer(newFake())
+	store := newFakePasswordStore()
+	hash, _ := hashPassword("s3cret")
+	store.Set("alice", hash)
+	s.passwords = store
+
+	rec := doAuth(s, authReq("/alice/", "", "alice", "s3cret"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAuthWrongPassword(t *testing.T) {
+	s := newTestServer(newFake())
+	store := newFakePasswordStore()
+	hash, _ := hashPassword("s3cret")
+	store.Set("alice", hash)
+	s.passwords = store
+
+	rec := doAuth(s, authReq("/alice/", "", "alice", "wrong"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleAuthMissingCredentials(t *testing.T) {
+	s := newTestServer(newFake())
+	store := newFakePasswordStore()
+	hash, _ := hashPassword("s3cret")
+	store.Set("alice", hash)
+	s.passwords = store
+
+	rec := doAuth(s, authReq("/alice/", "", "", ""))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleAuthUsernameMismatch(t *testing.T) {
+	s := newTestServer(newFake())
+	store := newFakePasswordStore()
+	hash, _ := hashPassword("s3cret")
+	store.Set("alice", hash)
+	s.passwords = store
+
+	// bob presents alice's password for alice's path -> reject.
+	rec := doAuth(s, authReq("/alice/", "", "bob", "s3cret"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleAuthSystemPathUsesCookie(t *testing.T) {
+	s := newTestServer(newFake())
+	store := newFakePasswordStore()
+	hash, _ := hashPassword("s3cret")
+	store.Set("alice", hash)
+	s.passwords = store
+
+	// /api is a reserved prefix, so the target user comes from the cookie.
+	rec := doAuth(s, authReq("/api/users", "alice", "alice", "s3cret"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAuthMissingUser(t *testing.T) {
+	s := newTestServer(newFake())
+	rec := doAuth(s, authReq("", "", "alice", "s3cret"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHashPasswordCheckPassword(t *testing.T) {
+	hash, err := hashPassword("hello世界")
+	if err != nil {
+		t.Fatalf("hashPassword: %v", err)
+	}
+	if !checkPassword(hash, "hello世界") {
+		t.Errorf("checkPassword returned false for correct password")
+	}
+	if checkPassword(hash, "hello世界x") {
+		t.Errorf("checkPassword returned true for wrong password")
+	}
+	if checkPassword("garbage", "hello世界") {
+		t.Errorf("checkPassword returned true for malformed hash")
+	}
+	if checkPassword("a$b$c", "hello世界") {
+		t.Errorf("checkPassword returned true for invalid hex hash")
 	}
 }

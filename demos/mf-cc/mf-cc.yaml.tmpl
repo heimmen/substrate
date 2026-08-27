@@ -135,12 +135,57 @@ spec:
 
 ---
 
+# ConfigMap holding per-user access passwords (username -> hash). Pre-created
+# here (empty) so the mfcc-admin server only needs get/update — RBAC cannot
+# name-restrict the `create` verb, so the server never creates it itself.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mfcc-user-passwords
+  namespace: ate-demo-mf-cc
+---
+# ServiceAccount + RBAC for the mfcc-admin server to read/write the
+# mfcc-user-passwords ConfigMap. The projected ateapi-token volume below is
+# separate and still used for ateapi auth.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mfcc-admin
+  namespace: ate-demo-mf-cc
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mfcc-admin-passwords
+  namespace: ate-demo-mf-cc
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["mfcc-user-passwords"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mfcc-admin-passwords
+  namespace: ate-demo-mf-cc
+subjects:
+- kind: ServiceAccount
+  name: mfcc-admin
+  namespace: ate-demo-mf-cc
+roleRef:
+  kind: Role
+  name: mfcc-admin-passwords
+  apiGroup: rbac.authorization.k8s.io
+---
+
 # mf-cc user-management UI. A tiny Go HTTP server that proxies to the
 # ateapi Control gRPC service to list/create/delete users (each user is one
 # Actor in the mfcc atespace). It is served through the mfcc-nginx proxy at
 # /usermanagement/. It authenticates in-cluster with a projected SA token
 # (audience api.ate-system.svc) and trusts the servicedns ClusterTrustBundle
-# for the ateapi serving cert — no extra RBAC is needed.
+# for the ateapi serving cert. It runs as the mfcc-admin SA, which additionally
+# has RBAC for the mfcc-user-passwords ConfigMap.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -158,6 +203,7 @@ spec:
       labels:
         app: mfcc-admin
     spec:
+      serviceAccountName: mfcc-admin
       containers:
       - name: mfcc-admin
         image: ko://github.com/agent-substrate/substrate/demos/mf-cc/admin
@@ -176,6 +222,10 @@ spec:
           value: /run/servicedns-ca/trust-bundle.pem
         - name: ATEAPI_TOKEN_FILE
           value: /run/ateapi-token/token
+        - name: PASSWORDS_CONFIGMAP
+          value: mfcc-user-passwords
+        - name: PASSWORDS_NAMESPACE
+          value: ate-demo-mf-cc
         volumeMounts:
         - name: ateapi-token
           mountPath: /run/ateapi-token
