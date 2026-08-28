@@ -347,6 +347,90 @@ kubectl ate resume actor alice -a mfcc
 `<CLAUDE_CONFIG_DIR>/projects/<sanitized-cwd>/<sessionId>.jsonl`（即
 `/root/.claude/projects/.../xxx.jsonl`）。
 
+## 测试环境（Test Environment）
+
+除了上面的生产环境外，还提供了一套与生产**完全隔离**的测试环境，入口端口为
+`59881`（生产 `58881`）。两者可同时运行在同一台机器 / 同一个集群上，互不冲突。
+
+### 隔离概览
+
+| 项 | 生产 | 测试 |
+|---|---|---|
+| 入口端口 | `58881` | `59881` |
+| Namespace | `ate-demo-mf-cc` | `ate-demo-mf-cc-test` |
+| Atespace | `mfcc` | `mfcc-test` |
+| Router port-forward | `58880` | `59880` |
+| Admin port-forward | `58882` | `59882` |
+| Cookie 名 | `mfcc_user` | `mfcc_user_test` |
+| nginx 容器名 | `mfcc-nginx` | `mfcc-nginx-test` |
+| 工作负载标签 | `workload: mf-cc` | `workload: mf-cc-test` |
+| 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-cc/` | `gs://${BUCKET_NAME}/ate-demo-mf-cc-test/` |
+| `MFCC_WORKER_REPLICAS` 默认 | `16`（deploy.sh）/ `4`（install-ate） | `2` |
+
+> [!NOTE]
+> **为什么需要这些隔离**：Atespace 是集群级资源；nginx cookie 忽略端口（同一宿主
+> 上 `58881` 与 `59881` 共享 `mfcc_user` cookie）；worker 按标签调度且匹配范围是整
+> 个集群；路由器按 Host 头的 atespace 路由。因此测试环境必须使用不同的 atespace、
+> cookie 名、worker 标签和快照路径，才能与生产互不干扰。
+
+### 部署
+
+```bash
+cd demos/mf-cc
+ANTHROPIC_AUTH_TOKEN=<token> \
+ANTHROPIC_BASE_URL=<base-url> \
+ANTHROPIC_MODEL=<model> \
+./deploy-test.sh
+```
+
+与 `deploy.sh` 一样，所有配置均为可选，默认值与生产相同
+（`KO_DOCKER_REPO=localhost:5001`、`BUCKET_NAME=ate-snapshots`、
+`ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` 等），仅 `MFCC_WORKER_REPLICAS` 默认为
+`2`。也可通过 install-ate harness 部署 / 卸载：
+
+```bash
+./hack/install-ate.sh --deploy-demo-mf-cc-test   # 部署
+./hack/install-ate.sh --delete-demo-mf-cc-test   # 卸载
+```
+
+### 访问
+
+```bash
+cd demos/mf-cc
+./run-nginx-test.sh
+```
+
+它会自动启动两个 kubectl port-forward（`59880` → atenet-router、`59882` →
+`ate-demo-mf-cc-test` namespace 的 `mfcc-admin`），并运行 `mfcc-nginx-test` 容器
+（监听 `59881`）。该容器复用同一个 `mfcc-nginx` 镜像，但通过 bind-mount
+`nginx-test.conf` 覆盖镜像内 bake 的生产配置，并使用独立的 htpasswd 文件
+（`/tmp/mfcc-admin-test.htpasswd`）。
+
+- 用户 Agent 页：`http://localhost:59881/<username>`（cookie 为 `mfcc_user_test`）
+- 管理 UI：`http://localhost:59881/usermanagement/`（账号密码同生产，默认
+  `admin` / `mf@pass2026`，可用 `ADMIN_USER` / `ADMIN_PASSWORD` 覆盖）
+- 免 nginx 直连：`curl -H "Host: <username>.mfcc-test.actors.resources.substrate.ate.dev" http://127.0.0.1:59880/`
+
+> [!NOTE]
+> 测试 nginx 的 Host 头使用 `mfcc-test` atespace、cookie 使用 `mfcc_user_test`。
+> 若直接复用生产配置去访问测试端口，请求会被路由到生产 atespace 或读到生产 cookie，
+> 因此**必须**使用 `nginx-test.conf`。
+
+### 用户管理脚本
+
+```bash
+./create-user-test.sh alice   # 在 mfcc-test 建用户（模板 ate-demo-mf-cc-test/mf-cc）
+./list-users-test.sh          # 列出测试用户
+./delete-user-test.sh alice   # 删除测试用户
+```
+
+### 故障排查差异
+
+- 测试环境的 WorkerPool / Deployment / Service 等资源都在 `ate-demo-mf-cc-test`
+  namespace 中；排查命令只需把 namespace 换成 `ate-demo-mf-cc-test`。
+- 清理遗留的测试 port-forward：`pkill -f "port-forward.*5988[02]"`（与生产的
+  `5888x` 不冲突）。
+
 ## 故障排查
 
 ### 访问用户时返回 503：`no free workers available`
