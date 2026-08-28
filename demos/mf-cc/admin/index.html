@@ -98,6 +98,7 @@ limitations under the License.
   th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  td.actions { white-space: nowrap; }
   td a, td a:visited { color: var(--accent); text-decoration: none; }
   td a:hover { text-decoration: underline; }
   .badge {
@@ -231,13 +232,17 @@ limitations under the License.
         '<td class="mono">' + esc(u.ip) + "</td>" +
         "<td>" + esc(u.version) + "</td>" +
         "<td>" + esc(u.age) + "</td>" +
-        '<td><button class="secondary mini" data-name="' + esc(u.name) + '">重置密码</button> ' +
-        '<button class="danger mini" data-name="' + esc(u.name) + '">删除</button></td>';
+        '<td class="actions"><button class="secondary mini copy-pwd" data-name="' + esc(u.name) + '">复制密码</button> ' +
+        '<button class="secondary mini reset-pwd" data-name="' + esc(u.name) + '">重置密码</button> ' +
+        '<button class="danger mini del" data-name="' + esc(u.name) + '">删除</button></td>';
       var buttons = tr.querySelectorAll("button");
       buttons[0].addEventListener("click", function () {
-        resetPassword(u.name);
+        copyPassword(u.name);
       });
       buttons[1].addEventListener("click", function () {
+        resetPassword(u.name);
+      });
+      buttons[2].addEventListener("click", function () {
         deleteUser(u.name);
       });
       body.appendChild(tr);
@@ -283,6 +288,55 @@ limitations under the License.
       })
       .catch(function (err) {
         showMsg("删除失败：" + err.message, true);
+      });
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    // 回退方案：部分浏览器在非安全上下文（http）下禁用 Clipboard API。
+    return new Promise(function (resolve, reject) {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        ok ? resolve() : reject(new Error("复制失败"));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  function copyPassword(name) {
+    if (!window.confirm("确认重置用户 \"" + name + "\" 的访问密码并复制到剪贴板？旧密码将立即失效。")) {
+      return;
+    }
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name) + "/password", { method: "POST" })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        return copyToClipboard(j.password).then(function () {
+          showMsg("用户 " + esc(j.name) + " 的访问密码已生成并复制到剪贴板：" +
+            j.password + "（仅显示一次）");
+        }, function () {
+          // 复制失败也照常显示，方便手动复制。
+          showMsg("用户 " + esc(j.name) + " 的访问密码：" + j.password +
+            "（已生成但自动复制失败，请手动复制）");
+        });
+      })
+      .catch(function (err) {
+        showMsg("复制密码失败：" + err.message, true);
       });
   }
 
