@@ -46,6 +46,8 @@ source "${ROOT}"/hack/install-demo-agent-secret.sh
 source "${ROOT}"/hack/install-demo-multi-template.sh
 source "${ROOT}"/hack/install-demo-mf-cc.sh
 source "${ROOT}"/hack/install-demo-mf-cc-test.sh
+source "${ROOT}"/hack/install-demo-mf-pi.sh
+source "${ROOT}"/hack/install-demo-mf-pi-test.sh
 
 # ANSI color codes for prettier output
 COLOR_CYAN='\033[1;36m'

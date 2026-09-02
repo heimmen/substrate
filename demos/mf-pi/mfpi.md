@@ -212,9 +212,9 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] E4. `delete-user.sh` / `delete-user-test.sh`
 
 ### 阶段 F：install-ate.sh harness 集成
-- [ ] F1. `hack/install-demo-mf-pi.sh`
-- [ ] F2. `hack/install-demo-mf-pi-test.sh`
-- [ ] F3. 在 `hack/install-ate.sh` 追加 `source` 两行新 harness
+- [x] F1. `hack/install-demo-mf-pi.sh`（source 校验通过，`demo-mf-pi` 已注册）
+- [x] F2. `hack/install-demo-mf-pi-test.sh`（`demo-mf-pi-test` 已注册）
+- [x] F3. 在 `hack/install-ate.sh` 追加 `source` 两行新 harness
 
 ### 阶段 G：文档与验证
 - [ ] G1. 完善本文档 `demos/mf-pi/mfpi.md`（含 TODO 跟踪）
