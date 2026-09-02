@@ -199,11 +199,11 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] C3. `admin/index.html`（标题改「mf-pi 用户管理」）
 
 ### 阶段 D：nginx 反代与镜像
-- [ ] D1. `nginx.conf`（生产，listen 58681，转发 58680/58682，cookie `mfpi_user`，atespace `mfpi`）
-- [ ] D2. `nginx-test.conf`（测试，59881/59880/59882，`mfpi_user_test`，`mfpi-test`）
-- [ ] D3. `Dockerfile` + `mfpi-admin.htpasswd`
-- [ ] D4. `build-image.sh`
-- [ ] D5. `run-nginx.sh` / `run-nginx-test.sh`
+- [x] D1. `nginx.conf`（生产，listen 58681，转发 58680/58682，cookie `mfpi_user`，atespace `mfpi`；`nginx -t` 通过）
+- [x] D2. `nginx-test.conf`（测试，59881/59880/59882，`mfpi_user_test`，`mfpi-test`；`nginx -t` 通过）
+- [x] D3. `Dockerfile` + `mfpi-admin.htpasswd`
+- [x] D4. `build-image.sh`（`mfpi-nginx` 镜像构建成功）
+- [x] D5. `run-nginx.sh` / `run-nginx-test.sh`
 
 ### 阶段 E：部署与用户脚本
 - [ ] E1. `deploy.sh` / `deploy-test.sh`
