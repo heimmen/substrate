@@ -206,10 +206,10 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] D5. `run-nginx.sh` / `run-nginx-test.sh`
 
 ### 阶段 E：部署与用户脚本
-- [ ] E1. `deploy.sh` / `deploy-test.sh`
-- [ ] E2. `create-user.sh` / `create-user-test.sh`
-- [ ] E3. `list-users.sh` / `list-users-test.sh`
-- [ ] E4. `delete-user.sh` / `delete-user-test.sh`
+- [x] E1. `deploy.sh` / `deploy-test.sh`（bash -n 通过）
+- [x] E2. `create-user.sh` / `create-user-test.sh`
+- [x] E3. `list-users.sh` / `list-users-test.sh`
+- [x] E4. `delete-user.sh` / `delete-user-test.sh`
 
 ### 阶段 F：install-ate.sh harness 集成
 - [ ] F1. `hack/install-demo-mf-pi.sh`
