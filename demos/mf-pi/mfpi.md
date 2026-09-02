@@ -185,9 +185,9 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 > 逐项完成后把 `- [ ]` 改为 `- [x]`。
 
 ### 阶段 A：目录与镜像
-- [ ] A1. 新建 `demos/mf-pi/` 目录（含 `admin/` 子目录）
-- [ ] A2. 构建 `pi-web:latest` 镜像并推送 `localhost:5001/pi-web:latest`
-- [ ] A3. 确认 `localhost:5001/pause:3.10.2` 就位（与 mf-cc 共用）
+- [x] A1. 新建 `demos/mf-pi/` 目录（含 `admin/` 子目录）
+- [x] A2. 构建 `pi-web:latest` 镜像并推送 `localhost:5001/pi-web:latest`（tag 自既有 `pi-web:local`，digest `sha256:364a73cf…`）
+- [x] A3. 确认 `localhost:5001/pause:3.10.2` 就位（与 mf-cc 共用）
 
 ### 阶段 B：核心清单（ActorTemplate 等）
 - [ ] B1. `mf-pi.yaml.tmpl`（生产：Namespace/Secret/RBAC/WorkerPool/ActorTemplate/密码 ConfigMap/ServiceAccount/Deployment(mfpi-admin)/Service）
