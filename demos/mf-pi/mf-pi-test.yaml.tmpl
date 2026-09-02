@@ -1,0 +1,284 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# pi-web deployed as an actor (the mf-pi demo) — TEST environment.
+#
+# This is the test-environment counterpart of mf-pi.yaml.tmpl. It deploys into
+# the ate-demo-mf-pi-test namespace, uses the mfpi-test atespace, a distinct
+# worker label (workload=mf-pi-test) and a separate snapshot path so it never
+# collides with the production environment. Pause and workload images are
+# pinned by digest and must be pushed to ${KO_DOCKER_REPO} (localhost:5001 in
+# a kind environment) — the cluster nodes cannot reach external registries.
+#
+# See mf-pi.yaml.tmpl for why only `args` is set (the image's ENTRYPOINT
+# tini -- pi-web-bootstrap is preserved and execs the sessiond+web supervisor).
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-demo-mf-pi-test
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mf-pi-provider-config
+  namespace: ate-demo-mf-pi-test
+type: Opaque
+stringData:
+  # pi-web's built-in deepseek provider picks this up (model picker:
+  # deepseek/deepseek-chat or deepseek/deepseek-reasoner).
+  DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
+
+---
+
+# Grant ate-api-server read access to the Secret that this demo's
+# ActorTemplate references for env resolution.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ate-api-server-env-sources
+  namespace: ate-demo-mf-pi-test
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["mf-pi-provider-config"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ate-api-server-env-sources
+  namespace: ate-demo-mf-pi-test
+subjects:
+- kind: ServiceAccount
+  name: ate-api-server
+  namespace: ate-system
+roleRef:
+  kind: Role
+  name: ate-api-server-env-sources
+  apiGroup: rbac.authorization.k8s.io
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: mf-pi-workerpool
+  namespace: ate-demo-mf-pi-test
+  labels:
+    # Distinct worker label from prod (workload=mf-pi): scheduling matches
+    # workers by label across the whole cluster, so this keeps test actors on
+    # test workers and prod actors on prod workers.
+    workload: mf-pi-test
+spec:
+  # Number of physical workers; bounds the max number of concurrently-active
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 2).
+  replicas: ${MFPI_WORKER_REPLICAS}
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: mf-pi
+  namespace: ate-demo-mf-pi-test
+spec:
+  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
+  containers:
+  - name: pi-web
+    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+    # Only `args` is set (no `command`), so the image's ENTRYPOINT
+    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
+    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # and then execs this single-container supervisor (sessiond + web).
+    args:
+    - sh
+    - -c
+    - |
+      set -eu
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      pi-web-sessiond &
+      sessiond_pid=$!
+      n=0
+      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
+      if [ ! -S "$sock" ]; then
+        echo "mf-pi: sessiond socket did not appear at $sock" >&2
+        kill "$sessiond_pid" 2>/dev/null || true
+        exit 1
+      fi
+      pi-web-server &
+      web_pid=$!
+      term() { kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true; }
+      trap term TERM INT
+      set +e
+      wait "$web_pid"
+      web_status=$?
+      term
+      wait "$sessiond_pid" 2>/dev/null
+      exit "$web_status"
+    env:
+    # atenet-router forwards traffic to the actor on port 80.
+    - name: PI_WEB_PORT
+      value: "80"
+    - name: PI_WEB_HOST
+      value: "0.0.0.0"
+    # The Docker host-bridge features (docker.sock, host paths) do not apply
+    # to actor sandboxes.
+    - name: HOSTEXEC_MODE
+      value: disabled
+    - name: DEEPSEEK_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mf-pi-provider-config
+          key: DEEPSEEK_API_KEY
+  workerSelector:
+    matchLabels:
+      workload: mf-pi-test
+  snapshotsConfig:
+    # Full snapshots: no durableDir volume is mounted, and Data snapshots
+    # require one, so we use Full (process memory + filesystem delta).
+    # A full snapshot on pause is slower but needs no durableDir. Test
+    # snapshots live under a distinct prefix so they never collide with prod.
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-mf-pi-test/
+
+---
+
+# ConfigMap holding per-user access passwords (username -> hash). Pre-created
+# here (empty) so the mfpi-admin server only needs get/update — RBAC cannot
+# name-restrict the `create` verb, so the server never creates it itself.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mfpi-user-passwords
+  namespace: ate-demo-mf-pi-test
+---
+# ServiceAccount + RBAC for the mfpi-admin server to read/write the
+# mfpi-user-passwords ConfigMap. The projected ateapi-token volume below is
+# separate and still used for ateapi auth.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mfpi-admin-passwords
+  namespace: ate-demo-mf-pi-test
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["mfpi-user-passwords"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mfpi-admin-passwords
+  namespace: ate-demo-mf-pi-test
+subjects:
+- kind: ServiceAccount
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi-test
+roleRef:
+  kind: Role
+  name: mfpi-admin-passwords
+  apiGroup: rbac.authorization.k8s.io
+---
+
+# mf-pi user-management UI (TEST). Served through the mfpi-nginx-test proxy
+# at /usermanagement/; same in-cluster auth pattern as production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi-test
+  labels:
+    app: mfpi-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mfpi-admin
+  template:
+    metadata:
+      labels:
+        app: mfpi-admin
+    spec:
+      serviceAccountName: mfpi-admin
+      containers:
+      - name: mfpi-admin
+        image: ko://github.com/agent-substrate/substrate/demos/mf-pi/admin
+        ports:
+        - containerPort: 8080
+        env:
+        - name: ATESPACE
+          value: mfpi-test
+        - name: ACTOR_TEMPLATE_NAMESPACE
+          value: ate-demo-mf-pi-test
+        - name: ACTOR_TEMPLATE_NAME
+          value: mf-pi
+        - name: ATEAPI_ADDR
+          value: dns:///api.ate-system.svc:443
+        - name: ATEAPI_CA_FILE
+          value: /run/servicedns-ca/trust-bundle.pem
+        - name: ATEAPI_TOKEN_FILE
+          value: /run/ateapi-token/token
+        - name: PASSWORDS_CONFIGMAP
+          value: mfpi-user-passwords
+        - name: PASSWORDS_NAMESPACE
+          value: ate-demo-mf-pi-test
+        volumeMounts:
+        - name: ateapi-token
+          mountPath: /run/ateapi-token
+          readOnly: true
+        - name: servicedns-ca
+          mountPath: /run/servicedns-ca
+          readOnly: true
+      volumes:
+      - name: ateapi-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+      - name: servicedns-ca
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi-test
+spec:
+  selector:
+    app: mfpi-admin
+  ports:
+  - port: 8080
+    targetPort: 8080

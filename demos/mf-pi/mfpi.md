@@ -190,8 +190,8 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] A3. 确认 `localhost:5001/pause:3.10.2` 就位（与 mf-cc 共用）
 
 ### 阶段 B：核心清单（ActorTemplate 等）
-- [ ] B1. `mf-pi.yaml.tmpl`（生产：Namespace/Secret/RBAC/WorkerPool/ActorTemplate/密码 ConfigMap/ServiceAccount/Deployment(mfpi-admin)/Service）
-- [ ] B2. `mf-pi-test.yaml.tmpl`（测试：`ate-demo-mf-pi-test`/`mfpi-test`/`workload: mf-pi-test`）
+- [x] B1. `mf-pi.yaml.tmpl`（生产：Namespace/Secret/RBAC/WorkerPool/ActorTemplate/密码 ConfigMap/ServiceAccount/Deployment(mfpi-admin)/Service；渲染校验通过）
+- [x] B2. `mf-pi-test.yaml.tmpl`（测试：`ate-demo-mf-pi-test`/`mfpi-test`/`workload: mf-pi-test`；渲染校验通过）
 
 ### 阶段 C：admin Go 服务（用户管理 UI + 鉴权）
 - [ ] C1. `admin/main.go`（复制 mf-cc 并改名/改默认值/精简 reservedPrefixRe/`_mfpi_auth`/`X-Mfpi-User`）
@@ -228,6 +228,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 1. `mfpi.md`（本文档）
 2. `mf-pi.yaml.tmpl`
 3. `mf-pi-test.yaml.tmpl`
+4. `validate-templates.sh`（模板渲染校验辅助脚本）
 4. `deploy.sh`
 5. `deploy-test.sh`
 6. `Dockerfile`
