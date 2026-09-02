@@ -194,9 +194,9 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] B2. `mf-pi-test.yaml.tmpl`（测试：`ate-demo-mf-pi-test`/`mfpi-test`/`workload: mf-pi-test`；渲染校验通过）
 
 ### 阶段 C：admin Go 服务（用户管理 UI + 鉴权）
-- [ ] C1. `admin/main.go`（复制 mf-cc 并改名/改默认值/精简 reservedPrefixRe/`_mfpi_auth`/`X-Mfpi-User`）
-- [ ] C2. `admin/main_test.go`（同步改名）
-- [ ] C3. `admin/index.html`（标题改「mf-pi 用户管理」）
+- [x] C1. `admin/main.go`（复制 mf-cc 并改名/改默认值/精简 reservedPrefixRe/`_mfpi_auth`/`X-Mfpi-User`）
+- [x] C2. `admin/main_test.go`（同步改名，另增 path 解析用户与 cookie 兜底两条用例）
+- [x] C3. `admin/index.html`（标题改「mf-pi 用户管理」）
 
 ### 阶段 D：nginx 反代与镜像
 - [ ] D1. `nginx.conf`（生产，listen 58681，转发 58680/58682，cookie `mfpi_user`，atespace `mfpi`）
