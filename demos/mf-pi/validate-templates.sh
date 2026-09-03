@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 # Validate that the mf-pi manifest templates render to valid YAML.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -6,11 +20,11 @@ cd "$(dirname "$0")"
 DIGEST="sha256:364a73cf0fe44fea69b3de0fdcb2b439e7e7153e66724de35c9c9e06fcb8759f"
 
 for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
-  sed -e 's|\${DEEPSEEK_API_KEY}|sk-test|g' \
-      -e 's|\${BUCKET_NAME}|ate-snapshots|g' \
+  sed -e "s|\${DEEPSEEK_API_KEY}|sk-test|g" \
+      -e "s|\${BUCKET_NAME}|ate-snapshots|g" \
       -e "s|\${MF_PI_DIGEST}|${DIGEST}|g" \
-      -e 's|\${PAUSE_DIGEST}|sha256:placeholder|g' \
-      -e 's|\${MFPI_WORKER_REPLICAS}|2|g' \
+      -e "s|\${PAUSE_DIGEST}|sha256:placeholder|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS}|2|g" \
       "$t" > /tmp/mfpi-render-check.yaml
   python3 - /tmp/mfpi-render-check.yaml "$t" <<'PYEOF'
 import sys, yaml
