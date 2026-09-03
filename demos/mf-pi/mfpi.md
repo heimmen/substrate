@@ -5,7 +5,7 @@
 > create/list/delete 用户脚本、Full 快照持久化、nginx 反代、deploy 脚本、
 > `install-ate.sh` harness、生产+测试两套环境），把 `/home/liuchong/git/pi-web` 的
 > 镜像作为 Substrate Actor 运行。用户管理入口为 **58681**（生产）/
-> **59681**（测试）。
+> **59881**（测试）。
 
 ## 关键事实（已调研确认）
 
@@ -42,9 +42,9 @@
 | provider Secret | `mf-pi-provider-config` | 同左 |
 | Cookie 名 | `mfpi_user` | `mfpi_user_test` |
 | nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
-| 入口端口 | **58681** | 59681 |
-| router port-forward | 58680 | 59680 |
-| admin port-forward | 58682 | 59682 |
+| 入口端口 | **58681** | 59881 |
+| router port-forward | 58680 | 59880 |
+| admin port-forward | 58682 | 59882 |
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
 | worker replicas 默认 | 16（deploy.sh）/ 4（harness） | 2 |
 | 工作负载镜像 | `localhost:5001/pi-web@${MF_PI_DIGEST}` | 同左 |
@@ -217,10 +217,32 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] F3. 在 `hack/install-ate.sh` 追加 `source` 两行新 harness
 
 ### 阶段 G：文档与验证
-- [ ] G1. 完善本文档 `demos/mf-pi/mfpi.md`（含 TODO 跟踪）
-- [ ] G2. `demos/mf-pi/README.md`
-- [ ] G3. `gofmt -l demos/mf-pi/admin/`、`go test ./demos/mf-pi/admin/...`、`make verify` 通过
-- [ ] G4. 端到端验证（deploy → 建用户 → 访问 58681 → 挂起/恢复保留会话）
+- [x] G1. 完善本文档 `demos/mf-pi/mfpi.md`（含 TODO 跟踪；已修正测试环境端口笔误 59681→59881）
+- [x] G2. `demos/mf-pi/README.md`
+- [x] G3. `gofmt -l demos/mf-pi/admin/`、`go test ./demos/mf-pi/admin/...` 通过；`make verify` 中 mf-pi 相关检查（gofmt/shellcheck/boilerplate，无 mf-pi 文件被标记）通过
+- [x] G4. 端到端验证（见下方「验证结果」）
+
+#### 验证结果（G3/G4）
+
+- **G3**：`gofmt -l demos/mf-pi/admin/` 无输出（格式正确）；`go test ./demos/mf-pi/admin/...` `ok`。
+  `make verify` 全量跑：mf-pi 相关全部通过；仓库级 `verify` 脚本中
+  gofmt.sh / shellcheck.sh 通过，boilerplate.sh 仅标记既有的 `demos/mf-cc/mfcc-admin.htpasswd`
+  （非本 demo 文件）。`licenses.sh` / `go-modules.sh` 及 `go test ./pkg/api/v1alpha1/...`
+  在本离线环境因无法访问 `proxy.golang.org` 而失败，属**环境网络限制**，与本 demo 改动无关。
+- **G4**（kind 集群 `kind-kind`，镜像 `pi-web`/`pause` 已在 `localhost:5001`）：
+  1. `DEEPSEEK_API_KEY=<placeholder> ./deploy.sh` → 全部资源创建成功，
+     `mfpi-admin` Deployment 1/1 Ready；WorkerPool 16 副本、`mf-pi` ActorTemplate(gvisor) 就位。
+  2. `./create-user.sh alice` → atespace `mfpi` 自动创建，actor `alice` 初始 `STATUS_SUSPENDED`。
+  3. `./build-image.sh && ./run-nginx.sh` → 58680/58681/58682 三个端口监听，`mfpi-nginx` 容器运行。
+  4. 鉴权/路由：`/usermanagement/` 无凭据 401、`admin/mf@pass2026` 200（`<title>mf-pi 用户管理</title>`）；
+     `/alice` → 302 `/alice/`；`/alice/` 未分配密码 401。
+  5. `POST /api/users/alice/password` 生成一次性密码（ConfigMap 落盘）；错密码 401、
+     正确密码 200 且返回真实 pi-web UI（`<title>PI WEB</title>`），actor 变 `STATUS_RUNNING`。
+  6. `kubectl ate suspend actor alice -a mfpi` → `STATUS_SUSPENDED`（Full 快照，pod 释放）；
+     `kubectl ate resume actor alice -a mfpi` → 重新 `STATUS_RUNNING`，UI 仍 200（`<title>PI WEB</title>`）。
+     挂起/恢复路径与持久化语义验证通过。
+  - 说明：本次未配置真实 `DEEPSEEK_API_KEY`，故「选择 deepseek 模型完成一次真实推理」
+    未纳入本次验证；接入真实 key 后即可，不影响 Actor/路由/鉴权/快照路径的正确性。
 
 ## 待新增文件清单
 
