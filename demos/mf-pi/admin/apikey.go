@@ -245,7 +245,9 @@ func (c *httpActorAuthClient) clearPersonalKey(ctx context.Context, host string)
 }
 
 // respondAndVerify submits the api key to the flow and checks the resulting
-// provider state is "stored".
+// provider state is "stored". pi-web's respond resolves the prompt and returns
+// the flow in state "running"; the login promise then persists the credential
+// and only afterwards marks the flow "complete", so we poll for completion.
 func (c *httpActorAuthClient) respondAndVerify(ctx context.Context, host, flowID, requestID, apiKey string) error {
 	var state authFlowState
 	if err := c.doJSON(ctx, host, http.MethodPost, "/api/machines/local/auth/oauth/"+flowID+"/respond", map[string]string{
@@ -254,13 +256,48 @@ func (c *httpActorAuthClient) respondAndVerify(ctx context.Context, host, flowID
 	}, &state); err != nil {
 		return fmt.Errorf("respond to api-key login: %w", err)
 	}
-	if state.Status != "complete" {
+	switch state.Status {
+	case "complete":
+		// Login finished synchronously; nothing to wait for.
+	case "error", "cancelled":
 		return fmt.Errorf("api-key login flow ended in status %q (error: %s)", state.Status, state.Error)
+	default:
+		// Still running: poll until the async login reconciles to complete.
+		if err := c.pollForCompletion(ctx, host, flowID); err != nil {
+			return err
+		}
 	}
 	if err := c.verifyProvider(ctx, host, "stored"); err != nil {
 		return fmt.Errorf("verify stored key: %w", err)
 	}
 	return nil
+}
+
+// pollForCompletion polls the flow until it reaches status "complete".
+func (c *httpActorAuthClient) pollForCompletion(ctx context.Context, host, flowID string) error {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		var state authFlowState
+		if err := c.doJSON(ctx, host, http.MethodGet, "/api/machines/local/auth/oauth/"+flowID, nil, &state); err != nil {
+			return err
+		}
+		switch state.Status {
+		case "complete":
+			return nil
+		case "error", "cancelled":
+			return fmt.Errorf("api-key login flow ended in status %q (error: %s)", state.Status, state.Error)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for api-key login to complete (status %q)", state.Status)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled while waiting for login completion: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // waitForWeb polls the providers endpoint until it answers 200. Besides

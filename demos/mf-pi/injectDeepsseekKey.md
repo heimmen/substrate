@@ -54,8 +54,11 @@ RUNNING：
 3. 若第 2 步响应里没有 `prompt`，轮询
    `GET /api/machines/local/auth/oauth/<flowId>` 直到 `state.prompt.requestId` 出现。
 4. `POST /api/machines/local/auth/oauth/<flowId>/respond`，body
-   `{"requestId":"<id>","value":"sk-..."}` → `status:"complete"`（写盘到
-   auth.json）。`requestId` 一次性。
+   `{"requestId":"<id>","value":"sk-..."}`。pi-web 的 respond 只 resolve 掉 prompt
+   并返回 `status:"running"`，真正的凭据落盘（auth.json）由异步 login 完成、随后才
+   把 flow 置为 `"complete"`；因此**响应后需继续轮询**
+   `GET /api/machines/local/auth/oauth/<flowId>` 直到 `status:"complete"`。
+   `requestId` 一次性。
 
 清除：`POST /api/machines/local/auth/logout`，body `{"providerId":"deepseek"}` →
 `{accepted:true}`（运行时删除 deepseek 条目，回退到 `DEEPSEEK_API_KEY` env）。
@@ -212,7 +215,8 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
   - 列表正确返回 `hasPersonalKey`。
   - `httpActorAuthClient` 对 `httptest.Server`（扮演 pi-web）的请求序列：GET providers
     → POST interactive → GET flowId（若首响应无 prompt）→ POST respond 携带该
-    requestId；以及 logout 路径；断言 Host 头 =
+    requestId → GET flowId（respond 后轮询异步完成）→ GET providers 校验 stored；
+    以及 logout 路径；断言 Host 头 =
     `<user>.<atespace>.actors.resources.substrate.ate.dev`。
 
 ## 验证步骤

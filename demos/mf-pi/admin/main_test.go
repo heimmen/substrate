@@ -1025,7 +1025,15 @@ func newPiWebServer(rec *piWebRecorder) *httptest.Server {
 				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running"}`)
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/machines/local/auth/oauth/f1":
-			fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`)
+			// Before the respond the flow exposes its prompt; afterwards the
+			// async login has reconciled and the flow reads "complete" (this
+			// mirrors pi-web's OAuthLoginFlowService: respond resolves the
+			// prompt and returns "running"; completion lands on a later poll).
+			if responded {
+				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"complete"}`)
+			} else {
+				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`)
+			}
 		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/oauth/f1/respond":
 			var body struct {
 				RequestID string `json:"requestId"`
@@ -1037,7 +1045,7 @@ func newPiWebServer(rec *piWebRecorder) *httptest.Server {
 			rec.lastValue = body.Value
 			rec.responded = true
 			rec.mu.Unlock()
-			fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"complete"}`)
+			fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/logout":
 			rec.mu.Lock()
 			rec.responded = false
@@ -1073,8 +1081,9 @@ func TestHTTPActorAuthClientSetWithoutPromptPollsFlow(t *testing.T) {
 	want := []string{
 		"GET /api/machines/local/auth/providers",
 		"POST /api/machines/local/auth/api-key/interactive",
-		"GET /api/machines/local/auth/oauth/f1",
+		"GET /api/machines/local/auth/oauth/f1", // poll for the prompt (no prompt in the interactive response)
 		"POST /api/machines/local/auth/oauth/f1/respond",
+		"GET /api/machines/local/auth/oauth/f1", // poll for async completion
 		"GET /api/machines/local/auth/providers",
 	}
 	if len(seq) != len(want) {
@@ -1108,6 +1117,7 @@ func TestHTTPActorAuthClientSetWithImmediatePromptSkipsPoll(t *testing.T) {
 		"GET /api/machines/local/auth/providers",
 		"POST /api/machines/local/auth/api-key/interactive",
 		"POST /api/machines/local/auth/oauth/f1/respond",
+		"GET /api/machines/local/auth/oauth/f1", // poll for async completion
 		"GET /api/machines/local/auth/providers",
 	}
 	if len(seq) != len(want) {
