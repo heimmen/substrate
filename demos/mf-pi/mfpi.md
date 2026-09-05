@@ -41,6 +41,8 @@
 | 密码 ConfigMap | `mfpi-user-passwords` | 同左 |
 | provider Secret | `mf-pi-provider-config` | 同左 |
 | per-user key Secret | `mfpi-user-provider-keys` | 同左（`mfpi-admin-keys` Role/RoleBinding） |
+| MinIO（profile 存储） | `mfpi-minio` + PVC + Service + `mfpi-minio-admin` | 同左（test ns 内） |
+| profile token Secret | `mfpi-profile-token` | 同左 |
 | Cookie 名 | `mfpi_user` | `mfpi_user_test` |
 | nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
 | 入口端口 | **58681** | 59881 |
@@ -57,6 +59,11 @@ Actor DNS：`<username>.mfpi.actors.resources.substrate.ate.dev`（测试：
 key 的完整设计与实现进度（驱动 actor 内 pi-web api-key 登录流程 + 持久化到
 `mfpi-user-provider-keys` Secret；入口 = mfpi-admin Web UI/REST 与
 `set-user-apikey.sh` / `clear-user-apikey.sh`（及 `-test`））。
+
+另见 `perUserMinioProfile.md`：将每用户 profile（`auth.json` / skills /
+`sessions/` 等）持续备份到专属 MinIO bucket 的完整设计与实现进度（mfpi-admin 为
+唯一 S3 broker，actor 内经 token 网关 `GET/PUT /internal/actor/{name}/profile`
+拉取 / 推送；删除重建后冷启动自动拉回，重置不丢数据）。
 
 ## Actor 容器关键设计（核心难点）
 

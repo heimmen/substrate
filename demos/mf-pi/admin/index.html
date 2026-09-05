@@ -149,6 +149,7 @@ limitations under the License.
           <th>名称</th>
           <th>状态</th>
           <th>DeepSeek Key</th>
+          <th>MinIO Profile</th>
           <th>模板</th>
           <th>ATEOM Pod</th>
           <th>IP</th>
@@ -228,10 +229,14 @@ limitations under the License.
       var keyBadge = u.hasPersonalKey ?
         '<span class="badge green" title="已为该用户存储专属 DeepSeek API Key">已设置</span>' :
         '<span class="badge gray" title="未设置专属 Key，将使用 DEEPSEEK_API_KEY 环境变量">未设置</span>';
+      var profileBadge = u.profileSynced ?
+        '<span class="badge green" title="MinIO 已备份 profile，最近同步：' + esc(u.profileLastSync || "未知") + '">已同步</span>' :
+        '<span class="badge gray" title="MinIO 尚无该用户 profile（首次运行后自动同步）">未同步</span>';
       tr.innerHTML =
         '<td class="mono"><a href="' + esc(agentUrl) + '" target="_blank" rel="noopener" title="打开 agent 页面">' + esc(u.name) + "</a></td>" +
         '<td><span class="badge ' + badgeClass(u.status) + '">' + esc(statusLabel(u.status)) + "</span></td>" +
         '<td>' + keyBadge + "</td>" +
+        '<td>' + profileBadge + "</td>" +
         '<td class="mono">' + esc(u.template) + "</td>" +
         '<td class="mono">' + esc(u.ateomPod) + "</td>" +
         '<td class="mono">' + esc(u.ip) + "</td>" +
@@ -284,7 +289,8 @@ limitations under the License.
   }
 
   function deleteUser(name) {
-    if (!window.confirm("确认删除用户 \"" + name + "\"？其会话历史将一并删除。")) {
+    if (!window.confirm("确认删除用户 \"" + name + "\"？actor 及其本地会话历史将删除；" +
+        "其 MinIO 备份将保留（重新创建该用户后自动恢复）。")) {
       return;
     }
     clearMsg();

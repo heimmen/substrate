@@ -27,6 +27,14 @@
 //	GET    /                          serve the embedded admin UI
 //	GET    /healthz                   readiness
 //
+// Per-user MinIO persistence (see profile.go): this server is the trusted S3
+// broker holding a single central MinIO admin credential. Each user has a
+// dedicated bucket holding their /data/pi-agent profile tar.gz, synced by an
+// in-actor supervisor via the token-gated endpoints
+//
+//	GET    /internal/actor/{name}/profile   stream the user's profile (204 if none)
+//	PUT    /internal/actor/{name}/profile   store a pushed profile tar.gz
+//
 // It authenticates in-cluster exactly like ate-controller/atenet-router: a
 // projected service-account token (audience api.ate-system.svc) as Bearer
 // credential and a projected ClusterTrustBundle as the server TLS roots.
@@ -94,6 +102,11 @@ const (
 	// defaultRouterAddr is the in-cluster base URL of the atenet router that
 	// forwards per-Host requests to actor workloads.
 	defaultRouterAddr = "http://atenet-router.ate-system.svc:80"
+
+	// defaultMinioRegion is the region MinIO ignores but the AWS SDK requires.
+	// An empty MINIO_ENDPOINT disables the profile store entirely (the server
+	// still runs; user-list sync badges and the /internal endpoints degrade).
+	defaultMinioRegion = "us-east-1"
 
 	// passwordIterations is the PBKDF2 iteration count used to hash user
 	// passwords. Demo-grade (stdlib-only); swap for bcrypt if desired.
@@ -314,6 +327,8 @@ type server struct {
 	passwords         passwordStore
 	keys              keyStore
 	actors            actorAuthClient
+	profiles          profileStore
+	profileToken      string
 	now               func() time.Time
 }
 
@@ -329,6 +344,14 @@ type userSummary struct {
 	// HasPersonalKey reports whether the admin has stored a per-user
 	// DeepSeek API key for this user (shown as a badge in the UI).
 	HasPersonalKey bool `json:"hasPersonalKey"`
+	// ProfileSynced reports whether the user has a /data/pi-agent profile
+	// backed up in their MinIO bucket (shown as a badge in the UI). The
+	// profile's object exists only after the actor's supervisor has pushed at
+	// least once, so a brand-new user is not synced until their first run.
+	ProfileSynced bool `json:"profileSynced"`
+	// ProfileLastSync is the profile object's last-modified time (RFC 3339
+	// UTC), when a profile is stored.
+	ProfileLastSync string `json:"profileLastSync,omitempty"`
 }
 
 func (s *server) summarize(a *ateapipb.Actor) userSummary {
@@ -414,8 +437,10 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 
 	users := make([]userSummary, 0, len(all))
 	for _, a := range all {
+		name := a.GetMetadata().GetName()
 		u := s.summarize(a)
-		_, u.HasPersonalKey = s.keys.Get(a.GetMetadata().GetName())
+		_, u.HasPersonalKey = s.keys.Get(name)
+		u.setProfileSync(s.profiles, name, ctx)
 		users = append(users, u)
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].Name < users[j].Name })
@@ -468,6 +493,9 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		if w := s.injectStoredKey(ctx, name, false); w != "" {
 			msg += "；" + w
 		}
+		if w := s.ensureProfileBucket(ctx, name); w != "" {
+			msg += "；" + w
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"message": msg, "name": name})
 		return
 	} else if status.Code(err) != codes.NotFound {
@@ -494,6 +522,11 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Best-effort pre-create the user's MinIO bucket so the per-user store
+	// exists immediately. Failures never fail the create: the bucket is also
+	// ensured lazily by the admin on the actor's first profile push.
+	profileWarn := s.ensureProfileBucket(ctx, name)
+
 	// Resume immediately so the user's agent page is openable without the
 	// lazy first-request 503. If resume fails (e.g. no free workers), the
 	// actor still exists and the page will lazily resume on first access.
@@ -502,6 +535,9 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		msg := "创建成功，但立即恢复失败（可稍后打开页面触发恢复）：" + err.Error()
 		if _, ok := s.keys.Get(name); ok {
 			msg += "；该用户存有 DeepSeek Key，恢复后可重新执行创建以应用"
+		}
+		if profileWarn != "" {
+			msg += "；" + profileWarn
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message":  msg,
@@ -515,6 +551,9 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	msg := "创建成功"
 	if w := s.injectStoredKey(ctx, name, true); w != "" {
 		msg += "；" + w
+	}
+	if profileWarn != "" {
+		msg += "；" + profileWarn
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":  msg,
@@ -768,6 +807,8 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		// user is re-created with a stored key. Log rather than fail.
 		log.Printf("deleting stored DeepSeek key for %q failed: %v", name, err)
 	}
+	// Intentionally no MinIO cleanup: the user's bucket/profile object is kept
+	// so a delete+recreate "reset" restores their /data/pi-agent on cold boot.
 	writeJSON(w, http.StatusOK, map[string]string{"message": "删除成功", "name": name})
 }
 
@@ -854,6 +895,12 @@ type serverConfig struct {
 	keysSecret         string
 	keysNamespace      string
 	routerAddr         string
+	minioEndpoint      string
+	minioAccessKey     string
+	minioSecretKey     string
+	minioRegion        string
+	minioBucketPrefix  string
+	profileToken       string
 }
 
 func serverConfigFromEnv() serverConfig {
@@ -869,6 +916,12 @@ func serverConfigFromEnv() serverConfig {
 		keysSecret:         envOr("KEYS_SECRET", defaultKeysSecret),
 		keysNamespace:      envOr("KEYS_NAMESPACE", defaultKeysNamespace),
 		routerAddr:         envOr("ROUTER_ADDR", defaultRouterAddr),
+		minioEndpoint:      os.Getenv("MINIO_ENDPOINT"),
+		minioAccessKey:     os.Getenv("MINIO_ACCESS_KEY"),
+		minioSecretKey:     os.Getenv("MINIO_SECRET_KEY"),
+		minioRegion:        envOr("MINIO_REGION", defaultMinioRegion),
+		minioBucketPrefix:  os.Getenv("MINIO_BUCKET_PREFIX"),
+		profileToken:       os.Getenv("MFPI_PROFILE_TOKEN"),
 	}
 }
 
@@ -929,6 +982,22 @@ func main() {
 	}
 	cancel()
 
+	// Per-user MinIO profile store (see profile.go). Configured only when
+	// MINIO_ENDPOINT is set; otherwise the profile endpoints and sync badges
+	// degrade gracefully and create-user skips bucket provisioning.
+	var profiles profileStore
+	if cfg.minioEndpoint != "" {
+		if cfg.minioAccessKey == "" || cfg.minioSecretKey == "" {
+			log.Fatalf("MINIO_ENDPOINT is set but MINIO_ACCESS_KEY / MINIO_SECRET_KEY are empty")
+		}
+		profiles, err = newS3ProfileStore(context.Background(), cfg.minioEndpoint,
+			cfg.minioAccessKey, cfg.minioSecretKey, cfg.minioRegion, cfg.minioBucketPrefix)
+		if err != nil {
+			log.Fatalf("building MinIO profile store: %v", err)
+		}
+		log.Printf("MinIO profile persistence enabled (endpoint=%s prefix=%q)", cfg.minioEndpoint, cfg.minioBucketPrefix)
+	}
+
 	srv := &server{
 		atespace:          cfg.atespace,
 		templateNamespace: cfg.templateNamespace,
@@ -937,6 +1006,8 @@ func main() {
 		passwords:         passwords,
 		keys:              keys,
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
+		profiles:          profiles,
+		profileToken:      cfg.profileToken,
 		now:               time.Now,
 	}
 
@@ -944,6 +1015,7 @@ func main() {
 	mux.HandleFunc("/", srv.handleIndex)
 	mux.HandleFunc("/api/users", srv.handleUsers)
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
+	mux.HandleFunc("/internal/actor/", srv.handleInternalActor)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
 

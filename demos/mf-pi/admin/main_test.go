@@ -238,6 +238,8 @@ func newTestServer(f *fakeControlClient) *server {
 		passwords:         newFakePasswordStore(),
 		keys:              newFakeKeyStore(),
 		actors:            newFakeActorAuth(),
+		profiles:          newFakeProfileStore(),
+		profileToken:      "test-token",
 		now:               func() time.Time { return fixedNow },
 	}
 }

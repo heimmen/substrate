@@ -27,9 +27,14 @@
 #   DEEPSEEK_API_KEY      (default: read from the mf-pi-provider-config secret)
 #   MFPI_WORKER_REPLICAS  (default 16)
 #   KO_DEFAULTBASEIMAGE   (default localhost:5001/distroless-static-debian13)
+#   MFPI_PROFILE_TOKEN    (default: read from mfpi-profile-token Secret, else random)
+#   MINIO_ROOT_USER       (default: read from mfpi-minio-admin Secret, else minioadmin)
+#   MINIO_ROOT_PASSWORD   (default: read from mfpi-minio-admin Secret, else random)
+#   MINIO_IMAGE           (default quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z)
 #
-# The pi-web and pause workload images must already be pushed (by digest) to
-# ${KO_DOCKER_REPO}; the script resolves their digests before applying.
+# The pi-web, pause and minio workload images must be pushed (by digest) to
+# ${KO_DOCKER_REPO}; the script resolves their digests before applying. A MinIO
+# image missing from the repo is auto-localized from the local docker cache.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -52,6 +57,38 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   )"
 fi
 : "${MFPI_WORKER_REPLICAS:=16}"
+# Shared profile-sync token. Kept stable across redeploys (prefer the live
+# Secret) so actors already running with the old token are not cut off; only
+# generated on the first deploy.
+if [[ -z "${MFPI_PROFILE_TOKEN:-}" ]]; then
+  MFPI_PROFILE_TOKEN="$(
+    kubectl get secret mfpi-profile-token -n "${NAMESPACE}" \
+      -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true
+  )"
+fi
+if [[ -z "${MFPI_PROFILE_TOKEN:-}" ]]; then
+  MFPI_PROFILE_TOKEN="$(openssl rand -hex 32 2>/dev/null || tr -dc 'a-f0-9' </dev/urandom | head -c 64)"
+fi
+# MinIO root credentials for the demo's per-user object store (mfpi-minio).
+# Prefer exported values, then the live Secret, then defaults (random password).
+if [[ -z "${MINIO_ROOT_USER:-}" ]]; then
+  MINIO_ROOT_USER="$(
+    kubectl get secret mfpi-minio-admin -n "${NAMESPACE}" \
+      -o jsonpath='{.data.root-user}' 2>/dev/null | base64 -d || true
+  )"
+fi
+: "${MINIO_ROOT_USER:=minioadmin}"
+if [[ -z "${MINIO_ROOT_PASSWORD:-}" ]]; then
+  MINIO_ROOT_PASSWORD="$(
+    kubectl get secret mfpi-minio-admin -n "${NAMESPACE}" \
+      -o jsonpath='{.data.root-password}' 2>/dev/null | base64 -d || true
+  )"
+fi
+if [[ -z "${MINIO_ROOT_PASSWORD:-}" ]]; then
+  MINIO_ROOT_PASSWORD="$(openssl rand -hex 24 2>/dev/null || tr -dc 'a-f0-9' </dev/urandom | head -c 48)"
+fi
+# MinIO server image to localize into the repo when not already present.
+: "${MINIO_IMAGE:=quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z}"
 # ko builds ateom-gvisor (and other Go images) on this offline-friendly base.
 export KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-localhost:5001/distroless-static-debian13}"
 
@@ -69,12 +106,16 @@ render() {
       -e "s|\${MF_PI_DIGEST}|$(esc_repl "${MF_PI_DIGEST}")|g" \
       -e "s|\${PAUSE_DIGEST}|$(esc_repl "${PAUSE_DIGEST}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|$(esc_repl "${MFPI_WORKER_REPLICAS:-16}")|g" \
+      -e "s|\${MFPI_PROFILE_TOKEN}|$(esc_repl "${MFPI_PROFILE_TOKEN:-placeholder}")|g" \
+      -e "s|\${MINIO_DIGEST}|$(esc_repl "${MINIO_DIGEST}")|g" \
+      -e "s|\${MINIO_ROOT_USER}|$(esc_repl "${MINIO_ROOT_USER:-minioadmin}")|g" \
+      -e "s|\${MINIO_ROOT_PASSWORD}|$(esc_repl "${MINIO_ROOT_PASSWORD:-minioadmin}")|g" \
       "${TEMPLATE}"
 }
 
 resolve_images() {
   local repo="${KO_DOCKER_REPO}"
-  local piweb pause
+  local piweb pause minio
   piweb="$(docker inspect "${repo}/pi-web:latest" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
   pause="$(docker inspect "${repo}/pause:3.10.2" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
   if [[ -z "${piweb}" || -z "${pause}" ]]; then
@@ -86,6 +127,22 @@ resolve_images() {
   fi
   MF_PI_DIGEST="${piweb##*@}"
   PAUSE_DIGEST="${pause##*@}"
+  # MinIO (per-user profile store): resolve from the repo, auto-localizing from
+  # the local docker cache when it is not there yet.
+  minio="$(docker inspect "${repo}/minio:latest" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
+  if [[ -z "${minio}" ]]; then
+    if ! docker image inspect "${MINIO_IMAGE}" >/dev/null 2>&1; then
+      echo "minio image ${MINIO_IMAGE} not found locally; load it first:" >&2
+      echo "  docker pull ${MINIO_IMAGE}" >&2
+      echo "  docker tag ${MINIO_IMAGE} ${repo}/minio:latest && docker push ${repo}/minio:latest" >&2
+      return 1
+    fi
+    echo "  localizing ${MINIO_IMAGE} into ${repo} ..."
+    docker tag "${MINIO_IMAGE}" "${repo}/minio:latest"
+    docker push "${repo}/minio:latest" >/dev/null
+    minio="$(docker inspect "${repo}/minio:latest" --format='{{index .RepoDigests 0}}')"
+  fi
+  MINIO_DIGEST="${minio##*@}"
 }
 
 cmd_deploy() {
@@ -108,10 +165,13 @@ cmd_deploy() {
   fi
   echo "  workload image digest: ${MF_PI_DIGEST}"
   echo "  pause image digest:    ${PAUSE_DIGEST}"
+  echo "  minio image digest:    ${MINIO_DIGEST}"
   echo "  worker replicas:       ${MFPI_WORKER_REPLICAS:-16}"
 
   render | ko apply -f -
 
+  echo "Waiting for mfpi-minio to be ready..."
+  kubectl rollout status deployment/mfpi-minio -n "${NAMESPACE}" --timeout=180s
   echo "Waiting for mfpi-admin to be ready..."
   kubectl rollout status deployment/mfpi-admin -n "${NAMESPACE}" --timeout=120s
 
