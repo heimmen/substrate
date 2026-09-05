@@ -243,7 +243,7 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
 - [x] 4. `admin/index.html`：DeepSeek Key 徽标列 + 每行「设置 Key / 清除」按钮与 JS
 - [x] 5. `admin/main_test.go`：fake（key store、actor auth）+ handler/流程测试
 - [x] 6. `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl`：空 Secret `mfpi-user-provider-keys` + SA Role/RoleBinding + Deployment env
-- [ ] 7. `set-user-apikey.sh` / `clear-user-apikey.sh`（及 `-test`）CLI 脚本
+- [x] 7. `set-user-apikey.sh` / `clear-user-apikey.sh`（及 `-test`）CLI 脚本
 - [ ] 8. `validate-templates.sh`：doc-kind 断言列表更新
 - [ ] 9. `gofmt`、`go test ./demos/mf-pi/admin/...`、`validate-templates.sh` 通过
 - [ ] 10. kind 端到端：部署 → 设置/清除 key → 挂起/恢复后仍在 → 删除用户清 key → 收尾清理
