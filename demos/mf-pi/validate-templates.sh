@@ -34,7 +34,8 @@ with open(path) as f:
 kinds = [d.get("kind") for d in docs]
 assert kinds == ["Namespace", "Secret", "Role", "RoleBinding", "WorkerPool",
                  "ActorTemplate", "ConfigMap", "ServiceAccount", "Role",
-                 "RoleBinding", "Deployment", "Service"], kinds
+                 "RoleBinding", "Secret", "Role", "RoleBinding", "Deployment",
+                 "Service"], kinds
 at = next(d for d in docs if d["kind"] == "ActorTemplate")
 c = at["spec"]["containers"][0]
 assert c["image"].startswith("localhost:5001/pi-web@"), c["image"]
