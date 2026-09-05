@@ -201,6 +201,45 @@ roleRef:
   name: mfpi-admin-passwords
   apiGroup: rbac.authorization.k8s.io
 ---
+# Pre-created empty Secret holding per-user DeepSeek provider keys
+# (username -> key). Pre-created here (empty) so the mfpi-admin server only
+# needs get/update — RBAC cannot name-restrict the `create` verb, so the
+# server never creates it itself. Managed by the admin server (see
+# admin/apikey.go, env KEYS_SECRET).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mfpi-user-provider-keys
+  namespace: ate-demo-mf-pi-test
+type: Opaque
+---
+# Role/RoleBinding: let the mfpi-admin SA read/update the per-user key Secret.
+# (The ate-api-server-env-sources Role above is separate; do not merge.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mfpi-admin-keys
+  namespace: ate-demo-mf-pi-test
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["mfpi-user-provider-keys"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mfpi-admin-keys
+  namespace: ate-demo-mf-pi-test
+subjects:
+- kind: ServiceAccount
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi-test
+roleRef:
+  kind: Role
+  name: mfpi-admin-keys
+  apiGroup: rbac.authorization.k8s.io
+---
 
 # mf-pi user-management UI (TEST). Served through the mfpi-nginx-test proxy
 # at /usermanagement/; same in-cluster auth pattern as production.
@@ -244,6 +283,12 @@ spec:
           value: mfpi-user-passwords
         - name: PASSWORDS_NAMESPACE
           value: ate-demo-mf-pi-test
+        - name: KEYS_SECRET
+          value: mfpi-user-provider-keys
+        - name: KEYS_NAMESPACE
+          value: ate-demo-mf-pi-test
+        - name: ROUTER_ADDR
+          value: http://atenet-router.ate-system.svc:80
         volumeMounts:
         - name: ateapi-token
           mountPath: /run/ateapi-token

@@ -242,7 +242,7 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
 - [x] 3. `admin/main.go`：常量 / server 字段 / 配置 env / 路由 / handlers / list/delete/create 集成 / main() 装配
 - [x] 4. `admin/index.html`：DeepSeek Key 徽标列 + 每行「设置 Key / 清除」按钮与 JS
 - [x] 5. `admin/main_test.go`：fake（key store、actor auth）+ handler/流程测试
-- [ ] 6. `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl`：空 Secret `mfpi-user-provider-keys` + SA Role/RoleBinding + Deployment env
+- [x] 6. `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl`：空 Secret `mfpi-user-provider-keys` + SA Role/RoleBinding + Deployment env
 - [ ] 7. `set-user-apikey.sh` / `clear-user-apikey.sh`（及 `-test`）CLI 脚本
 - [ ] 8. `validate-templates.sh`：doc-kind 断言列表更新
 - [ ] 9. `gofmt`、`go test ./demos/mf-pi/admin/...`、`validate-templates.sh` 通过
