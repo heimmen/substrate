@@ -17,9 +17,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -666,5 +669,483 @@ func TestHashPasswordCheckPassword(t *testing.T) {
 	}
 	if checkPassword("a$b$c", "hello世界") {
 		t.Errorf("checkPassword returned true for invalid hex hash")
+	}
+}
+
+const aliceHost = "alice.mfpi.actors.resources.substrate.ate.dev"
+
+func TestHandleSetAPIKeySuspendedResumesThenInjects(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-test123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok := store.Get("alice"); !ok || got != "sk-test123" {
+		t.Errorf("stored key = %q, ok=%v; want sk-test123", got, ok)
+	}
+	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
+		t.Errorf("resumed = %v, want [alice]", f.resumed)
+	}
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
+	}
+	if got := auth.storedByHost[aliceHost]; got != "sk-test123" {
+		t.Errorf("injected key = %q, want sk-test123", got)
+	}
+}
+
+func TestHandleSetAPIKeyRunningDoesNotResume(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-test123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.resumed) != 0 {
+		t.Errorf("resumed = %v, want none (actor already running)", f.resumed)
+	}
+	if len(auth.setCalls) != 1 {
+		t.Errorf("setCalls = %v, want one call", auth.setCalls)
+	}
+}
+
+func TestHandleSetAPIKeyInvalidName(t *testing.T) {
+	f := newFake()
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/Bad_Name/apikey", `{"apiKey":"sk-x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.keys) != 0 || len(auth.setCalls) != 0 {
+		t.Errorf("invalid name must not touch stores or actor: store=%v setCalls=%v", store.keys, auth.setCalls)
+	}
+}
+
+func TestHandleSetAPIKeyEmptyKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"  "}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.keys) != 0 || len(auth.setCalls) != 0 {
+		t.Errorf("empty key must not touch stores or actor")
+	}
+}
+
+func TestHandleSetAPIKeyMissingActor(t *testing.T) {
+	f := newFake()
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/nobody/apikey", `{"apiKey":"sk-x"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.keys) != 0 {
+		t.Errorf("key stored for a missing actor: %v", store.keys)
+	}
+}
+
+func TestHandleSetAPIKeyStoreFailure(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.err = errors.New("rbac denied")
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-x"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.setCalls) != 0 {
+		t.Errorf("actor driven despite store failure: setCalls=%v", auth.setCalls)
+	}
+}
+
+func TestHandleSetAPIKeyInjectFailureKeepsStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	auth.setErr = errors.New("web never became ready")
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-x"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	// Store-first policy: the key is retained even though injection failed.
+	if got, ok := store.Get("alice"); !ok || got != "sk-x" {
+		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
+	}
+}
+
+func TestHandleSetAPIKeyResumeFailureKeepsStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	f.resumeErr = errors.New("no free workers")
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-x"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok := store.Get("alice"); !ok || got != "sk-x" {
+		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
+	}
+	if len(auth.setCalls) != 0 {
+		t.Errorf("actor driven despite resume failure: setCalls=%v", auth.setCalls)
+	}
+}
+
+func TestHandleClearAPIKeyHappyPath(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", "sk-x")
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost {
+		t.Errorf("clearCalls = %v, want [%s]", auth.clearCalls, aliceHost)
+	}
+	if _, ok := store.Get("alice"); ok {
+		t.Errorf("stored key still present after successful clear")
+	}
+}
+
+func TestHandleClearAPIKeyMissingActorPurgesStore(t *testing.T) {
+	f := newFake()
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", "sk-x")
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.clearCalls) != 0 {
+		t.Errorf("clearPersonalKey driven for a missing actor: %v", auth.clearCalls)
+	}
+	if _, ok := store.Get("alice"); ok {
+		t.Errorf("stored key not purged for missing actor")
+	}
+}
+
+func TestHandleClearAPIKeyLogoutFailureKeepsStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", "sk-x")
+	auth.clearErr = errors.New("logout rejected")
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	// Clear-first policy: a failed logout keeps the Secret entry for a retry.
+	if got, ok := store.Get("alice"); !ok || got != "sk-x" {
+		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
+	}
+}
+
+func TestHandleDeleteUserPurgesStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	store.Set("alice", "sk-x")
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != "alice" {
+		t.Errorf("deleted = %v, want [alice]", f.deleted)
+	}
+	if _, ok := store.Get("alice"); ok {
+		t.Errorf("stored key not purged on user delete")
+	}
+}
+
+func TestHandleListUsersReportsHasPersonalKey(t *testing.T) {
+	f := newFake()
+	f.atespaces["mfpi"] = &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: "mfpi"}}
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	addActor(f, "mfpi", "bob", "STATUS_SUSPENDED", fixedNow.Add(-2*time.Hour))
+	s := newTestServer(f)
+	s.keys.(*fakeKeyStore).Set("bob", "sk-bob")
+
+	rec := doRequest(s, http.MethodGet, "/api/users", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Users []userSummary `json:"users"`
+	}](t, rec)
+	if len(resp.Users) != 2 {
+		t.Fatalf("len(users) = %d, want 2", len(resp.Users))
+	}
+	for _, u := range resp.Users {
+		want := u.Name == "bob"
+		if u.HasPersonalKey != want {
+			t.Errorf("user %s hasPersonalKey = %v, want %v", u.Name, u.HasPersonalKey, want)
+		}
+	}
+}
+
+func TestHandleCreateUserDuplicateReplaysStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", "sk-x")
+
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[map[string]any](t, rec)
+	if !strings.Contains(resp["message"].(string), "用户已存在，复用现有会话") {
+		t.Errorf("message = %v, want to mention reuse", resp["message"])
+	}
+	// Duplicate-with-stored-key resumes the SUSPENDED actor and replays the key.
+	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
+		t.Errorf("resumed = %v, want [alice]", f.resumed)
+	}
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
+	}
+}
+
+func TestHandleCreateUserFreshReplaysStoredKey(t *testing.T) {
+	f := newFake()
+	f.atespaces["mfpi"] = &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: "mfpi"}}
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	// Actor deleted earlier (key purge failed); re-creating should replay.
+	store.Set("alice", "sk-x")
+
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[map[string]any](t, rec)
+	if resp["message"] != "创建成功" {
+		t.Errorf("message = %v, want 创建成功", resp["message"])
+	}
+	// One resume from the create handler, one replay injection.
+	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
+		t.Errorf("resumed = %v, want [alice]", f.resumed)
+	}
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
+	}
+	if got := auth.storedByHost[aliceHost]; got != "sk-x" {
+		t.Errorf("injected key = %q, want sk-x", got)
+	}
+}
+
+func TestActorHostname(t *testing.T) {
+	if got := actorHostname("alice", "mfpi"); got != aliceHost {
+		t.Errorf("actorHostname = %q, want %q", got, aliceHost)
+	}
+	if got := actorHostname("alice", "mfpi-test"); got != "alice.mfpi-test.actors.resources.substrate.ate.dev" {
+		t.Errorf("actorHostname(test) = %q", got)
+	}
+}
+
+// piWebRecorder coordinates a fake pi-web /api/machines/local/auth server used
+// to exercise httpActorAuthClient end to end.
+type piWebRecorder struct {
+	mu                   sync.Mutex
+	host                 string
+	seq                  []string
+	responded            bool
+	interactiveHasPrompt bool // false => POST .../interactive returns no prompt (forces flow poll)
+	lastRequestID        string
+	lastValue            string
+}
+
+func newPiWebRecorder() *piWebRecorder {
+	return &piWebRecorder{interactiveHasPrompt: true}
+}
+
+// newPiWebServer stands in for an actor's pi-web auth endpoints. Providers
+// report source "stored" only after a respond (or before a logout).
+func newPiWebServer(rec *piWebRecorder) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.mu.Lock()
+		rec.host = r.Host
+		rec.seq = append(rec.seq, r.Method+" "+r.URL.Path)
+		responded := rec.responded
+		hasPrompt := rec.interactiveHasPrompt
+		rec.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/machines/local/auth/providers":
+			src := "environment"
+			if responded {
+				src = "stored"
+			}
+			fmt.Fprintf(w, `{"providers":[{"id":"deepseek","name":"DeepSeek","authType":"api_key","status":{"configured":true,"source":%q}}]}`, src)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/api-key/interactive":
+			if hasPrompt {
+				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`)
+			} else {
+				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running"}`)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/machines/local/auth/oauth/f1":
+			fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/oauth/f1/respond":
+			var body struct {
+				RequestID string `json:"requestId"`
+				Value     string `json:"value"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			rec.mu.Lock()
+			rec.lastRequestID = body.RequestID
+			rec.lastValue = body.Value
+			rec.responded = true
+			rec.mu.Unlock()
+			fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"complete"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/logout":
+			rec.mu.Lock()
+			rec.responded = false
+			rec.mu.Unlock()
+			fmt.Fprint(w, `{"accepted":true}`)
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+}
+
+func recSnapshot(rec *piWebRecorder) (host string, seq []string) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return rec.host, append([]string(nil), rec.seq...)
+}
+
+func TestHTTPActorAuthClientSetWithoutPromptPollsFlow(t *testing.T) {
+	rec := newPiWebRecorder()
+	rec.interactiveHasPrompt = false
+	srv := newPiWebServer(rec)
+	defer srv.Close()
+
+	c := newHTTPActorAuthClient(srv.URL)
+	if err := c.setPersonalKey(context.Background(), aliceHost, "sk-abc"); err != nil {
+		t.Fatalf("setPersonalKey: %v", err)
+	}
+
+	host, seq := recSnapshot(rec)
+	if host != aliceHost {
+		t.Errorf("Host header = %q, want %q", host, aliceHost)
+	}
+	want := []string{
+		"GET /api/machines/local/auth/providers",
+		"POST /api/machines/local/auth/api-key/interactive",
+		"GET /api/machines/local/auth/oauth/f1",
+		"POST /api/machines/local/auth/oauth/f1/respond",
+		"GET /api/machines/local/auth/providers",
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("request seq = %v, want %v", seq, want)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Errorf("seq[%d] = %q, want %q", i, seq[i], want[i])
+		}
+	}
+	rec.mu.Lock()
+	requestID, value := rec.lastRequestID, rec.lastValue
+	rec.mu.Unlock()
+	if requestID != "r1" || value != "sk-abc" {
+		t.Errorf("respond body = (requestId=%q value=%q), want (r1 sk-abc)", requestID, value)
+	}
+}
+
+func TestHTTPActorAuthClientSetWithImmediatePromptSkipsPoll(t *testing.T) {
+	rec := newPiWebRecorder() // interactiveHasPrompt defaults true
+	srv := newPiWebServer(rec)
+	defer srv.Close()
+
+	c := newHTTPActorAuthClient(srv.URL)
+	if err := c.setPersonalKey(context.Background(), aliceHost, "sk-abc"); err != nil {
+		t.Fatalf("setPersonalKey: %v", err)
+	}
+
+	_, seq := recSnapshot(rec)
+	want := []string{
+		"GET /api/machines/local/auth/providers",
+		"POST /api/machines/local/auth/api-key/interactive",
+		"POST /api/machines/local/auth/oauth/f1/respond",
+		"GET /api/machines/local/auth/providers",
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("request seq = %v, want %v", seq, want)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Errorf("seq[%d] = %q, want %q", i, seq[i], want[i])
+		}
+	}
+}
+
+func TestHTTPActorAuthClientClearDrivesLogout(t *testing.T) {
+	rec := newPiWebRecorder()
+	rec.responded = true // start with a stored credential
+	srv := newPiWebServer(rec)
+	defer srv.Close()
+
+	c := newHTTPActorAuthClient(srv.URL)
+	if err := c.clearPersonalKey(context.Background(), aliceHost); err != nil {
+		t.Fatalf("clearPersonalKey: %v", err)
+	}
+
+	host, seq := recSnapshot(rec)
+	if host != aliceHost {
+		t.Errorf("Host header = %q, want %q", host, aliceHost)
+	}
+	want := []string{
+		"GET /api/machines/local/auth/providers",
+		"POST /api/machines/local/auth/logout",
+		"GET /api/machines/local/auth/providers",
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("request seq = %v, want %v", seq, want)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Errorf("seq[%d] = %q, want %q", i, seq[i], want[i])
+		}
 	}
 }
