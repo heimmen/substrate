@@ -121,9 +121,12 @@ RUNNING：
 ### main.go 改动
 - 常量：`defaultKeysSecret="mfpi-user-provider-keys"`、
   `defaultKeysNamespace="ate-demo-mf-pi"`、
-  `defaultRouterAddr="http://atenet-router.ate-system.svc:80"`、
-  `actorHostSuffix=".actors.resources.substrate.ate.dev"`。
-- `server` 增加字段：`keys keyStore`、`actors actorAuthClient`、`routerBase string`。
+  `defaultRouterAddr="http://atenet-router.ate-system.svc:80"`。
+  （实现注：`actorHostSuffix` 实际放在 `apikey.go`、紧邻其唯一使用方
+  `actorHostname`，保证每一步 commit 都可独立编译。）
+- `server` 增加字段：`keys keyStore`、`actors actorAuthClient`（router 基址由
+  `httpActorAuthClient.base` 持有，无需 server 字段）。（实现注：为保证每步 commit
+  测试全绿，`newTestServer` 提前接好 `fakeKeyStore`/`fakeActorAuth` 两个 fake。）
 - `serverConfig` + `serverConfigFromEnv` 增加 `keysSecret/keysNamespace/routerAddr`，
   对应 env `KEYS_SECRET`、`KEYS_NAMESPACE`、`ROUTER_ADDR`。
 - `userSummary` 增加 `HasPersonalKey bool json:"hasPersonalKey"`；
@@ -236,7 +239,7 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
 
 - [x] 1. 撰写本文档（`injectDeepsseekKey.md`）并同步 `README.md` / `mfpi.md`
 - [x] 2. `admin/apikey.go`：`keyStore`/`secretKeyStore` + `actorAuthClient`/`httpActorAuthClient` + 驱动流程
-- [ ] 3. `admin/main.go`：常量 / server 字段 / 配置 env / 路由 / handlers / list/delete/create 集成 / main() 装配
+- [x] 3. `admin/main.go`：常量 / server 字段 / 配置 env / 路由 / handlers / list/delete/create 集成 / main() 装配
 - [ ] 4. `admin/index.html`：DeepSeek Key 徽标列 + 每行「设置 Key / 清除」按钮与 JS
 - [ ] 5. `admin/main_test.go`：fake（key store、actor auth）+ handler/流程测试
 - [ ] 6. `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl`：空 Secret `mfpi-user-provider-keys` + SA Role/RoleBinding + Deployment env

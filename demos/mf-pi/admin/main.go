@@ -85,6 +85,16 @@ const (
 	defaultPasswordsConfigMap = "mfpi-user-passwords"
 	defaultPasswordsNamespace = "ate-demo-mf-pi"
 
+	// Secret holding per-user DeepSeek provider keys (username -> key).
+	// Pre-created empty in the manifests so the admin SA needs only
+	// get/update (RBAC cannot name-restrict create).
+	defaultKeysSecret    = "mfpi-user-provider-keys"
+	defaultKeysNamespace = "ate-demo-mf-pi"
+
+	// defaultRouterAddr is the in-cluster base URL of the atenet router that
+	// forwards per-Host requests to actor workloads.
+	defaultRouterAddr = "http://atenet-router.ate-system.svc:80"
+
 	// passwordIterations is the PBKDF2 iteration count used to hash user
 	// passwords. Demo-grade (stdlib-only); swap for bcrypt if desired.
 	passwordIterations = 100_000
@@ -302,6 +312,8 @@ type server struct {
 	templateName      string
 	client            controlClient
 	passwords         passwordStore
+	keys              keyStore
+	actors            actorAuthClient
 	now               func() time.Time
 }
 
@@ -314,6 +326,9 @@ type userSummary struct {
 	IP       string `json:"ip"`
 	Version  int64  `json:"version"`
 	Age      string `json:"age"`
+	// HasPersonalKey reports whether the admin has stored a per-user
+	// DeepSeek API key for this user (shown as a badge in the UI).
+	HasPersonalKey bool `json:"hasPersonalKey"`
 }
 
 func (s *server) summarize(a *ateapipb.Actor) userSummary {
@@ -347,14 +362,25 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleUserSubresource dispatches /api/users/{name} (DELETE) and
-// /api/users/{name}/password (POST).
+// handleUserSubresource dispatches /api/users/{name} (DELETE),
+// /api/users/{name}/password (POST) and /api/users/{name}/apikey (POST/DELETE).
 func (s *server) handleUserSubresource(w http.ResponseWriter, r *http.Request) {
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/users/"), "/")
 	switch {
 	case r.Method == http.MethodPost && strings.HasSuffix(rest, "/password"):
 		name := strings.TrimSuffix(rest, "/password")
 		s.handleResetPassword(w, r, name)
+	case strings.HasSuffix(rest, "/apikey"):
+		// The generic DELETE below also matches .../apikey, so route it first.
+		name := strings.TrimSuffix(rest, "/apikey")
+		switch r.Method {
+		case http.MethodPost:
+			s.handleSetAPIKey(w, r, name)
+		case http.MethodDelete:
+			s.handleClearAPIKey(w, r, name)
+		default:
+			http.NotFound(w, r)
+		}
 	case r.Method == http.MethodDelete:
 		s.handleDeleteUser(w, r)
 	default:
@@ -388,7 +414,9 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 
 	users := make([]userSummary, 0, len(all))
 	for _, a := range all {
-		users = append(users, s.summarize(a))
+		u := s.summarize(a)
+		_, u.HasPersonalKey = s.keys.Get(a.GetMetadata().GetName())
+		users = append(users, u)
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].Name < users[j].Name })
 	writeJSON(w, http.StatusOK, map[string]any{"atespace": s.atespace, "users": users})
@@ -431,10 +459,16 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Idempotent create-or-reuse: if the actor exists, keep its history.
+	// Idempotent create-or-reuse: if the actor exists, keep its history. When a
+	// per-user key is stored for it (e.g. a previous injection failed with 502),
+	// reuse is also the natural retry: resume if needed and replay the key.
 	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
 	if _, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref}); err == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"message": "用户已存在，复用现有会话", "name": name})
+		msg := "用户已存在，复用现有会话"
+		if w := s.injectStoredKey(ctx, name, false); w != "" {
+			msg += "；" + w
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"message": msg, "name": name})
 		return
 	} else if status.Code(err) != codes.NotFound {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询用户失败: " + err.Error()})
@@ -465,15 +499,25 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	// actor still exists and the page will lazily resume on first access.
 	resumed, err := s.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref})
 	if err != nil {
+		msg := "创建成功，但立即恢复失败（可稍后打开页面触发恢复）：" + err.Error()
+		if _, ok := s.keys.Get(name); ok {
+			msg += "；该用户存有 DeepSeek Key，恢复后可重新执行创建以应用"
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"message":  "创建成功，但立即恢复失败（可稍后打开页面触发恢复）：" + err.Error(),
+			"message":  msg,
 			"user":     s.summarize(actor),
 			"password": password,
 		})
 		return
 	}
+	// Freshly created actors never carry a key in their snapshot; if the admin
+	// has a stored key for this user (actor was deleted+recreated), replay it.
+	msg := "创建成功"
+	if w := s.injectStoredKey(ctx, name, true); w != "" {
+		msg += "；" + w
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"message":  "创建成功",
+		"message":  msg,
 		"user":     s.summarize(resumed.GetActor()),
 		"password": password,
 	})
@@ -515,6 +559,175 @@ func (s *server) handleResetPassword(w http.ResponseWriter, r *http.Request, nam
 	})
 }
 
+// handleSetAPIKey stores a per-user DeepSeek API key and applies it to the
+// user's actor by driving pi-web's in-actor api-key login flow. Ordering is
+// store-first: the Secret is the committed record, so if the later actor step
+// fails the key is retained (502) and applied on a retry or the next resume.
+func (s *server) handleSetAPIKey(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
+		return
+	}
+	var req struct {
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	key := strings.TrimSpace(req.APIKey)
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "apiKey 不能为空"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+	if _, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref}); err != nil {
+		if status.Code(err) == codes.NotFound {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "用户不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询用户失败: " + err.Error()})
+		return
+	}
+
+	// Commit the record first (persist to the Secret), then apply it to the
+	// actor's auth store.
+	if err := s.keys.Set(name, key); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 DeepSeek Key 失败: " + err.Error()})
+		return
+	}
+	if err := s.ensureRunningActor(ctx, name); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "DeepSeek Key 已存储，但无法恢复用户以注入（可重试，恢复后会自动应用）: " + err.Error(),
+			"name":  name,
+		})
+		return
+	}
+	if err := s.actors.setPersonalKey(ctx, actorHostname(name, s.atespace), key); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "DeepSeek Key 已存储，但注入失败（可重试，恢复后会自动应用）: " + err.Error(),
+			"name":  name,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "DeepSeek Key 已设置", "name": name})
+}
+
+// handleClearAPIKey removes a user's stored DeepSeek API key. Ordering is
+// clear-first: the actor's stored credential is logged out (falling back to
+// the DEEPSEEK_API_KEY env) before the Secret entry is purged, so a failed
+// logout leaves the Secret entry intact for a retry.
+func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+	if _, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref}); err != nil {
+		if status.Code(err) == codes.NotFound {
+			// The actor is gone; there is nothing to log out of. Purge the
+			// stored key so the record matches (idempotent clear).
+			if err := s.keys.Delete(name); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除存储的 DeepSeek Key 失败: " + err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"message": "DeepSeek Key 已清除", "name": name})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询用户失败: " + err.Error()})
+		return
+	}
+
+	if err := s.ensureRunningActor(ctx, name); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "清除失败（无法恢复用户）: " + err.Error()})
+		return
+	}
+	if err := s.actors.clearPersonalKey(ctx, actorHostname(name, s.atespace)); err != nil {
+		// Keep the Secret entry: a retry resumes the actor and tries again.
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "清除失败，已保留存储的 Key（可重试）: " + err.Error()})
+		return
+	}
+	if err := s.keys.Delete(name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "已退出登录，但清除存储条目失败: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "DeepSeek Key 已清除", "name": name})
+}
+
+// ensureRunningActor makes the actor RUNNING (resuming it if needed) and waits
+// until it reports RUNNING. A no-op when already RUNNING. Bounded by ctx.
+func (s *server) ensureRunningActor(ctx context.Context, name string) error {
+	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+	actor, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref})
+	if err != nil {
+		return err
+	}
+	if actor.GetStatus() == ateapipb.Actor_STATUS_RUNNING {
+		return nil
+	}
+	// Resume. A concurrent actor may have won the race and reached RUNNING, in
+	// which case a resume error is irrelevant.
+	if _, err := s.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref}); err != nil {
+		if cur, gerr := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref}); gerr == nil && cur.GetStatus() == ateapipb.Actor_STATUS_RUNNING {
+			return nil
+		}
+		return err
+	}
+	return s.waitForRunning(ctx, name)
+}
+
+// waitForRunning polls GetActor until the actor reports RUNNING. Bounded by ctx.
+func (s *server) waitForRunning(ctx context.Context, name string) error {
+	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		cur, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref})
+		if err != nil {
+			return err
+		}
+		if cur.GetStatus() == ateapipb.Actor_STATUS_RUNNING {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// injectStoredKey best-effort replays a previously stored per-user key onto the
+// actor. When alreadyResumed is true the caller has just issued the resume, so
+// it only waits for RUNNING instead of resuming again. It never fails the
+// caller: on any problem it returns a warning string (callers must succeed even
+// if key injection cannot run right now).
+func (s *server) injectStoredKey(ctx context.Context, name string, alreadyResumed bool) string {
+	key, ok := s.keys.Get(name)
+	if !ok {
+		return ""
+	}
+	host := actorHostname(name, s.atespace)
+	if alreadyResumed {
+		if err := s.waitForRunning(ctx, name); err != nil {
+			return "DeepSeek Key 已存储但未注入（用户仍在恢复中）: " + err.Error()
+		}
+	} else if err := s.ensureRunningActor(ctx, name); err != nil {
+		return "DeepSeek Key 已存储但未注入（无法恢复用户）: " + err.Error()
+	}
+	if err := s.actors.setPersonalKey(ctx, host, key); err != nil {
+		return "DeepSeek Key 已存储但注入失败（可重试）: " + err.Error()
+	}
+	return ""
+}
+
 // handleDeleteUser mirrors the delete-user.sh script: suspend first (the API
 // rejects deleting a RUNNING actor), then delete.
 func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -549,6 +762,11 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.passwords.Delete(name); err != nil {
 		// The actor is gone; a stale hash is harmless. Log rather than fail.
 		log.Printf("deleting password for %q failed: %v", name, err)
+	}
+	if err := s.keys.Delete(name); err != nil {
+		// Best-effort: a stale key is harmless and replayed only if the same
+		// user is re-created with a stored key. Log rather than fail.
+		log.Printf("deleting stored DeepSeek key for %q failed: %v", name, err)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "删除成功", "name": name})
 }
@@ -633,6 +851,9 @@ type serverConfig struct {
 	ateapiTokenFile    string
 	passwordsConfigMap string
 	passwordsNamespace string
+	keysSecret         string
+	keysNamespace      string
+	routerAddr         string
 }
 
 func serverConfigFromEnv() serverConfig {
@@ -645,6 +866,9 @@ func serverConfigFromEnv() serverConfig {
 		ateapiTokenFile:    envOr("ATEAPI_TOKEN_FILE", defaultAteapiTokenFile),
 		passwordsConfigMap: envOr("PASSWORDS_CONFIGMAP", defaultPasswordsConfigMap),
 		passwordsNamespace: envOr("PASSWORDS_NAMESPACE", defaultPasswordsNamespace),
+		keysSecret:         envOr("KEYS_SECRET", defaultKeysSecret),
+		keysNamespace:      envOr("KEYS_NAMESPACE", defaultKeysNamespace),
+		routerAddr:         envOr("ROUTER_ADDR", defaultRouterAddr),
 	}
 }
 
@@ -693,10 +917,15 @@ func main() {
 		log.Fatalf("building k8s client: %v", err)
 	}
 	passwords := newConfigMapPasswordStore(k8s, cfg.passwordsNamespace, cfg.passwordsConfigMap)
+	keys := newSecretKeyStore(k8s, cfg.keysNamespace, cfg.keysSecret)
 	loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := passwords.load(loadCtx); err != nil {
 		cancel()
 		log.Fatalf("loading password store: %v", err)
+	}
+	if err := keys.load(loadCtx); err != nil {
+		cancel()
+		log.Fatalf("loading key store: %v", err)
 	}
 	cancel()
 
@@ -706,6 +935,8 @@ func main() {
 		templateName:      cfg.templateName,
 		client:            client,
 		passwords:         passwords,
+		keys:              keys,
+		actors:            newHTTPActorAuthClient(cfg.routerAddr),
 		now:               time.Now,
 	}
 

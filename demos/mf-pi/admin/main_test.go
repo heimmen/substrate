@@ -163,6 +163,69 @@ func (s *fakePasswordStore) Delete(name string) error {
 	return nil
 }
 
+// fakeKeyStore is an in-memory keyStore for tests.
+type fakeKeyStore struct {
+	keys map[string]string
+	err  error
+}
+
+func newFakeKeyStore() *fakeKeyStore {
+	return &fakeKeyStore{keys: map[string]string{}}
+}
+
+func (s *fakeKeyStore) Get(name string) (string, bool) {
+	k, ok := s.keys[name]
+	return k, ok
+}
+
+func (s *fakeKeyStore) Set(name, key string) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.keys[name] = key
+	return nil
+}
+
+func (s *fakeKeyStore) Delete(name string) error {
+	if s.err != nil {
+		return s.err
+	}
+	delete(s.keys, name)
+	return nil
+}
+
+// fakeActorAuth is an in-memory actorAuthClient for tests. It records the
+// set/clear calls per host and can be configured to fail.
+type fakeActorAuth struct {
+	storedByHost map[string]string // host -> key
+	setCalls     []string
+	clearCalls   []string
+	setErr       error
+	clearErr     error
+}
+
+func newFakeActorAuth() *fakeActorAuth {
+	return &fakeActorAuth{storedByHost: map[string]string{}}
+}
+
+func (f *fakeActorAuth) setPersonalKey(_ context.Context, host, apiKey string) error {
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.setCalls = append(f.setCalls, host)
+	f.storedByHost[host] = apiKey
+	return nil
+}
+
+func (f *fakeActorAuth) clearPersonalKey(_ context.Context, host string) error {
+	if f.clearErr != nil {
+		return f.clearErr
+	}
+	f.clearCalls = append(f.clearCalls, host)
+	delete(f.storedByHost, host)
+	return nil
+}
+
 func newTestServer(f *fakeControlClient) *server {
 	return &server{
 		atespace:          "mfpi",
@@ -170,6 +233,8 @@ func newTestServer(f *fakeControlClient) *server {
 		templateName:      "mf-pi",
 		client:            f,
 		passwords:         newFakePasswordStore(),
+		keys:              newFakeKeyStore(),
+		actors:            newFakeActorAuth(),
 		now:               func() time.Time { return fixedNow },
 	}
 }
