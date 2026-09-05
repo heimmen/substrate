@@ -253,4 +253,18 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
 - [x] 8. `validate-templates.sh`：doc-kind 断言列表更新
 - [x] 9. `gofmt`、`go test ./demos/mf-pi/admin/...`、`validate-templates.sh` 通过
       （另附 `go vet`、`bash -n` 全部通过）
-- [ ] 10. kind 端到端：部署 → 设置/清除 key → 挂起/恢复后仍在 → 删除用户清 key → 收尾清理
+- [x] 10. kind 端到端：部署 → 设置/清除 key → 挂起/恢复后仍在 → 删除用户清 key → 收尾清理
+      （kind 实测，用一次性用户 `e2e`，不动 alice/tom）：
+      - `./set-user-apikey.sh e2e sk-…` → 200「已设置」，actor 转 RUNNING，
+        Secret 落 key；经 router `Host: e2e.mfpi.actors…` 查
+        providers，deepseek `source:"stored"`。
+      - `kubectl ate suspend/resume actor e2e` 后复查 `source:"stored"`
+        （Full 快照保留 auth.json）。
+      - `./clear-user-apikey.sh e2e` → 200「已清除」，Secret 清空，
+        deepseek 回退 `source:"environment"`（`DEEPSEEK_API_KEY`）。
+      - 再次 set 后经管理 REST `DELETE /api/users/e2e` → actor 删除、
+        Secret key 一并清除（data 为空）。
+      - 收尾：`e2e` 与其 Secret 项均清除，alice/tom 保持 SUSPENDED 不受影响。
+      - 期间发现并修复：pi-web 的 respond 只 resolve prompt 并回 `running`，
+        凭据由异步 login 落盘后才置 `complete`，客户端须响应后轮询至 complete
+        （见「驱动流程」第 4 步与 `pollForCompletion`）。
