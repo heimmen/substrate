@@ -148,6 +148,7 @@ limitations under the License.
         <tr>
           <th>名称</th>
           <th>状态</th>
+          <th>DeepSeek Key</th>
           <th>模板</th>
           <th>ATEOM Pod</th>
           <th>IP</th>
@@ -224,25 +225,37 @@ limitations under the License.
       var tr = document.createElement("tr");
       // 用户名链接到对应的 agent 页面：http://<hostname>:58681/<username>/
       var agentUrl = window.location.origin + "/" + encodeURIComponent(u.name) + "/";
+      var keyBadge = u.hasPersonalKey ?
+        '<span class="badge green" title="已为该用户存储专属 DeepSeek API Key">已设置</span>' :
+        '<span class="badge gray" title="未设置专属 Key，将使用 DEEPSEEK_API_KEY 环境变量">未设置</span>';
       tr.innerHTML =
         '<td class="mono"><a href="' + esc(agentUrl) + '" target="_blank" rel="noopener" title="打开 agent 页面">' + esc(u.name) + "</a></td>" +
         '<td><span class="badge ' + badgeClass(u.status) + '">' + esc(statusLabel(u.status)) + "</span></td>" +
+        '<td>' + keyBadge + "</td>" +
         '<td class="mono">' + esc(u.template) + "</td>" +
         '<td class="mono">' + esc(u.ateomPod) + "</td>" +
         '<td class="mono">' + esc(u.ip) + "</td>" +
         "<td>" + esc(u.version) + "</td>" +
         "<td>" + esc(u.age) + "</td>" +
-        '<td class="actions"><button class="secondary mini copy-pwd" data-name="' + esc(u.name) + '">复制密码</button> ' +
-        '<button class="secondary mini reset-pwd" data-name="' + esc(u.name) + '">重置密码</button> ' +
-        '<button class="danger mini del" data-name="' + esc(u.name) + '">删除</button></td>';
-      var buttons = tr.querySelectorAll("button");
-      buttons[0].addEventListener("click", function () {
+        '<td class="actions">' +
+        '<button class="secondary mini copy-pwd">复制密码</button> ' +
+        '<button class="secondary mini reset-pwd">重置密码</button> ' +
+        '<button class="secondary mini set-key" title="为运行中的 agent 写入专属 DeepSeek API Key">设置 Key</button> ' +
+        '<button class="secondary mini clear-key" title="退出登录并清除专属 DeepSeek API Key">清除</button> ' +
+        '<button class="danger mini del">删除</button></td>';
+      tr.querySelector(".copy-pwd").addEventListener("click", function () {
         copyPassword(u.name);
       });
-      buttons[1].addEventListener("click", function () {
+      tr.querySelector(".reset-pwd").addEventListener("click", function () {
         resetPassword(u.name);
       });
-      buttons[2].addEventListener("click", function () {
+      tr.querySelector(".set-key").addEventListener("click", function () {
+        setUserAPIKey(u.name);
+      });
+      tr.querySelector(".clear-key").addEventListener("click", function () {
+        clearUserAPIKey(u.name);
+      });
+      tr.querySelector(".del").addEventListener("click", function () {
         deleteUser(u.name);
       });
       body.appendChild(tr);
@@ -288,6 +301,61 @@ limitations under the License.
       })
       .catch(function (err) {
         showMsg("删除失败：" + err.message, true);
+      });
+  }
+
+  function setUserAPIKey(name) {
+    var key = window.prompt(
+      "为 \"" + name + "\" 设置专属 DeepSeek API Key（sk-...）。\n" +
+      "Key 会写入 Secret 持久化并注入到该用户运行中的 agent；若 agent 尚未恢复将自动恢复。", "");
+    if (key === null) {
+      return; // 用户取消
+    }
+    key = key.trim();
+    if (key === "") {
+      showMsg("未输入 API Key，已取消", true);
+      return;
+    }
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name) + "/apikey", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: key })
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "DeepSeek Key 已设置"));
+        listUsers();
+      })
+      .catch(function (err) {
+        showMsg("设置 Key 失败：" + err.message, true);
+      });
+  }
+
+  function clearUserAPIKey(name) {
+    if (!window.confirm("确认清除 \"" + name + "\" 的专属 DeepSeek API Key？\n" +
+        "其 agent 将退出 DeepSeek 登录并回退到 DEEPSEEK_API_KEY 环境变量。")) {
+      return;
+    }
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name) + "/apikey", { method: "DELETE" })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "DeepSeek Key 已清除"));
+        listUsers();
+      })
+      .catch(function (err) {
+        showMsg("清除 Key 失败：" + err.message, true);
       });
   }
 
