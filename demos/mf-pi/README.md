@@ -204,6 +204,9 @@ pi-web 前端所有请求（API `/api/...`、插件资源 `/pi-web-plugins/...`�
   等待懒恢复即可直接打开（若恢复失败——例如没有空闲 worker——用户仍会创建成
   功，页面会在首次访问时再触发恢复）
 - **删除用户**：先挂起再删除（对应 `delete-user.sh`）
+- **DeepSeek Key**：每行显示该用户是否已设专属 DeepSeek API Key（「已设置 /
+  未设置」徽标），并提供「**设置 Key**」/「**清除**」按钮，为指定用户动态注入或
+  退出其专属 key（详见下文「每用户专属 DeepSeek API Key」）
 
 访问方式：`http://<hostname>:58681/usermanagement/`（经 mfpi-nginx 代理转发到
 `mfpi-admin` Service）。
@@ -250,6 +253,47 @@ mfpi-nginx 为多用户 Web UI 提供了两层鉴权：
 pi-web 内建 `deepseek` provider（OpenAI 兼容，`https://api.deepseek.com`），无需
 改代码。部署时把 `DEEPSEEK_API_KEY` 注入 Actor 即可；用户在模型选择器中选择
 `deepseek/deepseek-chat` 或 `deepseek/deepseek-reasoner`。
+
+### 每用户专属 DeepSeek API Key
+
+`DEEPSEEK_API_KEY` env 是**共享**的（来自 ActorTemplate 上固定的
+`secretKeyRef`），且平台层无法在运行期给某个 Actor 单独注入 env/Secret：env 冻结
+在 Full 快照里、恢复时原样还原，也没有外部途径写入 Actor 文件系统。因此本演示为
+**单个用户动态设置 / 清除其专属 DeepSeek API key** 的方式是：经路由器驱动该用户
+Actor 内 pi-web 自身的 api-key 登录流程，把凭据写进该 Actor 的 `auth.json`
+（`/data/pi-agent/auth.json`）。一个用户 == 一个 Actor，正好构成 per-user 的 key
+面。完整设计见 `injectDeepsseekKey.md`。
+
+pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优先于** `DEEPSEEK_API_KEY`
+env（无需重启）；清除后该用户回退到 env key。
+
+**界面（管理 UI）**：`/usermanagement/` 每行显示「DeepSeek Key」徽标（已设置 /
+未设置），并可用「**设置 Key**」（弹出输入 `sk-...`）或「**清除**」按钮操作。
+
+**CLI**（经临时 port-forward 调 mfpi-admin REST `api/users/<name>/apikey`）：
+
+```bash
+./set-user-apikey.sh alice sk-...    # 设置（覆盖）；actor 挂起时自动先恢复
+./clear-user-apikey.sh alice         # 清除（幂等）；agent 回退到 env key
+# 测试环境（atespace mfpi-test）：
+./set-user-apikey-test.sh alice sk-...
+./clear-user-apikey-test.sh alice
+```
+
+**持久化**：key 同时写入预创建的 Secret `mfpi-user-provider-keys`（username →
+key，见 `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽标；Actor 删除
+重建后 key 仍在 Secret 中，重新创建用户时会自动重放注入；删除用户时该 key 一并清
+除。
+
+**语义**：
+
+- 设置 = **先写 Secret，再**（必要时恢复并）注入；注入失败返回 502 并说明「key 已
+  存储」，可重试或等下次恢复时自动应用（提交记录优先）。
+- 清除 = **先**驱动 actor 退出 DeepSeek 登录（回退 env），**成功后才**删除 Secret
+  条目；logout 失败返回 502 且保留条目；actor 已删除时直接清空 Secret 条目（幂
+  等）。
+- 设置 / 清除都会在需要时自动恢复 `SUSPENDED` 的 actor。挂起 / 恢复（Full 快照）
+  保留 `auth.json`，因此已设的 key 在挂起 / 恢复后依然生效。
 
 ### 容量配置
 
@@ -341,9 +385,11 @@ cd demos/mf-pi
 ### 用户管理脚本
 
 ```bash
-./create-user-test.sh alice   # 在 mfpi-test 建用户（模板 ate-demo-mf-pi-test/mf-pi）
-./list-users-test.sh          # 列出测试用户
-./delete-user-test.sh alice   # 删除测试用户
+./create-user-test.sh alice           # 在 mfpi-test 建用户（模板 ate-demo-mf-pi-test/mf-pi）
+./list-users-test.sh                  # 列出测试用户
+./delete-user-test.sh alice           # 删除测试用户
+./set-user-apikey-test.sh alice sk-...  # 设置测试用户专属 DeepSeek Key
+./clear-user-apikey-test.sh alice     # 清除测试用户专属 DeepSeek Key
 ```
 
 ## 故障排查

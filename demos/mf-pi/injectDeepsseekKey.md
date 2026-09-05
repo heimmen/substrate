@@ -238,6 +238,8 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
 > 逐项完成后把 `- [ ]` 改为 `- [x]`。
 
 - [x] 1. 撰写本文档（`injectDeepsseekKey.md`）并同步 `README.md` / `mfpi.md`
+      （README 新增「每用户专属 DeepSeek API Key」一节 + 管理 UI/测试脚本条目；
+      mfpi.md 补充命名表行与本文档指针）
 - [x] 2. `admin/apikey.go`：`keyStore`/`secretKeyStore` + `actorAuthClient`/`httpActorAuthClient` + 驱动流程
 - [x] 3. `admin/main.go`：常量 / server 字段 / 配置 env / 路由 / handlers / list/delete/create 集成 / main() 装配
 - [x] 4. `admin/index.html`：DeepSeek Key 徽标列 + 每行「设置 Key / 清除」按钮与 JS

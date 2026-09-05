@@ -40,6 +40,7 @@
 | admin Deployment/Service | `mfpi-admin` | 同左（test ns 内） |
 | 密码 ConfigMap | `mfpi-user-passwords` | 同左 |
 | provider Secret | `mf-pi-provider-config` | 同左 |
+| per-user key Secret | `mfpi-user-provider-keys` | 同左（`mfpi-admin-keys` Role/RoleBinding） |
 | Cookie 名 | `mfpi_user` | `mfpi_user_test` |
 | nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
 | 入口端口 | **58681** | 59881 |
@@ -51,6 +52,11 @@
 
 Actor DNS：`<username>.mfpi.actors.resources.substrate.ate.dev`（测试：
 `<username>.mfpi-test.actors.resources.substrate.ate.dev`）。
+
+另见 `injectDeepsseekKey.md`：为**单个用户**动态设置 / 清除其专属 DeepSeek API
+key 的完整设计与实现进度（驱动 actor 内 pi-web api-key 登录流程 + 持久化到
+`mfpi-user-provider-keys` Secret；入口 = mfpi-admin Web UI/REST 与
+`set-user-apikey.sh` / `clear-user-apikey.sh`（及 `-test`））。
 
 ## Actor 容器关键设计（核心难点）
 
