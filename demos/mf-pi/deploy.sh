@@ -145,6 +145,52 @@ resolve_images() {
   MINIO_DIGEST="${minio##*@}"
 }
 
+# ensure_at_recreate_if_changed <rendered-manifest> <namespace> <at-name>
+# The ActorTemplate spec is immutable (pkg/api/v1alpha1/actortemplate_types.go:
+# `self == oldSelf`), so `kubectl apply` cannot change it in place. When the
+# rendered spec no longer matches the live object, delete the live CR so the
+# following `ko apply` recreates it. Deleting the CR has no finalizer and does
+# not touch real actors or their snapshots; the reconciler simply regenerates
+# the golden base snapshot from the new spec. The comparison ignores live-only
+# fields (e.g. the server-injected `sandboxClass` default), so a template with
+# no effective change never triggers a recreate.
+ensure_at_recreate_if_changed() {
+  local manifest="$1" ns="$2" at="$3"
+  local live_json
+  if ! live_json="$(kubectl get actortemplate "${at}" -n "${ns}" -o json 2>/dev/null)"; then
+    return 0   # first deploy: no live ActorTemplate to replace
+  fi
+  local live_file change
+  live_file="$(mktemp)"
+  printf '%s' "${live_json}" > "${live_file}"
+  change="$(python3 - "${manifest}" "${live_file}" "${at}" <<'PYEOF'
+import sys, json, yaml
+manifest_path, live_path, name = sys.argv[1], sys.argv[2], sys.argv[3]
+docs = [d for d in yaml.safe_load_all(open(manifest_path)) if d]
+at = next((d for d in docs if d.get("kind") == "ActorTemplate"
+           and d.get("metadata", {}).get("name") == name), None)
+rendered = at["spec"] if at else None
+live = json.load(open(live_path)).get("spec") or {}
+def mismatch(r, l):
+    # True when a field the template sets is absent or differs in the live
+    # object. Live-only fields are ignored so a no-op deploy stays a no-op.
+    if isinstance(r, dict):
+        return any(k not in l or mismatch(v, l[k]) for k, v in r.items())
+    if isinstance(r, list):
+        return (not isinstance(l, list) or len(r) != len(l)
+                or any(mismatch(a, b) for a, b in zip(r, l)))
+    return r != l
+print("1" if rendered is not None and mismatch(rendered, live) else "0")
+PYEOF
+)"
+  rm -f "${live_file}"
+  if [[ "${change}" == "1" ]]; then
+    echo "  ActorTemplate '${at}' spec changed; replacing it (immutable spec)."
+    echo "  This regenerates the golden base snapshot; existing actors and their snapshots are unaffected."
+    kubectl delete actortemplate "${at}" -n "${ns}"
+  fi
+}
+
 cmd_deploy() {
   for v in DEEPSEEK_API_KEY BUCKET_NAME KO_DOCKER_REPO; do
     if [[ -z "${!v:-}" ]]; then
@@ -168,7 +214,14 @@ cmd_deploy() {
   echo "  minio image digest:    ${MINIO_DIGEST}"
   echo "  worker replicas:       ${MFPI_WORKER_REPLICAS:-16}"
 
-  render | ko apply -f -
+  local manifest
+  manifest="$(mktemp)"
+  render > "${manifest}"
+  # Delete the immutable ActorTemplate first when its spec has changed; the
+  # apply below then recreates it (see ensure_at_recreate_if_changed).
+  ensure_at_recreate_if_changed "${manifest}" "${NAMESPACE}" mf-pi
+  ko apply -f "${manifest}"
+  rm -f "${manifest}"
 
   echo "Waiting for mfpi-minio to be ready..."
   kubectl rollout status deployment/mfpi-minio -n "${NAMESPACE}" --timeout=180s
