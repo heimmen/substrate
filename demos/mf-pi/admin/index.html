@@ -55,13 +55,19 @@ limitations under the License.
   }
   header h1 { font-size: 18px; margin: 0; }
   header .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
-  .container { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+  .container {
+    width: 100%;
+    max-width: 100%;
+    margin: 24px auto;
+    padding: 0 16px;
+  }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 16px;
     margin-bottom: 20px;
+    overflow-x: auto;
   }
   .card h2 { font-size: 15px; margin: 0 0 12px; }
   form { display: flex; gap: 8px; }
@@ -94,7 +100,7 @@ limitations under the License.
   }
   #msg.ok { display: block; background: var(--green-bg); color: var(--green); }
   #msg.err { display: block; background: var(--red-bg); color: var(--red); }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table { width: 100%; min-width: 960px; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
