@@ -53,3 +53,4 @@ Thumbs.db
 
 # Stray local build outputs (go build ./tools/... without -o)
 /validate-image-cache
+nohup.out
