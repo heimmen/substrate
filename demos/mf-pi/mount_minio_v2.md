@@ -292,13 +292,13 @@ includes `mfpi-minio-admin`; admin env has `MINIO_ENDPOINT`, no token.
 
 ## Progress tracker
 
-- [ ] **M1 — API / CRD / proto types**
-  - [ ] `pkg/api/v1alpha1/actortemplate_types.go`: `ObjectStoreBucketVolumeSource` +
+- [x] **M1 — API / CRD / proto types**
+  - [x] `pkg/api/v1alpha1/actortemplate_types.go`: `ObjectStoreBucketVolumeSource` +
         `ObjectStoreBucketSecretRef`; `VolumeSource.objectStoreBucket` member;
         ExactlyOneOf extended; CEL rules (microvm ban, durableDir+objectStoreBucket ban)
-  - [ ] `internal/proto/ateletpb/atelet.proto`: `VOLUME_TYPE_OBJECT_STORE_BUCKET` +
+  - [x] `internal/proto/ateletpb/atelet.proto`: `VOLUME_TYPE_OBJECT_STORE_BUCKET` +
         `ObjectStoreBucketVolumeSource` message + oneof member
-  - [ ] Regenerate deepcopy/CRD (`go generate ./pkg/api/...`) + protos
+  - [x] Regenerate deepcopy/CRD (`go generate ./pkg/api/...`) + protos
         (`go generate ./internal/proto/...`)
 - [ ] **M2 — ateapi resolution + RPC threading**
   - [ ] `cmd/ateapi/internal/controlapi/workload_spec.go`: builder gains

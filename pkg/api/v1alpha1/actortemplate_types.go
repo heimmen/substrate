@@ -45,12 +45,78 @@ type ExternalVolumeTemplate struct {
 	StorageClassName string `json:"storageClassName"`
 }
 
+// ObjectStoreBucketVolumeSource represents a bucket in an S3-compatible
+// object store (e.g. MinIO) that backs a directory mounted into the actor.
+// The actor writes plain files to the mounted path; the node agent (atelet)
+// syncs the directory with the bucket as a single tarball — rehydrating an
+// empty mount from the bucket and periodically exporting back — so the bucket
+// holds the durable copy and an actor reloaded onto a fresh filesystem is
+// automatically repopulated from it.
+type ObjectStoreBucketVolumeSource struct {
+	// secretRef selects the in-namespace Secret that holds the object-store
+	// endpoint and credentials.
+	//
+	// +required
+	SecretRef ObjectStoreBucketSecretRef `json:"secretRef"`
+
+	// bucketPrefix is prepended to the actor's name to form the per-actor
+	// bucket name (e.g. prefix "mfpi-" with actor "alice" selects bucket
+	// "mfpi-alice"). An actor name is a DNS-1123 label and therefore a valid
+	// bucket name, so an empty prefix uses the bare actor name as the bucket.
+	//
+	// +optional
+	BucketPrefix string `json:"bucketPrefix,omitempty"`
+
+	// exportIntervalSeconds is the cadence, in seconds, at which the node
+	// agent exports the mounted directory to the bucket. Defaults to 20.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
+	ExportIntervalSeconds *int32 `json:"exportIntervalSeconds,omitempty"`
+}
+
+// ObjectStoreBucketSecretRef references a Secret in the ActorTemplate's
+// namespace holding the S3-compatible endpoint and credentials. It mirrors
+// EnvVarSource.secretKeyRef: resolution is namespace-scoped, and a missing
+// Secret or key aborts the actor with FailedPrecondition.
+type ObjectStoreBucketSecretRef struct {
+	// Name of the referent Secret.
+	//
+	// +required
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="Name must be a valid DNS subdomain"
+	Name string `json:"name"`
+
+	// endpointKey is the Secret key holding the S3-compatible endpoint URL
+	// (e.g. "http://minio.default.svc:9000").
+	//
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	EndpointKey string `json:"endpointKey"`
+
+	// accessKeyIdKey is the Secret key holding the access key ID.
+	//
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	AccessKeyIdKey string `json:"accessKeyIdKey"`
+
+	// secretAccessKeyKey is the Secret key holding the secret access key.
+	//
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	SecretAccessKeyKey string `json:"secretAccessKeyKey"`
+}
+
 // Represents the source of a volume to mount.
 // Exactly one of its members must be specified.
 //
 // When adding a new source type, list it in the ExactlyOneOf marker below.
 //
-// +kubebuilder:validation:ExactlyOneOf={durableDir,externalVolumeTemplate}
+// +kubebuilder:validation:ExactlyOneOf={durableDir,externalVolumeTemplate,objectStoreBucket}
 type VolumeSource struct {
 	// durableDir represents a durable directory on rootfs that persists across
 	// resumes and participates in snapshots.
@@ -62,6 +128,12 @@ type VolumeSource struct {
 	// when the actor is deleted.
 	// +optional
 	ExternalVolumeTemplate *ExternalVolumeTemplate `json:"externalVolumeTemplate,omitempty"`
+
+	// objectStoreBucket represents a bucket in an S3-compatible object store
+	// synced with a node-local directory bind-mounted into the actor. Only
+	// supported for the gVisor sandbox class.
+	// +optional
+	ObjectStoreBucket *ObjectStoreBucketVolumeSource `json:"objectStoreBucket,omitempty"`
 }
 
 type Volume struct {
@@ -298,6 +370,8 @@ type SnapshotsConfig struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.filter(vm, has(self.volumes) && self.volumes.exists(v, v.name == vm.name && has(v.durableDir))).size() <= 1)",message="A container may mount at most one DurableDir-typed volume"
 // +kubebuilder:validation:XValidation:rule="!has(self.volumes) || self.volumes.all(v, has(self.containers) && self.containers.exists(c, has(c.volumeMounts) && c.volumeMounts.exists(vm, vm.name == v.name)))",message="All volumes defined in spec.volumes must be mounted by at least one container"
 // +kubebuilder:validation:XValidation:rule="!has(self.sandboxClass) || self.sandboxClass != 'microvm' || !has(self.volumes) || !self.volumes.exists(v, has(v.externalVolumeTemplate))",message="ExternalVolumes are not supported when sandboxClass is 'microvm'"
+// +kubebuilder:validation:XValidation:rule="!has(self.sandboxClass) || self.sandboxClass != 'microvm' || !has(self.volumes) || !self.volumes.exists(v, has(v.objectStoreBucket))",message="ObjectStoreBucket volumes are not supported when sandboxClass is 'microvm'"
+// +kubebuilder:validation:XValidation:rule="!has(self.volumes) || !(self.volumes.exists(v, has(v.durableDir)) && self.volumes.exists(v, has(v.objectStoreBucket)))",message="A template may not combine DurableDir and ObjectStoreBucket volumes: only one excluded mount is supported per Full snapshot"
 type ActorTemplateSpec struct {
 	// PauseImage is the container to use as the root sandbox container.
 	//

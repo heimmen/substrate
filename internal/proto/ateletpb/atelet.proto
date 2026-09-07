@@ -85,6 +85,11 @@ enum VolumeType {
   VOLUME_TYPE_UNSPECIFIED = 0;
   VOLUME_TYPE_DURABLE_DIR = 1;
   VOLUME_TYPE_EXTERNAL = 2;
+  // A bucket in an S3-compatible object store synced with a node-local
+  // directory bind-mounted into the actor: atelet rehydrates the mounted
+  // directory from the bucket when it is empty, exports it back
+  // periodically (and at checkpoint time), and binds it into the guest.
+  VOLUME_TYPE_OBJECT_STORE_BUCKET = 3;
 }
 
 message DurableDirVolume {
@@ -95,6 +100,22 @@ message ExternalVolumeSource {
   string volume_type = 2;
 }
 
+// ObjectStoreBucketVolumeSource carries the resolved (per-actor) object-store
+// bucket configuration for one objectStoreBucket volume: ateapi resolves the
+// template's Secret reference and derives the per-actor bucket name before
+// sending this to atelet over the Run/Checkpoint/Restore RPCs. atelet never
+// reads namespace Secrets.
+message ObjectStoreBucketVolumeSource {
+  // S3-compatible endpoint URL (e.g. "http://minio.default.svc:9000").
+  string endpoint = 1;
+  string access_key_id = 2;
+  string secret_access_key = 3;
+  // Resolved per-actor bucket name (bucketPrefix + actor name).
+  string bucket = 4;
+  // Periodic export cadence in seconds; 0 uses the atelet default (20).
+  int32 export_interval_seconds = 5;
+}
+
 message Volume {
   string name = 1;
 
@@ -103,6 +124,7 @@ message Volume {
   oneof source {
     DurableDirVolume durable_dir = 3;
     ExternalVolumeSource external = 4;
+    ObjectStoreBucketVolumeSource object_store_bucket = 5;
   }
 }
 

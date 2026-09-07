@@ -353,13 +353,74 @@ spec:
                       x-kubernetes-validations:
                       - message: Name must be a valid DNS label
                         rule: '!format.dns1123Label().validate(self).hasValue()'
+                    objectStoreBucket:
+                      description: |-
+                        objectStoreBucket represents a bucket in an S3-compatible object store
+                        synced with a node-local directory bind-mounted into the actor. Only
+                        supported for the gVisor sandbox class.
+                      properties:
+                        bucketPrefix:
+                          description: |-
+                            bucketPrefix is prepended to the actor's name to form the per-actor
+                            bucket name (e.g. prefix "mfpi-" with actor "alice" selects bucket
+                            "mfpi-alice"). An actor name is a DNS-1123 label and therefore a valid
+                            bucket name, so an empty prefix uses the bare actor name as the bucket.
+                          type: string
+                        exportIntervalSeconds:
+                          description: |-
+                            exportIntervalSeconds is the cadence, in seconds, at which the node
+                            agent exports the mounted directory to the bucket. Defaults to 20.
+                          format: int32
+                          maximum: 86400
+                          minimum: 1
+                          type: integer
+                        secretRef:
+                          description: |-
+                            secretRef selects the in-namespace Secret that holds the object-store
+                            endpoint and credentials.
+                          properties:
+                            accessKeyIdKey:
+                              description: accessKeyIdKey is the Secret key holding
+                                the access key ID.
+                              minLength: 1
+                              pattern: ^[-._a-zA-Z0-9]+$
+                              type: string
+                            endpointKey:
+                              description: |-
+                                endpointKey is the Secret key holding the S3-compatible endpoint URL
+                                (e.g. "http://minio.default.svc:9000").
+                              minLength: 1
+                              pattern: ^[-._a-zA-Z0-9]+$
+                              type: string
+                            name:
+                              description: Name of the referent Secret.
+                              maxLength: 253
+                              type: string
+                              x-kubernetes-validations:
+                              - message: Name must be a valid DNS subdomain
+                                rule: '!format.dns1123Subdomain().validate(self).hasValue()'
+                            secretAccessKeyKey:
+                              description: secretAccessKeyKey is the Secret key holding
+                                the secret access key.
+                              minLength: 1
+                              pattern: ^[-._a-zA-Z0-9]+$
+                              type: string
+                          required:
+                          - accessKeyIdKey
+                          - endpointKey
+                          - name
+                          - secretAccessKeyKey
+                          type: object
+                      required:
+                      - secretRef
+                      type: object
                   required:
                   - name
                   type: object
                   x-kubernetes-validations:
-                  - message: exactly one of the fields in [durableDir externalVolumeTemplate]
-                      must be set
-                    rule: '[has(self.durableDir),has(self.externalVolumeTemplate)].filter(x,x==true).size()
+                  - message: exactly one of the fields in [durableDir externalVolumeTemplate
+                      objectStoreBucket] must be set
+                    rule: '[has(self.durableDir),has(self.externalVolumeTemplate),has(self.objectStoreBucket)].filter(x,x==true).size()
                       == 1'
                 maxItems: 32
                 type: array
@@ -436,6 +497,14 @@ spec:
             - message: ExternalVolumes are not supported when sandboxClass is 'microvm'
               rule: '!has(self.sandboxClass) || self.sandboxClass != ''microvm'' ||
                 !has(self.volumes) || !self.volumes.exists(v, has(v.externalVolumeTemplate))'
+            - message: ObjectStoreBucket volumes are not supported when sandboxClass
+                is 'microvm'
+              rule: '!has(self.sandboxClass) || self.sandboxClass != ''microvm'' ||
+                !has(self.volumes) || !self.volumes.exists(v, has(v.objectStoreBucket))'
+            - message: 'A template may not combine DurableDir and ObjectStoreBucket
+                volumes: only one excluded mount is supported per Full snapshot'
+              rule: '!has(self.volumes) || !(self.volumes.exists(v, has(v.durableDir))
+                && self.volumes.exists(v, has(v.objectStoreBucket)))'
           status:
             description: status is the observed state of ActorTemplate
             properties:
