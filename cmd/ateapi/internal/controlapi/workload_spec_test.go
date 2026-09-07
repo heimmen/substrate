@@ -197,7 +197,7 @@ func TestWorkloadSpecFromActorTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := workloadSpecFromActorTemplate(tt.template, nil)
+			got, err := workloadSpecFromActorTemplate(context.Background(), nil, nil, tt.template, nil)
 			if err != nil {
 				t.Fatalf("workloadSpecFromActorTemplate failed: %v", err)
 			}
@@ -350,7 +350,7 @@ func TestWorkloadSpecFromActorTemplateWithEnv(t *testing.T) {
 }
 
 func TestWorkloadSpecFromActorTemplatePropagatesReadyz(t *testing.T) {
-	got, err := workloadSpecFromActorTemplate(&atev1alpha1.ActorTemplate{
+	got, err := workloadSpecFromActorTemplate(context.Background(), nil, nil, &atev1alpha1.ActorTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-readyz", Namespace: "agent-ns"},
 		Spec: atev1alpha1.ActorTemplateSpec{
 			Containers: []atev1alpha1.Container{
@@ -557,5 +557,170 @@ func TestAppendExternalVolumes(t *testing.T) {
 	}
 	if err := appendExternalVolumes(&ateletpb.WorkloadSpec{}, template, missingActor); err == nil {
 		t.Errorf("appendExternalVolumes expected error for missing volume, got nil")
+	}
+}
+
+func bucketVolumeTemplate(name, secretName string, prefix string) *atev1alpha1.ActorTemplate {
+	return &atev1alpha1.ActorTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmpl1", Namespace: "agent-ns"},
+		Spec: atev1alpha1.ActorTemplateSpec{
+			Volumes: []atev1alpha1.Volume{
+				{
+					Name: name,
+					VolumeSource: atev1alpha1.VolumeSource{
+						ObjectStoreBucket: &atev1alpha1.ObjectStoreBucketVolumeSource{
+							SecretRef: atev1alpha1.ObjectStoreBucketSecretRef{
+								Name:               secretName,
+								EndpointKey:        "endpoint",
+								AccessKeyIdKey:     "root-user",
+								SecretAccessKeyKey: "root-password",
+							},
+							BucketPrefix:          prefix,
+							ExportIntervalSeconds: ptr.To(int32(30)),
+						},
+					},
+				},
+			},
+			Containers: []atev1alpha1.Container{
+				{
+					Name:  "main",
+					Image: "main",
+					VolumeMounts: []atev1alpha1.VolumeMount{
+						{Name: name, MountPath: "/data/pi-agent"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func minioAdminSecret(name string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "agent-ns"},
+		Data: map[string][]byte{
+			"endpoint":      []byte("http://minio.agent-ns.svc:9000"),
+			"root-user":     []byte("minioadmin"),
+			"root-password": []byte("minioadmin-password"),
+		},
+	}
+}
+
+func TestAppendObjectStoreBucketVolumes(t *testing.T) {
+	actor := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "mfpi", Name: "alice"},
+	}
+
+	t.Run("resolves secret keys and derives per-actor bucket", func(t *testing.T) {
+		kubeClient := fake.NewSimpleClientset(minioAdminSecret("mfpi-minio-admin"))
+		resolver := &envResolver{kubeClient: kubeClient, namespace: "agent-ns"}
+		spec := &ateletpb.WorkloadSpec{}
+		if err := appendObjectStoreBucketVolumes(context.Background(), spec, bucketVolumeTemplate("pi-agent-data", "mfpi-minio-admin", ""), actor, resolver); err != nil {
+			t.Fatalf("appendObjectStoreBucketVolumes: %v", err)
+		}
+		want := &ateletpb.WorkloadSpec{
+			Volumes: []*ateletpb.Volume{
+				{
+					Name: "pi-agent-data",
+					Type: ateletpb.VolumeType_VOLUME_TYPE_OBJECT_STORE_BUCKET,
+					Source: &ateletpb.Volume_ObjectStoreBucket{
+						ObjectStoreBucket: &ateletpb.ObjectStoreBucketVolumeSource{
+							Endpoint:              "http://minio.agent-ns.svc:9000",
+							AccessKeyId:           "minioadmin",
+							SecretAccessKey:       "minioadmin-password",
+							Bucket:                "alice",
+							ExportIntervalSeconds: 30,
+						},
+					},
+				},
+			},
+		}
+		if diff := cmp.Diff(want, spec, protocmp.Transform()); diff != "" {
+			t.Errorf("workload spec mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("bucket is prefix plus actor name", func(t *testing.T) {
+		kubeClient := fake.NewSimpleClientset(minioAdminSecret("mfpi-minio-admin"))
+		resolver := &envResolver{kubeClient: kubeClient, namespace: "agent-ns"}
+		spec := &ateletpb.WorkloadSpec{}
+		if err := appendObjectStoreBucketVolumes(context.Background(), spec, bucketVolumeTemplate("pi-agent-data", "mfpi-minio-admin", "mfpi-"), actor, resolver); err != nil {
+			t.Fatalf("appendObjectStoreBucketVolumes: %v", err)
+		}
+		got := spec.Volumes[0].GetObjectStoreBucket().GetBucket()
+		if got != "mfpi-alice" {
+			t.Errorf("bucket = %q, want mfpi-alice", got)
+		}
+	})
+
+	t.Run("missing secret fails with FailedPrecondition", func(t *testing.T) {
+		kubeClient := fake.NewSimpleClientset()
+		resolver := &envResolver{kubeClient: kubeClient, namespace: "agent-ns"}
+		err := appendObjectStoreBucketVolumes(context.Background(), &ateletpb.WorkloadSpec{}, bucketVolumeTemplate("pi-agent-data", "missing", ""), actor, resolver)
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("code = %v, want FailedPrecondition: %v", status.Code(err), err)
+		}
+	})
+
+	t.Run("missing key fails with FailedPrecondition", func(t *testing.T) {
+		s := minioAdminSecret("mfpi-minio-admin")
+		delete(s.Data, "root-password")
+		kubeClient := fake.NewSimpleClientset(s)
+		resolver := &envResolver{kubeClient: kubeClient, namespace: "agent-ns"}
+		err := appendObjectStoreBucketVolumes(context.Background(), &ateletpb.WorkloadSpec{}, bucketVolumeTemplate("pi-agent-data", "mfpi-minio-admin", ""), actor, resolver)
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("code = %v, want FailedPrecondition: %v", status.Code(err), err)
+		}
+	})
+
+	t.Run("unmounted bucket volume is skipped", func(t *testing.T) {
+		kubeClient := fake.NewSimpleClientset(minioAdminSecret("mfpi-minio-admin"))
+		resolver := &envResolver{kubeClient: kubeClient, namespace: "agent-ns"}
+		tmpl := bucketVolumeTemplate("pi-agent-data", "mfpi-minio-admin", "")
+		tmpl.Spec.Containers[0].VolumeMounts = nil
+		spec := &ateletpb.WorkloadSpec{}
+		if err := appendObjectStoreBucketVolumes(context.Background(), spec, tmpl, actor, resolver); err != nil {
+			t.Fatalf("appendObjectStoreBucketVolumes: %v", err)
+		}
+		if len(spec.Volumes) != 0 {
+			t.Errorf("unmounted volume appended: %v", spec.Volumes)
+		}
+	})
+
+	t.Run("nil actor fails", func(t *testing.T) {
+		kubeClient := fake.NewSimpleClientset(minioAdminSecret("mfpi-minio-admin"))
+		resolver := &envResolver{kubeClient: kubeClient, namespace: "agent-ns"}
+		err := appendObjectStoreBucketVolumes(context.Background(), &ateletpb.WorkloadSpec{}, bucketVolumeTemplate("pi-agent-data", "mfpi-minio-admin", ""), nil, resolver)
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("code = %v, want FailedPrecondition: %v", status.Code(err), err)
+		}
+	})
+}
+
+// The env-less builder (pause/suspend path) must resolve bucket volumes so the
+// Checkpoint RPC carries the credentials atelet needs for the final export.
+func TestWorkloadSpecFromActorTemplateResolvesBucketVolume(t *testing.T) {
+	kubeClient := fake.NewSimpleClientset(minioAdminSecret("mfpi-minio-admin"))
+	actor := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "mfpi", Name: "alice"},
+	}
+	spec, err := workloadSpecFromActorTemplate(context.Background(), kubeClient, nil, bucketVolumeTemplate("pi-agent-data", "mfpi-minio-admin", ""), actor)
+	if err != nil {
+		t.Fatalf("workloadSpecFromActorTemplate: %v", err)
+	}
+	if len(spec.Volumes) != 1 {
+		t.Fatalf("len(volumes) = %d, want 1", len(spec.Volumes))
+	}
+	src := spec.Volumes[0].GetObjectStoreBucket()
+	if src == nil {
+		t.Fatalf("volume source = %T, want ObjectStoreBucketVolumeSource", spec.Volumes[0].GetSource())
+	}
+	if src.GetBucket() != "alice" || src.GetEndpoint() == "" || src.GetAccessKeyId() == "" || src.GetSecretAccessKey() == "" {
+		t.Errorf("unresolved bucket volume: %+v", src)
+	}
+	// No env resolution happens on this path.
+	for _, ctr := range spec.Containers {
+		if len(ctr.GetEnv()) != 0 {
+			t.Errorf("env resolved on the env-less path: %v", ctr.GetEnv())
+		}
 	}
 }

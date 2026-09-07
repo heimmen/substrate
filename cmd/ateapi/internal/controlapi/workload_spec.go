@@ -34,9 +34,14 @@ import (
 const envSecretCacheTTL = 30 * time.Second
 
 // workloadSpecFromActorTemplate builds a WorkloadSpec without resolving
-// container env vars. Use this when downstream consumers (e.g. checkpoint
-// requests) don't need env entries materialized.
-func workloadSpecFromActorTemplate(actorTemplate *atev1alpha1.ActorTemplate, actor *ateapipb.Actor) (*ateletpb.WorkloadSpec, error) {
+// container env vars, but with objectStoreBucket volumes fully resolved
+// (endpoint/credentials from the template namespace's Secret + per-actor
+// bucket name), so every RPC that carries a WorkloadSpec — including the
+// env-less checkpoint requests used by pause/suspend — lets atelet sync the
+// bucket volume. kubeClient may be nil only when the template declares no
+// bucket volume; secretCache is optional and, when supplied, deduplicates
+// Secret reads.
+func workloadSpecFromActorTemplate(ctx context.Context, kubeClient kubernetes.Interface, secretCache *envSecretCache, actorTemplate *atev1alpha1.ActorTemplate, actor *ateapipb.Actor) (*ateletpb.WorkloadSpec, error) {
 	workloadSpec := &ateletpb.WorkloadSpec{
 		PauseImage: actorTemplate.Spec.PauseImage,
 	}
@@ -58,6 +63,18 @@ func workloadSpecFromActorTemplate(actorTemplate *atev1alpha1.ActorTemplate, act
 	// TODO: order may be important for nested mounts. Also need to think about
 	// nested mount support in general.
 	if err := appendExternalVolumes(workloadSpec, actorTemplate, actor); err != nil {
+		return nil, err
+	}
+
+	// Resolve objectStoreBucket volumes against the template namespace. Like
+	// env secretKeyRef resolution this needs the cluster, so it happens in
+	// every builder that can carry a bucket volume.
+	resolver := &envResolver{
+		kubeClient: kubeClient,
+		namespace:  actorTemplate.Namespace,
+		cache:      secretCache,
+	}
+	if err := appendObjectStoreBucketVolumes(ctx, workloadSpec, actorTemplate, actor, resolver); err != nil {
 		return nil, err
 	}
 
@@ -85,7 +102,7 @@ func workloadSpecFromActorTemplate(actorTemplate *atev1alpha1.ActorTemplate, act
 // container's env vars against the cluster. kubeClient must be non-nil;
 // secretCache is optional and, when supplied, deduplicates Secret reads.
 func workloadSpecFromActorTemplateWithEnv(ctx context.Context, kubeClient kubernetes.Interface, secretCache *envSecretCache, actorTemplate *atev1alpha1.ActorTemplate, actor *ateapipb.Actor) (*ateletpb.WorkloadSpec, error) {
-	workloadSpec, err := workloadSpecFromActorTemplate(actorTemplate, actor)
+	workloadSpec, err := workloadSpecFromActorTemplate(ctx, kubeClient, secretCache, actorTemplate, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +180,63 @@ func isVolumeMounted(volumeName string, template *atev1alpha1.ActorTemplate) boo
 		}
 	}
 	return false
+}
+
+// appendObjectStoreBucketVolumes resolves objectStoreBucket template volumes
+// and appends them to workloadSpec if they are referenced in container
+// volumeMounts. Resolution reads the referenced Secret from the
+// ActorTemplate's namespace (never from the actor's) and derives the
+// per-actor bucket name as bucketPrefix + actor name — the same rule the
+// mf-pi admin badge uses, so both always address the same bucket.
+func appendObjectStoreBucketVolumes(ctx context.Context, workloadSpec *ateletpb.WorkloadSpec, template *atev1alpha1.ActorTemplate, actor *ateapipb.Actor, resolver *envResolver) error {
+	if template == nil {
+		return nil
+	}
+	for _, vol := range template.Spec.Volumes {
+		src := vol.ObjectStoreBucket
+		if src == nil {
+			continue
+		}
+		if !isVolumeMounted(vol.Name, template) {
+			continue
+		}
+		if actor == nil {
+			return status.Errorf(codes.FailedPrecondition, "actor is required when objectStoreBucket volume %q is present", vol.Name)
+		}
+		if resolver.kubeClient == nil {
+			return status.Errorf(codes.FailedPrecondition, "objectStoreBucket volume %q cannot be resolved because Kubernetes client is unavailable", vol.Name)
+		}
+
+		volID := fmt.Sprintf("objectStoreBucket volume %q", vol.Name)
+		endpoint, err := resolver.resolveRequiredSecretKey(ctx, volID, "endpoint", src.SecretRef.Name, src.SecretRef.EndpointKey)
+		if err != nil {
+			return err
+		}
+		accessKeyID, err := resolver.resolveRequiredSecretKey(ctx, volID, "access key id", src.SecretRef.Name, src.SecretRef.AccessKeyIdKey)
+		if err != nil {
+			return err
+		}
+		secretAccessKey, err := resolver.resolveRequiredSecretKey(ctx, volID, "secret access key", src.SecretRef.Name, src.SecretRef.SecretAccessKeyKey)
+		if err != nil {
+			return err
+		}
+
+		bucket := src.BucketPrefix + actor.GetMetadata().GetName()
+		workloadSpec.Volumes = append(workloadSpec.Volumes, &ateletpb.Volume{
+			Name: vol.Name,
+			Type: ateletpb.VolumeType_VOLUME_TYPE_OBJECT_STORE_BUCKET,
+			Source: &ateletpb.Volume_ObjectStoreBucket{
+				ObjectStoreBucket: &ateletpb.ObjectStoreBucketVolumeSource{
+					Endpoint:              endpoint,
+					AccessKeyId:           accessKeyID,
+					SecretAccessKey:       secretAccessKey,
+					Bucket:                bucket,
+					ExportIntervalSeconds: derefInt32(src.ExportIntervalSeconds),
+				},
+			},
+		})
+	}
+	return nil
 }
 
 // toAteletReadyz projects the CRD readyz field onto the ateletpb wire type.
@@ -252,6 +326,29 @@ func (r *envResolver) secret(ctx context.Context, name string) (*corev1.Secret, 
 		return r.cache.get(ctx, r.kubeClient, r.namespace, name)
 	}
 	return r.kubeClient.CoreV1().Secrets(r.namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// resolveRequiredSecretKey reads a single required key from a Secret in the
+// template namespace. Missing Secret/key surface as FailedPrecondition, the
+// same semantics as a required env secretKeyRef. Optional is not supported:
+// a bucket volume without credentials can never run.
+func (r *envResolver) resolveRequiredSecretKey(ctx context.Context, volID, what, secretName, key string) (string, error) {
+	ref := &atev1alpha1.SecretKeySelector{Name: secretName, Key: key}
+	value, include, err := r.resolveSecretKeyRef(ctx, fmt.Sprintf("%s %s", volID, what), ref)
+	if err != nil {
+		return "", err
+	}
+	if !include {
+		return "", status.Errorf(codes.FailedPrecondition, "%s references missing key %q in secret %s/%s", volID, key, r.namespace, secretName)
+	}
+	return value, nil
+}
+
+func derefInt32(v *int32) int32 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 type envSecretCache struct {

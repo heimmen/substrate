@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 )
 
 // PauseInput holds the immutable parameters requested by the client.
@@ -105,8 +106,10 @@ func (s *MarkPausingStep) Execute(ctx context.Context, input *PauseInput, state 
 func (s *MarkPausingStep) RetryBackoff() *wait.Backoff { return nil }
 
 type CallAteletPauseStep struct {
-	store  store.Interface
-	dialer *AteletDialer
+	store       store.Interface
+	dialer      *AteletDialer
+	kubeClient  kubernetes.Interface
+	secretCache *envSecretCache
 }
 
 func (s *CallAteletPauseStep) Name() string { return "CallAteletPause" }
@@ -141,7 +144,11 @@ func (s *CallAteletPauseStep) Execute(ctx context.Context, input *PauseInput, st
 	}
 	client := ateletpb.NewAteomHerderClient(ateletConn)
 
-	workloadSpec, err := workloadSpecFromActorTemplate(state.ActorTemplate, state.Actor)
+	// The spec carries objectStoreBucket volumes fully resolved (endpoint,
+	// credentials, per-actor bucket) so atelet can run the fail-closed final
+	// bucket export on the pause path. Env entries are intentionally not
+	// materialized here: they are frozen in the checkpointed process memory.
+	workloadSpec, err := workloadSpecFromActorTemplate(ctx, s.kubeClient, s.secretCache, state.ActorTemplate, state.Actor)
 	if err != nil {
 		return err
 	}

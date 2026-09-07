@@ -300,15 +300,15 @@ includes `mfpi-minio-admin`; admin env has `MINIO_ENDPOINT`, no token.
         `ObjectStoreBucketVolumeSource` message + oneof member
   - [x] Regenerate deepcopy/CRD (`go generate ./pkg/api/...`) + protos
         (`go generate ./internal/proto/...`)
-- [ ] **M2 — ateapi resolution + RPC threading**
-  - [ ] `cmd/ateapi/internal/controlapi/workload_spec.go`: builder gains
+- [x] **M2 — ateapi resolution + RPC threading**
+  - [x] `cmd/ateapi/internal/controlapi/workload_spec.go`: builder gains
         ctx/kubeClient/secretCache; new `resolveObjectStoreBucketVolumes`
         (Secret keys → endpoint/creds; bucket = `bucketPrefix + actorName`;
         missing → FailedPrecondition)
-  - [ ] `workflow.go` + `workflow_pause.go`/`workflow_suspend.go`: thread
+  - [x] `workflow.go` + `workflow_pause.go`/`workflow_suspend.go`: thread
         kubeClient+secretCache into CallAteletPauseStep/CallAteletSuspendStep
         so Checkpoint carries the resolved bucket volume
-  - [ ] `workload_spec_test.go`: update call sites + bucket-resolution cases
+  - [x] `workload_spec_test.go`: update call sites + bucket-resolution cases
 - [ ] **M3 — atelet mount + rehydrate/export + exclusion**
   - [ ] `cmd/atelet/internal/ategcs/bucket.go` (new): `BucketClient` with
         explicit endpoint+static creds — `EnsureBucket`, `HeadObject`

@@ -210,7 +210,7 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, atespace, name string)
 	steps := []WorkflowStep[*SuspendInput, *SuspendState]{
 		&LoadActorForSuspendStep{store: w.store, actorTemplateLister: w.actorTemplateLister},
 		&MarkSuspendingStep{store: w.store},
-		&CallAteletSuspendStep{store: w.store, dialer: w.dialer},
+		&CallAteletSuspendStep{store: w.store, dialer: w.dialer, kubeClient: w.kubeClient, secretCache: w.secretCache},
 		&DetachVolumesStep{store: w.store},
 		&FinalizeSuspendedStep{store: w.store},
 	}
@@ -239,7 +239,7 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, atespace, name string) (
 	steps := []WorkflowStep[*PauseInput, *PauseState]{
 		&LoadActorForPauseStep{store: w.store, actorTemplateLister: w.actorTemplateLister},
 		&MarkPausingStep{store: w.store},
-		&CallAteletPauseStep{store: w.store, dialer: w.dialer},
+		&CallAteletPauseStep{store: w.store, dialer: w.dialer, kubeClient: w.kubeClient, secretCache: w.secretCache},
 		&DetachVolumesForPauseStep{store: w.store},
 		&FinalizePausedStep{store: w.store},
 	}
