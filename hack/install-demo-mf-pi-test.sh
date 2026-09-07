@@ -75,16 +75,10 @@ demo-mf-pi-test_images() {
   MINIO_DIGEST="${minio##*@}"
 }
 
-# Resolve the shared profile-sync token and MinIO root credentials in the same
-# order as deploy-test.sh: an exported value, then the live Secret (kept stable
-# so actors already running with the old value are not cut off), then a fresh
-# random/default value (first deploy).
+# Resolve the MinIO root credentials in the same order as deploy-test.sh: an
+# exported value, then the live Secret (kept stable so already-running MinIO
+# data is not orphaned), then a fresh random/default value (first deploy).
 demo-mf-pi-test_sync_secrets() {
-  if [[ -z "${MFPI_PROFILE_TOKEN:-}" ]]; then
-    MFPI_PROFILE_TOKEN="$(run_kubectl get secret mfpi-profile-token -n ate-demo-mf-pi-test \
-      -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
-  fi
-  MFPI_PROFILE_TOKEN="${MFPI_PROFILE_TOKEN:-$(openssl rand -hex 32 2>/dev/null || tr -dc 'a-f0-9' </dev/urandom | head -c 64)}"
   if [[ -z "${MINIO_ROOT_USER:-}" ]]; then
     MINIO_ROOT_USER="$(run_kubectl get secret mfpi-minio-admin -n ate-demo-mf-pi-test \
       -o jsonpath='{.data.root-user}' 2>/dev/null | base64 -d || true)"
@@ -106,7 +100,6 @@ demo-mf-pi-test_render() {
       -e "s|\${MF_PI_DIGEST}|${MF_PI_DIGEST:-placeholder}|g" \
       -e "s|\${PAUSE_DIGEST}|${PAUSE_DIGEST:-placeholder}|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|${MFPI_WORKER_REPLICAS:-2}|g" \
-      -e "s|\${MFPI_PROFILE_TOKEN}|${MFPI_PROFILE_TOKEN:-placeholder}|g" \
       -e "s|\${MINIO_DIGEST}|${MINIO_DIGEST:-placeholder}|g" \
       -e "s|\${MINIO_ROOT_USER}|${MINIO_ROOT_USER:-minioadmin}|g" \
       -e "s|\${MINIO_ROOT_PASSWORD}|${MINIO_ROOT_PASSWORD:-minioadmin}|g" \
@@ -158,7 +151,7 @@ demo-mf-pi-test_delete() {
 demo-mf-pi-test_usage() {
   echo ""
   echo "  Required env: DEEPSEEK_API_KEY, BUCKET_NAME, KO_DOCKER_REPO"
-  echo "  Optional env: MFPI_WORKER_REPLICAS (default 2; max concurrently-active users), MFPI_PROFILE_TOKEN, MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, MINIO_IMAGE"
+  echo "  Optional env: MFPI_WORKER_REPLICAS (default 2; max concurrently-active users), MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, MINIO_IMAGE"
   echo "  Deploys: pi-web test actors + the mfpi-admin user-management UI + a per-user profile MinIO store (namespace ate-demo-mf-pi-test, atespace mfpi-test)"
   echo "  UI access: http://<hostname>:59881/usermanagement/ (via run-nginx-test.sh)"
 }

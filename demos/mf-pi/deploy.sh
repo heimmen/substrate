@@ -27,7 +27,6 @@
 #   DEEPSEEK_API_KEY      (default: read from the mf-pi-provider-config secret)
 #   MFPI_WORKER_REPLICAS  (default 16)
 #   KO_DEFAULTBASEIMAGE   (default localhost:5001/distroless-static-debian13)
-#   MFPI_PROFILE_TOKEN    (default: read from mfpi-profile-token Secret, else random)
 #   MINIO_ROOT_USER       (default: read from mfpi-minio-admin Secret, else minioadmin)
 #   MINIO_ROOT_PASSWORD   (default: read from mfpi-minio-admin Secret, else random)
 #   MINIO_IMAGE           (default quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z)
@@ -57,18 +56,6 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   )"
 fi
 : "${MFPI_WORKER_REPLICAS:=16}"
-# Shared profile-sync token. Kept stable across redeploys (prefer the live
-# Secret) so actors already running with the old token are not cut off; only
-# generated on the first deploy.
-if [[ -z "${MFPI_PROFILE_TOKEN:-}" ]]; then
-  MFPI_PROFILE_TOKEN="$(
-    kubectl get secret mfpi-profile-token -n "${NAMESPACE}" \
-      -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true
-  )"
-fi
-if [[ -z "${MFPI_PROFILE_TOKEN:-}" ]]; then
-  MFPI_PROFILE_TOKEN="$(openssl rand -hex 32 2>/dev/null || tr -dc 'a-f0-9' </dev/urandom | head -c 64)"
-fi
 # MinIO root credentials for the demo's per-user object store (mfpi-minio).
 # Prefer exported values, then the live Secret, then defaults (random password).
 if [[ -z "${MINIO_ROOT_USER:-}" ]]; then
@@ -106,7 +93,6 @@ render() {
       -e "s|\${MF_PI_DIGEST}|$(esc_repl "${MF_PI_DIGEST}")|g" \
       -e "s|\${PAUSE_DIGEST}|$(esc_repl "${PAUSE_DIGEST}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|$(esc_repl "${MFPI_WORKER_REPLICAS:-16}")|g" \
-      -e "s|\${MFPI_PROFILE_TOKEN}|$(esc_repl "${MFPI_PROFILE_TOKEN:-placeholder}")|g" \
       -e "s|\${MINIO_DIGEST}|$(esc_repl "${MINIO_DIGEST}")|g" \
       -e "s|\${MINIO_ROOT_USER}|$(esc_repl "${MINIO_ROOT_USER:-minioadmin}")|g" \
       -e "s|\${MINIO_ROOT_PASSWORD}|$(esc_repl "${MINIO_ROOT_PASSWORD:-minioadmin}")|g" \

@@ -326,20 +326,20 @@ includes `mfpi-minio-admin`; admin env has `MINIO_ENDPOINT`, no token.
   - [x] `cmd/atelet/bucketsync_test.go`: mount decision (empty+present→rehydrate;
         empty+absent→seed; non-empty→untouched; 5xx→error), skip-empty export,
         exclusions, round-trip + unsafe-path rejection, fail-closed suspend
-- [ ] **M4 — mf-pi rewiring (deletes the broker)**
-  - [ ] `mf-pi.yaml.tmpl` + `mf-pi-test.yaml.tmpl`: `volumes[].objectStoreBucket`
+- [x] **M4 — mf-pi rewiring (deletes the broker)**
+  - [x] `mf-pi.yaml.tmpl` + `mf-pi-test.yaml.tmpl`: `volumes[].objectStoreBucket`
         (secretRef mfpi-minio-admin: endpoint/root-user/root-password) + mount
         `/data/pi-agent`; strip supervisor sync block + `MFPI_ADMIN_URL`/
         `MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`; `mfpi-minio-admin`
         Secret gains `endpoint` key; RBAC resourceNames swap
         (`mfpi-profile-token` → `mfpi-minio-admin`); delete `mfpi-profile-token`
         Secret; admin Deployment drops token env
-  - [ ] `admin/profile.go` + `admin/main.go` + tests: delete Get/PutProfile +
+  - [x] `admin/profile.go` + `admin/main.go` + tests: delete Get/PutProfile +
         `/internal/actor/*` handlers + token gate; keep EnsureBucket + HasProfile
         badge
-  - [ ] `deploy.sh`/`deploy-test.sh`/`hack/install-demo-mf-pi.sh`/
+  - [x] `deploy.sh`/`deploy-test.sh`/`hack/install-demo-mf-pi.sh`/
         `install-demo-mf-pi-test.sh`: drop `MFPI_PROFILE_TOKEN` logic
-  - [ ] `validate-templates.sh`: assert volume+mount present, broker gone,
+  - [x] `validate-templates.sh`: assert volume+mount present, broker gone,
         Role lists `mfpi-minio-admin`
 - [ ] **M5 — tests + docs + verify**
   - [ ] `pkg/api/v1alpha1/actortemplate_validation_test.go`: ExactlyOneOf,

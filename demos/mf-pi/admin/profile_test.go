@@ -15,12 +15,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -29,20 +26,19 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
-// fakeProfileStore is an in-memory profileStore for tests.
+// fakeProfileStore is an in-memory profileStore for tests. It only implements
+// the read-only badge surface (EnsureBucket + HasProfile) — the compile-time
+// narrowing proves the server has no profile push/pull broker anymore.
 type fakeProfileStore struct {
 	mu          sync.Mutex
 	profiles    map[string]fakeProfile
 	ensureCalls []string
-	putCalls    []string
 	errEnsure   error
-	errPut      error
 	errHas      error
 }
 
 type fakeProfile struct {
-	data []byte
-	mod  time.Time
+	mod time.Time
 }
 
 func newFakeProfileStore() *fakeProfileStore {
@@ -62,27 +58,6 @@ func (s *fakeProfileStore) EnsureBucket(_ context.Context, name string) error {
 	return nil
 }
 
-func (s *fakeProfileStore) GetProfile(_ context.Context, name string) (io.ReadCloser, time.Time, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p, ok := s.profiles[name]
-	if !ok || p.data == nil {
-		return nil, time.Time{}, false, nil
-	}
-	return io.NopCloser(bytes.NewReader(p.data)), p.mod, true, nil
-}
-
-func (s *fakeProfileStore) PutProfile(_ context.Context, name string, data []byte) (time.Time, error) {
-	if s.errPut != nil {
-		return time.Time{}, s.errPut
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.putCalls = append(s.putCalls, name)
-	s.profiles[name] = fakeProfile{data: append([]byte(nil), data...), mod: fixedNow.Add(30 * time.Second)}
-	return fixedNow.Add(30 * time.Second), nil
-}
-
 func (s *fakeProfileStore) HasProfile(_ context.Context, name string) (time.Time, bool, error) {
 	if s.errHas != nil {
 		return time.Time{}, false, s.errHas
@@ -90,116 +65,17 @@ func (s *fakeProfileStore) HasProfile(_ context.Context, name string) (time.Time
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.profiles[name]
-	if !ok || p.data == nil {
+	if !ok || p.mod.IsZero() {
 		return time.Time{}, false, nil
 	}
 	return p.mod, true, nil
 }
 
-func doInternal(s *server, method, path, token, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	rec := httptest.NewRecorder()
-	s.handleInternalActor(rec, req)
-	return rec
-}
-
-func TestInternalProfileGate(t *testing.T) {
-	// No Authorization header.
-	if rec := doInternal(newTestServer(newFake()), http.MethodGet, "/internal/actor/alice/profile", "", ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("no token: status = %d, want 401", rec.Code)
-	}
-	// Wrong token.
-	if rec := doInternal(newTestServer(newFake()), http.MethodGet, "/internal/actor/alice/profile", "wrong-token", ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong token: status = %d, want 401", rec.Code)
-	}
-	// Server without a configured token fails closed.
-	s := newTestServer(newFake())
-	s.profileToken = ""
-	if rec := doInternal(s, http.MethodGet, "/internal/actor/alice/profile", "", ""); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("empty server token: status = %d, want 503", rec.Code)
-	}
-	// Valid token but no MinIO store configured.
-	s = newTestServer(newFake())
-	s.profiles = nil
-	if rec := doInternal(s, http.MethodGet, "/internal/actor/alice/profile", "test-token", ""); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("nil store: status = %d, want 503", rec.Code)
-	}
-}
-
-func TestInternalProfilePutThenGetRoundTrip(t *testing.T) {
-	s := newTestServer(newFake())
-	store := s.profiles.(*fakeProfileStore)
-	body := "tar-bytes-profile"
-
-	rec := doInternal(s, http.MethodPut, "/internal/actor/alice/profile", "test-token", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if len(store.ensureCalls) != 1 || store.ensureCalls[0] != "alice" {
-		t.Errorf("ensureCalls = %v, want [alice]", store.ensureCalls)
-	}
-	if len(store.putCalls) != 1 || store.putCalls[0] != "alice" {
-		t.Errorf("putCalls = %v, want [alice]", store.putCalls)
-	}
-	resp := decode[struct {
-		Bytes int `json:"bytes"`
-	}](t, rec)
-	if resp.Bytes != len(body) {
-		t.Errorf("bytes = %d, want %d", resp.Bytes, len(body))
-	}
-
-	rec = doInternal(s, http.MethodGet, "/internal/actor/alice/profile", "test-token", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := rec.Body.String(); got != body {
-		t.Errorf("GET body = %q, want %q", got, body)
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/gzip" {
-		t.Errorf("Content-Type = %q, want application/gzip", ct)
-	}
-}
-
-func TestInternalProfileGetNoProfile(t *testing.T) {
-	s := newTestServer(newFake())
-	if rec := doInternal(s, http.MethodGet, "/internal/actor/alice/profile", "test-token", ""); rec.Code != http.StatusNoContent {
-		t.Fatalf("GET status = %d, want 204", rec.Code)
-	}
-}
-
-func TestInternalProfilePutInvalidName(t *testing.T) {
-	s := newTestServer(newFake())
-	if rec := doInternal(s, http.MethodPut, "/internal/actor/Bad_User/profile", "test-token", "x"); rec.Code != http.StatusBadRequest {
-		t.Fatalf("PUT invalid name status = %d, want 400", rec.Code)
-	}
-	// Path traversal attempt.
-	if rec := doInternal(s, http.MethodGet, "/internal/actor/alice/../evi/profile", "test-token", ""); rec.Code == http.StatusOK {
-		t.Fatalf("path traversal unexpectedly succeeded")
-	}
-}
-
-func TestInternalProfilePutTooLarge(t *testing.T) {
-	old := maxProfileBytes
-	maxProfileBytes = 1024
-	defer func() { maxProfileBytes = old }()
-	s := newTestServer(newFake())
-	rec := doInternal(s, http.MethodPut, "/internal/actor/alice/profile", "test-token", strings.Repeat("x", 1025))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("PUT oversized status = %d, want 413; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestInternalProfilePutStoreError(t *testing.T) {
-	s := newTestServer(newFake())
-	store := s.profiles.(*fakeProfileStore)
-	store.errPut = errors.New("minio unavailable")
-	rec := doInternal(s, http.MethodPut, "/internal/actor/alice/profile", "test-token", "x")
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("PUT store error status = %d, want 502; body=%s", rec.Code, rec.Body.String())
-	}
+// seedProfile marks a user as having a synced profile at a fixed time.
+func (s *fakeProfileStore) seedProfile(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.profiles[name] = fakeProfile{mod: fixedNow.Add(30 * time.Second)}
 }
 
 func TestHandleCreateUserEnsuresProfileBucket(t *testing.T) {
@@ -239,17 +115,14 @@ func TestHandleDeleteUserKeepsProfile(t *testing.T) {
 	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
 	s := newTestServer(f)
 	store := s.profiles.(*fakeProfileStore)
-	if _, err := store.PutProfile(context.Background(), "alice", []byte("profile")); err != nil {
-		t.Fatalf("seeding profile: %v", err)
-	}
+	store.seedProfile("alice")
 
 	if rec := doRequest(s, http.MethodDelete, "/api/users/alice", ""); rec.Code != http.StatusOK {
 		t.Fatalf("delete status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	// Deleting a user must KEEP the MinIO bucket/object so a delete+recreate
-	// reset can restore the profile on the next cold boot.
-	p, ok := store.profiles["alice"]
-	if !ok || string(p.data) != "profile" {
+	// reset can restore the profile automatically on the next mount.
+	if p, ok := store.profiles["alice"]; !ok || p.mod.IsZero() {
 		t.Errorf("profile for alice lost after delete: %+v ok=%v", p, ok)
 	}
 }
@@ -260,10 +133,7 @@ func TestHandleListUsersReportsProfileSynced(t *testing.T) {
 	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
 	addActor(f, "mfpi", "bob", "STATUS_SUSPENDED", fixedNow.Add(-2*time.Hour))
 	s := newTestServer(f)
-	store := s.profiles.(*fakeProfileStore)
-	if _, err := store.PutProfile(context.Background(), "bob", []byte("x")); err != nil {
-		t.Fatalf("seeding profile: %v", err)
-	}
+	s.profiles.(*fakeProfileStore).seedProfile("bob")
 
 	rec := doRequest(s, http.MethodGet, "/api/users", "")
 	if rec.Code != http.StatusOK {

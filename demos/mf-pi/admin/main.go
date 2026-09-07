@@ -27,13 +27,11 @@
 //	GET    /                          serve the embedded admin UI
 //	GET    /healthz                   readiness
 //
-// Per-user MinIO persistence (see profile.go): this server is the trusted S3
-// broker holding a single central MinIO admin credential. Each user has a
-// dedicated bucket holding their /data/pi-agent profile tar.gz, synced by an
-// in-actor supervisor via the token-gated endpoints
-//
-//	GET    /internal/actor/{name}/profile   stream the user's profile (204 if none)
-//	PUT    /internal/actor/{name}/profile   store a pushed profile tar.gz
+// Per-user MinIO visibility (see profile.go): this server reads the per-user
+// buckets for the user-list "已同步" badge and best-effort pre-creates a
+// user's bucket at create time. The bucket sync itself is the platform's
+// objectStoreBucket volume job (ateapi + atelet), so there are no in-actor
+// sync endpoints here.
 //
 // It authenticates in-cluster exactly like ate-controller/atenet-router: a
 // projected service-account token (audience api.ate-system.svc) as Bearer
@@ -104,8 +102,9 @@ const (
 	defaultRouterAddr = "http://atenet-router.ate-system.svc:80"
 
 	// defaultMinioRegion is the region MinIO ignores but the AWS SDK requires.
-	// An empty MINIO_ENDPOINT disables the profile store entirely (the server
-	// still runs; user-list sync badges and the /internal endpoints degrade).
+	// An empty MINIO_ENDPOINT disables the MinIO badge entirely (the server
+	// still runs; user-list sync badges degrade and create-user skips bucket
+	// provisioning).
 	defaultMinioRegion = "us-east-1"
 
 	// passwordIterations is the PBKDF2 iteration count used to hash user
@@ -328,7 +327,6 @@ type server struct {
 	keys              keyStore
 	actors            actorAuthClient
 	profiles          profileStore
-	profileToken      string
 	now               func() time.Time
 }
 
@@ -524,7 +522,7 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort pre-create the user's MinIO bucket so the per-user store
 	// exists immediately. Failures never fail the create: the bucket is also
-	// ensured lazily by the admin on the actor's first profile push.
+	// ensured lazily by atelet on the actor's first bucket-volume mount.
 	profileWarn := s.ensureProfileBucket(ctx, name)
 
 	// Resume immediately so the user's agent page is openable without the
@@ -900,7 +898,6 @@ type serverConfig struct {
 	minioSecretKey     string
 	minioRegion        string
 	minioBucketPrefix  string
-	profileToken       string
 }
 
 func serverConfigFromEnv() serverConfig {
@@ -921,7 +918,6 @@ func serverConfigFromEnv() serverConfig {
 		minioSecretKey:     os.Getenv("MINIO_SECRET_KEY"),
 		minioRegion:        envOr("MINIO_REGION", defaultMinioRegion),
 		minioBucketPrefix:  os.Getenv("MINIO_BUCKET_PREFIX"),
-		profileToken:       os.Getenv("MFPI_PROFILE_TOKEN"),
 	}
 }
 
@@ -982,9 +978,9 @@ func main() {
 	}
 	cancel()
 
-	// Per-user MinIO profile store (see profile.go). Configured only when
-	// MINIO_ENDPOINT is set; otherwise the profile endpoints and sync badges
-	// degrade gracefully and create-user skips bucket provisioning.
+	// Per-user MinIO visibility (see profile.go). Configured only when
+	// MINIO_ENDPOINT is set; otherwise the sync badges degrade gracefully and
+	// create-user skips bucket provisioning.
 	var profiles profileStore
 	if cfg.minioEndpoint != "" {
 		if cfg.minioAccessKey == "" || cfg.minioSecretKey == "" {
@@ -995,7 +991,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("building MinIO profile store: %v", err)
 		}
-		log.Printf("MinIO profile persistence enabled (endpoint=%s prefix=%q)", cfg.minioEndpoint, cfg.minioBucketPrefix)
+		log.Printf("MinIO profile badge enabled (endpoint=%s prefix=%q)", cfg.minioEndpoint, cfg.minioBucketPrefix)
 	}
 
 	srv := &server{
@@ -1007,7 +1003,6 @@ func main() {
 		keys:              keys,
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
 		profiles:          profiles,
-		profileToken:      cfg.profileToken,
 		now:               time.Now,
 	}
 
@@ -1015,7 +1010,6 @@ func main() {
 	mux.HandleFunc("/", srv.handleIndex)
 	mux.HandleFunc("/api/users", srv.handleUsers)
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
-	mux.HandleFunc("/internal/actor/", srv.handleInternalActor)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
 
