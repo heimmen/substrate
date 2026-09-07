@@ -304,7 +304,11 @@ func buildActorOCISpec(actorUID string, args []string, env []string, annotations
 		switch volumeTypes[vm.GetName()] {
 		case ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR:
 			srcPath = ateompath.DurableDirVolumeMountPoint(actorUID, vm.GetName())
-		case ateletpb.VolumeType_VOLUME_TYPE_EXTERNAL:
+		case ateletpb.VolumeType_VOLUME_TYPE_EXTERNAL,
+			ateletpb.VolumeType_VOLUME_TYPE_OBJECT_STORE_BUCKET:
+			// objectStoreBucket volumes are backed by the same per-actor
+			// node-local dir layout as external volumes; the bucket sync in
+			// atelet keeps the dir in sync with the object store.
 			srcPath = ateompath.VolumeHostPath(actorUID, vm.GetName())
 		default:
 			continue

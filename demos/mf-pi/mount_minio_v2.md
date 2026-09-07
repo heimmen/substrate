@@ -309,21 +309,21 @@ includes `mfpi-minio-admin`; admin env has `MINIO_ENDPOINT`, no token.
         kubeClient+secretCache into CallAteletPauseStep/CallAteletSuspendStep
         so Checkpoint carries the resolved bucket volume
   - [x] `workload_spec_test.go`: update call sites + bucket-resolution cases
-- [ ] **M3 — atelet mount + rehydrate/export + exclusion**
-  - [ ] `cmd/atelet/internal/ategcs/bucket.go` (new): `BucketClient` with
+- [x] **M3 — atelet mount + rehydrate/export + exclusion**
+  - [x] `cmd/atelet/internal/ategcs/bucket.go` (new): `BucketClient` with
         explicit endpoint+static creds — `EnsureBucket`, `HeadObject`
         (NotFound→false,nil), file-backed `GetObjectToFile`/`PutObjectFromFile`
-  - [ ] `cmd/atelet/bucketsync.go` (new): `tarGzDir` (excl. `*.log|*.sock|*.tmp`),
+  - [x] `cmd/atelet/bucketsync.go` (new): `tarGzDir` (excl. `*.log|*.sock|*.tmp`),
         `untarGzDir` (safe), `exportDirToBucket` (skip 0-file),
         `rehydrateDirFromBucket` (atomic swap), `bucketSyncManager`
         (mount decision / register ticker / finalExportAndStop fail-closed)
-  - [ ] `cmd/atelet/main.go`: Run/Restore mount+rehydrate+register (defer
+  - [x] `cmd/atelet/main.go`: Run/Restore mount+rehydrate+register (defer
         unregister); Checkpoint final export before cleanup; `resetActorDirs`
         skips bucket dirs; `buildAteomWorkloadSpec` includes bucket mounts;
         pause `dev.gvisor.spec.mount.durabledir.*` annotations from the bucket
         host path (when no durableDir)
-  - [ ] `cmd/atelet/oci.go`: `buildActorOCISpec` binds the new volume type
-  - [ ] `cmd/atelet/bucketsync_test.go`: mount decision (empty+present→rehydrate;
+  - [x] `cmd/atelet/oci.go`: `buildActorOCISpec` binds the new volume type
+  - [x] `cmd/atelet/bucketsync_test.go`: mount decision (empty+present→rehydrate;
         empty+absent→seed; non-empty→untouched; 5xx→error), skip-empty export,
         exclusions, round-trip + unsafe-path rejection, fail-closed suspend
 - [ ] **M4 — mf-pi rewiring (deletes the broker)**

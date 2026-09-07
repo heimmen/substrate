@@ -211,6 +211,7 @@ type AteomHerder struct {
 	imageCache    *imagecache.Store
 	anonGCSClient ategcs.ObjectStorage
 	gcsClient     ategcs.ObjectStorage
+	bucketSyncs   *bucketSyncManager
 }
 
 var _ ateletpb.AteomHerderServer = (*AteomHerder)(nil)
@@ -228,6 +229,7 @@ func NewService(
 		imageCache:    imageCache,
 		anonGCSClient: anonGCSClient,
 		gcsClient:     gcsClient,
+		bucketSyncs:   newBucketSyncManager(),
 	}
 	return wms
 }
@@ -250,7 +252,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		return nil, err
 	}
 
-	if err := resetActorDirs(actorUID); err != nil {
+	if err := resetActorDirs(actorUID, req.GetSpec().GetVolumes()); err != nil {
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
 	}
 
@@ -261,8 +263,20 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		if err != nil {
 			// TODO cleanup orphaned volumes
 			_ = s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes())
+			s.bucketSyncs.unregister(actorUID, req.GetSpec().GetVolumes())
 		}
 	}()
+
+	// objectStoreBucket volumes: prepare the host dirs (create + rehydrate
+	// when empty) before the guest boots, so the bind mount serves the
+	// bucket's content from the first read.
+	bucketSpecs, err := bucketVolumeSpecsFromProto(ctx, actorUID, req.GetSpec().GetVolumes())
+	if err != nil {
+		return nil, err
+	}
+	if err := mountBucketVolumes(ctx, bucketSpecs); err != nil {
+		return nil, err
+	}
 
 	// Record the sandbox binaries this actor is running so a later Checkpoint
 	// (whose request no longer carries the sandbox config) can re-fetch the same
@@ -295,6 +309,11 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		ActorUid:               actorUID,
 	}); err != nil {
 		return nil, fmt.Errorf("while calling ateom.RunWorkload: %w", err)
+	}
+
+	// Workload is up: start the periodic bucket exports.
+	for _, spec := range bucketSpecs {
+		s.bucketSyncs.register(actorUID, spec)
 	}
 
 	return &ateletpb.RunResponse{}, nil
@@ -402,11 +421,20 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 		return nil, fmt.Errorf("unexpected checkpoint type: %v", req.GetType())
 	}
 
+	// Final bucket-volume export while the workload is quiesced and the host
+	// dirs still exist, so suspend/delete never silently drops the latest
+	// writes. Fail-closed (same DataLoss+crash contract as the snapshot
+	// upload above): the exported profile remains the last successful one and
+	// the host dir survives, so no data silently disappears.
+	if err := s.bucketSyncs.finalExportAndStop(ctx, actorUID, req.GetSpec().GetVolumes()); err != nil {
+		return nil, ateerrors.NewGRPCError(ctx, codes.DataLoss, ateerrors.ReasonFaileSaveSnapshot, ateerrors.ActorCrashedMetadata(), fmt.Errorf("%w: %v", ateerrors.ReasonFaileSaveSnapshot, err))
+	}
+
 	// TODO cleanup orphaned volumes
 	_ = s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes())
 
 	// Note: we do not crash the actor if resetting the directory fails.
-	if err := resetActorDirs(actorUID); err != nil {
+	if err := resetActorDirs(actorUID, req.GetSpec().GetVolumes()); err != nil {
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
 	}
 
@@ -494,7 +522,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 
 	// Not crashing the actor, because terminal errors here indicate problems with atelet,
 	// node or the disk itself.
-	if err := resetActorDirs(actorUID); err != nil {
+	if err := resetActorDirs(actorUID, req.GetSpec().GetVolumes()); err != nil {
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
 	}
 
@@ -505,8 +533,20 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		if err != nil {
 			// TODO cleanup orphaned mounts
 			_ = s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes())
+			s.bucketSyncs.unregister(actorUID, req.GetSpec().GetVolumes())
 		}
 	}()
+
+	// objectStoreBucket volumes: prepare the host dirs (create + rehydrate
+	// when empty) before the guest boots, so a reloaded actor's bind mount
+	// serves the bucket's content from the first read.
+	bucketSpecs, err := bucketVolumeSpecsFromProto(ctx, actorUID, req.GetSpec().GetVolumes())
+	if err != nil {
+		return nil, err
+	}
+	if err := mountBucketVolumes(ctx, bucketSpecs); err != nil {
+		return nil, err
+	}
 
 	checkpointDir := ateompath.RestoreStateDir(actorUID)
 
@@ -618,6 +658,11 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonTerminalFileSystemError)
 	}
 
+	// Workload is up: start the periodic bucket exports.
+	for _, spec := range bucketSpecs {
+		s.bucketSyncs.register(actorUID, spec)
+	}
+
 	slog.InfoContext(ctx, "Restore timing breakdown", slog.String("actor", actorName),
 		slog.Duration("download", dDownload),   // rustfs/GCS fetch + decompress (or local copy)
 		slog.Duration("oci_unpack", dBundles),  // prepareOCIBundles: unpack the OCI image to the bundle
@@ -723,13 +768,29 @@ func (s *AteomHerder) prepareOCIBundles(
 			"io.kubernetes.cri.container-type": "sandbox",
 			"io.kubernetes.cri.container-name": "pause",
 		}
-		// add annotation for every durable-dir volume
+		// Annotate the excluded-from-snapshot mounts for the patched runsc:
+		// durable-dir volumes participate in snapshots, while
+		// objectStoreBucket volumes are excluded from Full fs-deltas (their
+		// truth is the bucket) and re-bound from the host on restore. The
+		// gVisor annotation set is a single slot, so only one such mount is
+		// supported per template (enforced by CEL validation).
 		// TODO(dberkov) needs to revisit this logic once gVisor supports multiple durable-dir volumes.
 		for _, vol := range spec.GetVolumes() {
 			if vol.GetType() == ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR {
 				annotations["dev.gvisor.spec.mount.durabledir.type"] = "bind"
 				annotations["dev.gvisor.spec.mount.durabledir.share"] = "container"
 				annotations["dev.gvisor.spec.mount.durabledir.source"] = ateompath.DurableDirVolumeMountPoint(actorUID, vol.GetName())
+				break
+			}
+		}
+		if _, ok := annotations["dev.gvisor.spec.mount.durabledir.type"]; !ok {
+			for _, vol := range spec.GetVolumes() {
+				if vol.GetType() == ateletpb.VolumeType_VOLUME_TYPE_OBJECT_STORE_BUCKET {
+					annotations["dev.gvisor.spec.mount.durabledir.type"] = "bind"
+					annotations["dev.gvisor.spec.mount.durabledir.share"] = "container"
+					annotations["dev.gvisor.spec.mount.durabledir.source"] = ateompath.VolumeHostPath(actorUID, vol.GetName())
+					break
+				}
 			}
 		}
 
@@ -802,10 +863,14 @@ func (s *AteomHerder) dialAteom(ctx context.Context, targetAteomUid string) (ate
 // buildAteomWorkloadSpec projects the atelet-facing workload spec onto
 // the ateom-facing one.
 func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) *ateompb.WorkloadSpec {
-	ddVolumes := make(map[string]bool)
+	// Volumes excluded from snapshot fs-deltas: DurableDir volumes are the
+	// classic case; objectStoreBucket volumes are excluded too because their
+	// truth is the bucket, not the checkpoint image.
+	excludedVolumes := make(map[string]bool)
 	for _, vol := range spec.GetVolumes() {
-		if vol.GetType() == ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR {
-			ddVolumes[vol.GetName()] = true
+		if vol.GetType() == ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR ||
+			vol.GetType() == ateletpb.VolumeType_VOLUME_TYPE_OBJECT_STORE_BUCKET {
+			excludedVolumes[vol.GetName()] = true
 		}
 	}
 
@@ -813,7 +878,7 @@ func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) *ateompb.WorkloadSpec {
 	for _, ctr := range spec.GetContainers() {
 		var ddMountPaths []string
 		for _, vm := range ctr.GetVolumeMounts() {
-			if ddVolumes[vm.GetName()] {
+			if excludedVolumes[vm.GetName()] {
 				ddMountPaths = append(ddMountPaths, vm.GetMountPath())
 			}
 		}
@@ -1043,8 +1108,19 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return dir.Sync()
 }
 
-func resetActorDirs(actorUID string) error {
+func resetActorDirs(actorUID string, volumes []*ateletpb.Volume) error {
 	// Explicitly leave runsc logs dir untouched.
+
+	// objectStoreBucket volume host dirs hold the rehydrated/exported profile
+	// and are the node-local cache of the bucket: never delete their content
+	// here (os.Remove would also fail on the non-empty dir), so a
+	// same-instance resume stays locally authoritative.
+	bucketVols := make(map[string]bool)
+	for _, vol := range volumes {
+		if vol.GetType() == ateletpb.VolumeType_VOLUME_TYPE_OBJECT_STORE_BUCKET {
+			bucketVols[vol.GetName()] = true
+		}
+	}
 
 	// RemoveAllWritable, not os.RemoveAll: the bundle's upper dir can hold
 	// copied-up actor-image directories keeping the image's (possibly
@@ -1118,6 +1194,9 @@ func resetActorDirs(actorUID string) error {
 		return wrapFileSystemErr("while reading volumes dir: %w", err)
 	}
 	for _, entry := range entries {
+		if bucketVols[entry.Name()] {
+			continue
+		}
 		volPath := filepath.Join(volumesDir, entry.Name())
 		if err := os.Remove(volPath); err != nil {
 			return wrapFileSystemErr("while removing volume dir: %w", err)
