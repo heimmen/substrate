@@ -87,7 +87,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 - [x] **#8 Add volume plugin registry** — `internal/volume/registry.go` with `Register`/`Default`
       so plugins self-register and `getVolumePlugin()` resolves the selected plugin without
       hardcoding the mock.
-- [ ] **#9 Wire `getVolumePlugin` in controlapi + atelet** — change the only substrate wiring lines:
+- [x] **#9 Wire `getVolumePlugin` in controlapi + atelet** — change the only substrate wiring lines:
       `cmd/ateapi/internal/controlapi/volumes.go:32` and `cmd/atelet/volumes.go:29` from
       `volume.NewMockVolumePlugin()` to the new sticky plugin via `volume.DefaultPlugin()`.
 - [ ] **#10 Update `mf-pi.yaml.tmpl` (drop MinIO)** — remove `mfpi-minio` Deployment/PVC/Service,

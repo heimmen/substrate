@@ -23,13 +23,15 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/volume"
+	_ "github.com/agent-substrate/substrate/internal/volume/sticky" // register the default volume plugin
 )
 
 var (
-	globalVolumePlugin = volume.NewMockVolumePlugin()
+	globalVolumePlugin = volume.DefaultPlugin()
 )
 
-// TODO: Replace with actual volume plugin search
+// The default volume plugin is registered by the blank import of
+// internal/volume/sticky above (see internal/volume/registry.go).
 func getVolumePlugin() volume.VolumePluginWorkerPlane {
 	return globalVolumePlugin
 }

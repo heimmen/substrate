@@ -22,6 +22,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/volume"
+	_ "github.com/agent-substrate/substrate/internal/volume/sticky" // register the default volume plugin
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
@@ -29,10 +30,11 @@ import (
 )
 
 var (
-	globalVolumePlugin = volume.NewMockVolumePlugin()
+	globalVolumePlugin = volume.DefaultPlugin()
 )
 
-// TODO: Replace with actual volume plugin search
+// The default volume plugin is registered by the blank import of
+// internal/volume/sticky above (see internal/volume/registry.go).
 func getVolumePlugin() volume.VolumePluginControlPlane {
 	return globalVolumePlugin
 }
