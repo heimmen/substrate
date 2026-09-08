@@ -100,7 +100,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 - [x] **#13 Rewire `admin/main.go` + tests** — remove `profiles`/`profileToken` fields, `MINIO_*`
       config + env, `/internal/actor/{name}/profile` route, `setProfileSync`, `ensureProfileBucket`;
       update `main_test.go` (`newTestServer`).
-- [ ] **#14 Update deploy scripts** — `deploy.sh` + `deploy-test.sh`: drop `MFPI_PROFILE_TOKEN`,
+- [x] **#14 Update deploy scripts** — `deploy.sh` + `deploy-test.sh`: drop `MFPI_PROFILE_TOKEN`,
       `MINIO_ROOT_*`, `MINIO_IMAGE`, minio digest localization + `sed` substitutions.
 - [ ] **#15 Update verifier scripts** — `check-minio-users.sh` drop/repurpose; rewrite
       `validate-templates.sh` to assert NO minio/profile-token artifacts and the new
