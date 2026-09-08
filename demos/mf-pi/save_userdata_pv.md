@@ -95,9 +95,9 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
       env `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token`
       Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data/pi-agent` mount.
 - [x] **#11 Update `mf-pi-test.yaml.tmpl` (drop MinIO)** — same changes as #10 for the test template.
-- [ ] **#12 Delete admin S3 broker** — delete `demos/mf-pi/admin/profile.go` and
+- [x] **#12 Delete admin S3 broker** — delete `demos/mf-pi/admin/profile.go` and
       `demos/mf-pi/admin/profile_test.go` (entire `profileStore`/`s3ProfileStore` broker).
-- [ ] **#13 Rewire `admin/main.go` + tests** — remove `profiles`/`profileToken` fields, `MINIO_*`
+- [x] **#13 Rewire `admin/main.go` + tests** — remove `profiles`/`profileToken` fields, `MINIO_*`
       config + env, `/internal/actor/{name}/profile` route, `setProfileSync`, `ensureProfileBucket`;
       update `main_test.go` (`newTestServer`).
 - [ ] **#14 Update deploy scripts** — `deploy.sh` + `deploy-test.sh`: drop `MFPI_PROFILE_TOKEN`,
