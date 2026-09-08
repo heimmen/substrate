@@ -90,7 +90,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 - [x] **#9 Wire `getVolumePlugin` in controlapi + atelet** — change the only substrate wiring lines:
       `cmd/ateapi/internal/controlapi/volumes.go:32` and `cmd/atelet/volumes.go:29` from
       `volume.NewMockVolumePlugin()` to the new sticky plugin via `volume.DefaultPlugin()`.
-- [ ] **#10 Update `mf-pi.yaml.tmpl` (drop MinIO)** — remove `mfpi-minio` Deployment/PVC/Service,
+- [x] **#10 Update `mf-pi.yaml.tmpl` (drop MinIO)** — remove `mfpi-minio` Deployment/PVC/Service,
       `mfpi-minio-admin` Secret, in-actor supervisor `pull/push/do_sync` block + `.mfpi-profile-actor`,
       env `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token`
       Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data/pi-agent` mount.
