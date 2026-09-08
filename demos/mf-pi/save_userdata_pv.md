@@ -84,7 +84,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
       per-create counter); backing dir `baseDir/volumeID` created on `MountVolume` (symlink into
       sandbox host path, like `MockVolumePlugin`); `DeleteVolume` is a no-op on disk (keeps dir) so
       delete+recreate reuses the same data; `Attach`/`Detach` no-ops. No new deps (stdlib + `ateompath`).
-- [ ] **#8 Add volume plugin registry** — `internal/volume/registry.go` with `Register`/`Default`
+- [x] **#8 Add volume plugin registry** — `internal/volume/registry.go` with `Register`/`Default`
       so plugins self-register and `getVolumePlugin()` resolves the selected plugin without
       hardcoding the mock.
 - [ ] **#9 Wire `getVolumePlugin` in controlapi + atelet** — change the only substrate wiring lines:
