@@ -56,12 +56,6 @@ rules:
   resources: ["secrets"]
   resourceNames: ["mf-pi-provider-config"]
   verbs: ["get"]
-- apiGroups: [""]
-  resources: ["secrets"]
-  # The ActorTemplate env below also resolves MFPI_PROFILE_TOKEN (see the
-  # mfpi-profile-token Secret) so the in-actor supervisor can sync profiles.
-  resourceNames: ["mfpi-profile-token"]
-  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -76,22 +70,6 @@ roleRef:
   kind: Role
   name: ate-api-server-env-sources
   apiGroup: rbac.authorization.k8s.io
----
-# Shared bearer token that gates the mfpi-admin profile-sync endpoints
-# (GET/PUT /internal/actor/{name}/profile). The mfpi-admin Deployment and every
-# actor (via the ActorTemplate env secretKeyRef above) read the same value, so
-# the in-actor supervisor and the admin broker agree. deploy-test.sh keeps the
-# value stable across redeploys (reads the live Secret, only generating on
-# first deploy) so running actors are not silently cut off.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: mfpi-profile-token
-  namespace: ate-demo-mf-pi-test
-type: Opaque
-stringData:
-  token: "${MFPI_PROFILE_TOKEN}"
-
 ---
 
 apiVersion: ate.dev/v1alpha1
@@ -131,116 +109,12 @@ spec:
     - -c
     - |
       set -eu
-      # ---- Per-user MinIO profile sync --------------------------------------
-      # The mfpi-admin server is the trusted S3 broker: it holds the MinIO
-      # credential and exposes token-gated GET/PUT /internal/actor/{name}/profile
-      # (admin/profile.go). Every real actor is RESTORED from the shared golden
-      # base snapshot (there is never a cold Run), and that base was booted under
-      # the ActorTemplate UID -- so any shell variable set at script start is
-      # frozen at golden-boot values inside the restored process. The only
-      # reliable per-actor identity is /run/ate/actor-id, which atelet re-writes
-      # and re-binds for the real actor on every Run/Restore. The sync logic
-      # below therefore re-reads that file on each cycle and never trusts
-      # start-of-script globals (see perUserMinioProfile.md).
-      agent=/data/pi-agent
-
-      # Current actor name, from the per-actor identity bind mount. Re-read on
-      # every call -- never cache it in a top-level shell variable.
-      cur_actor() { cat /run/ate/actor-id 2>/dev/null || true; }
-
-      # Sync is active only with a real identity plus the shared token and URL.
-      sync_on() {
-        [ -n "${MFPI_PROFILE_TOKEN:-}" ] || return 1
-        [ -n "${MFPI_ADMIN_URL:-}" ] || return 1
-        [ -n "$(cur_actor)" ] || return 1
-        return 0
-      }
-
-      # profile_matches: true when the local /data/pi-agent is already the
-      # CURRENT actor's own data. We tag the profile dir with the actor that
-      # last synced it (.mfpi-profile-actor). On a same-instance Full-snapshot
-      # resume that tag equals the current actor -> local is authoritative ->
-      # skip the pull so a staler MinIO copy never clobbers it. On a
-      # delete+recreate reset the actor is restored from the shared golden base,
-      # whose tag is the template UID (or absent) -> no match -> the pull runs
-      # and restores the user's profile from MinIO.
-      profile_matches() {
-        [ "$(cat "$agent/.mfpi-profile-actor" 2>/dev/null || true)" = "$(cur_actor)" ]
-      }
-
-      # Record which actor currently owns the local profile dir.
-      tag_profile() {
-        printf '%s' "$(cur_actor)" > "$agent/.mfpi-profile-actor" 2>/dev/null || true
-      }
-
-      # Best-effort restore of the CURRENT actor's profile. Never blocks
-      # startup: any failure only logs and defers restoration to the next pass.
-      pull_profile() {
-        actor="$(cur_actor)"
-        [ -n "$actor" ] || return 0
-        echo "mf-pi: cold boot for '$actor'; pulling profile from MinIO"
-        code="$(curl -sS -m 15 -o /tmp/mfpi-pull.tgz -w '%{http_code}' \
-          -H "Authorization: Bearer $MFPI_PROFILE_TOKEN" \
-          "$MFPI_ADMIN_URL/internal/actor/$actor/profile" 2>/dev/null || true)"
-        case "$code" in
-          200)
-            if tar xzf /tmp/mfpi-pull.tgz -C "$agent" 2>/dev/null; then
-              tag_profile
-              echo "mf-pi: profile restored for '$actor'"
-            else
-              echo "mf-pi: downloaded profile for '$actor' failed to extract" >&2
-            fi
-            ;;
-          204)
-            echo "mf-pi: no stored profile for '$actor'"
-            tag_profile
-            ;;
-          *)
-            echo "mf-pi: profile pull skipped for '$actor' (admin http ${code:-timeout})" >&2
-            ;;
-        esac
-        rm -f /tmp/mfpi-pull.tgz
-      }
-
-      # Periodic best-effort push of the profile dir (excluding transient
-      # logs/sockets/temp files).
-      push_profile() {
-        actor="$(cur_actor)"
-        [ -n "$actor" ] || return 0
-        if tar czf /tmp/mfpi-profile.tgz -C "$agent" \
-            --exclude='*.log' --exclude='*.sock' --exclude='*.tmp' \
-            . 2>/dev/null; then
-          if curl -fsS -m 30 -H "Authorization: Bearer $MFPI_PROFILE_TOKEN" \
-              -X PUT --data-binary @/tmp/mfpi-profile.tgz \
-              "$MFPI_ADMIN_URL/internal/actor/$actor/profile" >/dev/null 2>&1; then
-            tag_profile
-            rm -f /tmp/mfpi-push.failed
-          elif [ ! -e /tmp/mfpi-push.failed ]; then
-            # Log only the first failure in a row so a MinIO outage does not spam.
-            touch /tmp/mfpi-push.failed
-            echo "mf-pi: profile push to MinIO failed (will retry)" >&2
-          fi
-          rm -f /tmp/mfpi-profile.tgz
-        fi
-      }
-
-      # One sync pass for the CURRENT actor: restore on a fresh/reset
-      # filesystem, then back up. Single-flight via an atomic mkdir lock so a
-      # slow push never overlaps the next pass.
-      do_sync() {
-        sync_on || return 0
-        mkdir /tmp/mfpi-sync.lock 2>/dev/null || return 0
-        if ! profile_matches; then
-          pull_profile || true
-        fi
-        push_profile || true
-        rmdir /tmp/mfpi-sync.lock 2>/dev/null || true
-      }
-
-      # Initial pass: runs during the golden boot (tagging the base snapshot).
-      # On a real restore the shell resumes at the final wait below, so the
-      # sync loop is what restores a reset actor within one interval.
-      do_sync || true
+      # Single-container supervisor (sessiond + web). User data lives on
+      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # below): everything the agent writes there is persisted by the sticky
+      # volume plugin and survives a delete+recreate redeploy (image refresh),
+      # so no profile sync or admin broker is involved
+      # (see save_userdata_pv.md).
 
       sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
       pi-web-sessiond &
@@ -255,21 +129,7 @@ spec:
       pi-web-server &
       web_pid=$!
 
-      # Background periodic sync; the TERM/INT trap also does a final pass so
-      # the freshest profile is in MinIO when the instance is stopped (suspend
-      # or delete).
-      push_interval=${MFPI_PROFILE_PUSH_INTERVAL:-20}
-      sync_loop() {
-        while :; do
-          sleep "$push_interval"
-          do_sync || true
-        done
-      }
-      sync_loop &
-      sync_pid=$!
       term() {
-        do_sync || true
-        kill "$sync_pid" 2>/dev/null || true
         kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
       }
       trap term TERM INT
@@ -280,6 +140,9 @@ spec:
       wait "$sessiond_pid" 2>/dev/null
       exit "$web_status"
 
+    volumeMounts:
+    - name: userdata
+      mountPath: /data/pi-agent
     env:
     # atenet-router forwards traffic to the actor on port 80.
     - name: PI_WEB_PORT
@@ -295,24 +158,19 @@ spec:
         secretKeyRef:
           name: mf-pi-provider-config
           key: DEEPSEEK_API_KEY
-    # Per-user MinIO profile sync (see the supervisor script above). The token
-    # is shared with mfpi-admin; the actor never holds MinIO credentials.
-    - name: MFPI_ADMIN_URL
-      value: http://mfpi-admin.ate-demo-mf-pi-test.svc:8080
-    - name: MFPI_PROFILE_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: mfpi-profile-token
-          key: token
-    - name: MFPI_PROFILE_PUSH_INTERVAL
-      value: "20"
+  volumes:
+  - name: userdata
+    externalVolumeTemplate:
+      capacity: 5Gi
+      storageClassName: standard
   workerSelector:
     matchLabels:
       workload: mf-pi-test
   snapshotsConfig:
-    # Full snapshots: no durableDir volume is mounted, and Data snapshots
-    # require one, so we use Full (process memory + filesystem delta).
-    # A full snapshot on pause is slower but needs no durableDir. Test
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see save_userdata_pv.md).
     # snapshots live under a distinct prefix so they never collide with prod.
     onPause: Full
     onCommit: Full
@@ -403,109 +261,8 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 
-# MinIO object store dedicated to mf-pi user data (TEST). Each user (one user
-# == one Actor running pi-web) gets their own bucket inside this store; the
-# in-actor supervisor backs the /data/pi-agent profile up to it and restores it
-# on a delete+recreate reset. The mfpi-admin server is the only S3 client and
-# holds the single central admin credential (mfpi-minio-admin below); actors
-# never see MinIO credentials. This store is intentionally namespaced per demo
-# environment (prod vs test never share buckets).
-apiVersion: v1
-kind: Secret
-metadata:
-  name: mfpi-minio-admin
-  namespace: ate-demo-mf-pi-test
-type: Opaque
-stringData:
-  # Local demo root credentials (overridable via deploy-test.sh). MinIO is not
-  # exposed outside the cluster, and mfpi-minio has no external Service.
-  root-user: "${MINIO_ROOT_USER}"
-  root-password: "${MINIO_ROOT_PASSWORD}"
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mfpi-minio-data
-  namespace: ate-demo-mf-pi-test
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 10Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: mfpi-minio
-  namespace: ate-demo-mf-pi-test
-  labels:
-    app: mfpi-minio
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: mfpi-minio
-  template:
-    metadata:
-      labels:
-        app: mfpi-minio
-    spec:
-      containers:
-      - name: minio
-        image: "localhost:5001/minio@${MINIO_DIGEST}"
-        args: ["server", "/data", "--console-address", ":9001"]
-        env:
-        - name: MINIO_ROOT_USER
-          valueFrom:
-            secretKeyRef:
-              name: mfpi-minio-admin
-              key: root-user
-        - name: MINIO_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mfpi-minio-admin
-              key: root-password
-        ports:
-        - containerPort: 9000
-          name: s3
-        volumeMounts:
-        - name: data
-          mountPath: /data
-        readinessProbe:
-          httpGet:
-            path: /minio/health/ready
-            port: 9000
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /minio/health/live
-            port: 9000
-          initialDelaySeconds: 10
-          periodSeconds: 10
-      volumes:
-      - name: data
-        persistentVolumeClaim:
-          claimName: mfpi-minio-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mfpi-minio
-  namespace: ate-demo-mf-pi-test
-spec:
-  selector:
-    app: mfpi-minio
-  ports:
-  - name: s3
-    port: 9000
-    targetPort: 9000
-
----
-
 # mf-pi user-management UI (TEST). Served through the mfpi-nginx-test proxy
 # at /usermanagement/; same in-cluster auth pattern as production. Holds the
-# MinIO admin credential (env below) to broker per-user profile sync.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -552,26 +309,6 @@ spec:
           value: ate-demo-mf-pi-test
         - name: ROUTER_ADDR
           value: http://atenet-router.ate-system.svc:80
-        # Per-user MinIO profile persistence: the admin is the trusted S3 broker.
-        - name: MINIO_ENDPOINT
-          value: http://mfpi-minio.ate-demo-mf-pi-test.svc:9000
-        - name: MINIO_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: mfpi-minio-admin
-              key: root-user
-        - name: MINIO_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: mfpi-minio-admin
-              key: root-password
-        - name: MINIO_REGION
-          value: us-east-1
-        - name: MFPI_PROFILE_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: mfpi-profile-token
-              key: token
         volumeMounts:
         - name: ateapi-token
           mountPath: /run/ateapi-token
