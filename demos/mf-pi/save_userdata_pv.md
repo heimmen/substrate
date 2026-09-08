@@ -78,7 +78,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 
 ## Todo list (progress tracking)
 
-- [ ] **#7 Implement sticky volume plugin package** — `internal/volume/sticky/sticky.go`
+- [x] **#7 Implement sticky volume plugin package** — `internal/volume/sticky/sticky.go`
       implementing both `VolumePluginControlPlane` + `VolumePluginWorkerPlane`. `CreateVolume`
       returns the actor-stable `name` (`<atespace>-<actorName>-<volName>`) as `volumeID` (no
       per-create counter); backing dir `baseDir/volumeID` created on `MountVolume` (symlink into
