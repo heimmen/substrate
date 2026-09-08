@@ -346,8 +346,14 @@ includes `mfpi-minio-admin`; admin env has `MINIO_ENDPOINT`, no token.
         microvm ban, mutual-ban, valid bucket template
   - [x] Docs: rewrite `perUserMinioProfile.md`; update `README.md` §
         「每用户 MinIO Profile 持久化」; trim `mfpi.md`
-  - [ ] `make fmt`, `go build ./...`, `make test`, `make verify`,
+  - [x] `make fmt`, `go build ./...`, `make test`, `make verify`,
         `./demos/mf-pi/validate-templates.sh`
+        > verify 状态：gofmt / go-modules / go-generate / licenses /
+        > python-licenses / validate-templates / 全量 `go test ./...`（45 包）通过。
+        > 剩余失败均为**本变更之前就存在或环境限制**：boilerplate 标记既有
+        > `demos/mf-cc/mfcc-admin.htpasswd`；shellcheck 标记未触碰的
+        > `check-minio-users.sh` / `clear-user-apikey.sh` / `set-user-apikey.sh` /
+        > `stop-nginx.sh`；proto-fmt 需要环境未安装的 clang-format。
 
 ## Sequence diagrams
 
