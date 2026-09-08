@@ -725,7 +725,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 		wantErr: true,
-		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate] must be set",
+		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate objectStoreBucket] must be set",
 	}, {
 		name: "Volumes: VolumeSource with no source set is invalid",
 		mutate: func(at *ActorTemplate) {
@@ -734,7 +734,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 		wantErr: true,
-		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate] must be set",
+		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate objectStoreBucket] must be set",
 	}, {
 		name: "Volumes: VolumeSource with no source set is invalid (mixed with a valid DurableDir volume)",
 		mutate: func(at *ActorTemplate) {
@@ -748,7 +748,45 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 		wantErr: true,
-		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate] must be set",
+		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate objectStoreBucket] must be set",
+	}, {
+		name: "Volumes: 1 objectStoreBucket volume is valid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{Name: "bucket", VolumeSource: VolumeSource{ObjectStoreBucket: validObjectStoreBucketSource()}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "bucket", MountPath: "/data/pi-agent"},
+			}
+		},
+		wantErr: false,
+	}, {
+		name: "Volumes: objectStoreBucket with microvm sandboxClass is invalid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = "microvm"
+			at.Spec.Volumes = []Volume{
+				{Name: "bucket", VolumeSource: VolumeSource{ObjectStoreBucket: validObjectStoreBucketSource()}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "bucket", MountPath: "/data/pi-agent"},
+			}
+		},
+		wantErr: true,
+		errMsg:  "ObjectStoreBucket volumes are not supported when sandboxClass is 'microvm'",
+	}, {
+		name: "Volumes: DurableDir and objectStoreBucket combined is invalid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{Name: "home", VolumeSource: VolumeSource{DurableDir: &DurableDirVolumeSource{}}},
+				{Name: "bucket", VolumeSource: VolumeSource{ObjectStoreBucket: validObjectStoreBucketSource()}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "home", MountPath: "/home"},
+				{Name: "bucket", MountPath: "/data/pi-agent"},
+			}
+		},
+		wantErr: true,
+		errMsg:  "A template may not combine DurableDir and ObjectStoreBucket volumes",
 	}, {
 		name: "Volumes: DurableDir MountPath with nested absolute path is valid",
 		mutate: func(at *ActorTemplate) {
@@ -1162,6 +1200,19 @@ func TestActorTemplateReadyzPathDefault(t *testing.T) {
 	}
 	if want, gotPath := "/readyz", got.Spec.Containers[0].Readyz.HTTPGet.Path; gotPath != want {
 		t.Errorf("Readyz.HTTPGet.Path = %q, want %q (CRD default)", gotPath, want)
+	}
+}
+
+// validObjectStoreBucketSource returns a fully-specified objectStoreBucket
+// VolumeSource for the validation table cases.
+func validObjectStoreBucketSource() *ObjectStoreBucketVolumeSource {
+	return &ObjectStoreBucketVolumeSource{
+		SecretRef: ObjectStoreBucketSecretRef{
+			Name:               "mfpi-minio-admin",
+			EndpointKey:        "endpoint",
+			AccessKeyIdKey:     "root-user",
+			SecretAccessKeyKey: "root-password",
+		},
 	}
 }
 

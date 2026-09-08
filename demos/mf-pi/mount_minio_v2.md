@@ -341,10 +341,10 @@ includes `mfpi-minio-admin`; admin env has `MINIO_ENDPOINT`, no token.
         `install-demo-mf-pi-test.sh`: drop `MFPI_PROFILE_TOKEN` logic
   - [x] `validate-templates.sh`: assert volume+mount present, broker gone,
         Role lists `mfpi-minio-admin`
-- [ ] **M5 — tests + docs + verify**
-  - [ ] `pkg/api/v1alpha1/actortemplate_validation_test.go`: ExactlyOneOf,
+- [x] **M5 — tests + docs + verify**
+  - [x] `pkg/api/v1alpha1/actortemplate_validation_test.go`: ExactlyOneOf,
         microvm ban, mutual-ban, valid bucket template
-  - [ ] Docs: rewrite `perUserMinioProfile.md`; update `README.md` §
+  - [x] Docs: rewrite `perUserMinioProfile.md`; update `README.md` §
         「每用户 MinIO Profile 持久化」; trim `mfpi.md`
   - [ ] `make fmt`, `go build ./...`, `make test`, `make verify`,
         `./demos/mf-pi/validate-templates.sh`

@@ -81,7 +81,7 @@ MFPI_WORKER_REPLICAS=4 \
   ENTRYPOINT `tini -- pi-web-bootstrap`：首启安装内置 skills，随后 exec
   sessiond+web supervisor 并监听 80 端口）。
 - 创建每用户 **MinIO** 对象存储（`mfpi-minio` Deployment + PVC + Service +
-  `mfpi-minio-admin` Secret），用于 profile 持久化（见下文
+  `mfpi-minio-admin` Secret），作为 `objectStoreBucket` 卷的后端存储（见下文
   [每用户 MinIO Profile 持久化](#每用户-minio-profile-持久化重置后自动恢复)）。
 - 创建 `mfpi-admin` Deployment 与 Service（用户管理 Web UI，见下文
   [用户管理 UI（Web 界面）](#用户管理-uiweb-界面)）。
@@ -301,43 +301,45 @@ key，见 `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽�
 ### 每用户 MinIO Profile 持久化（重置后自动恢复）
 
 每个用户的数据（`/data/pi-agent` 下的 `auth.json`、skills、`sessions/`、
-`models.json`、`settings.json`）会**持续备份到专属 MinIO 对象存储**中
-（每个用户一个独立 bucket，bucket 名 = 用户名），使「删除并重建」式的实例重置
-**不再丢失用户数据**：
+`models.json`、`settings.json`）通过 ate 核心卷类型 **`objectStoreBucket`** 持续备
+份到专属 MinIO 对象存储中（每个用户一个独立 bucket，bucket 名 = 用户名），使
+「删除并重建」式的实例重置**不再丢失用户数据**：
 
-- 部署时在演示命名空间内创建一个自包含的 **MinIO**（`mfpi-minio` Deployment +
-  PVC + Service + `mfpi-minio-admin` Secret）。生产与测试环境各自独立（prod/test
-  bucket 永不共用）。
-- **mfpi-admin 是唯一持有 MinIO 凭据的 S3 broker**：Actor 内的 supervisor（容器
-  `args` 里的 sh 脚本）通过 mfpi-admin 的 token 网关接口
-  `GET/PUT /internal/actor/{name}/profile`（共享 token
-  `MFPI_PROFILE_TOKEN`，见 `mfpi-profile-token` Secret）拉取 / 推送 profile，**从
-  不接触 MinIO 凭据**。
-- **冷启动拉取**：删除重建后的全新文件系统上，supervisor 在启动
-  `pi-web-sessiond` 之前先从 MinIO 拉取该用户的 profile 并解包到 `/data/pi-agent`
-  （Full 快照恢复则跳过——本地数据即真相，避免被更旧的 MinIO 副本覆盖）。
-- **周期推送**：运行期间每 `MFPI_PROFILE_PUSH_INTERVAL`（默认 `20s`）把 profile
-  打成 tar.gz 推送到该用户的 bucket（排除 `*.log` / `*.sock` / `*.tmp`）；容器收到
-  TERM 时再做一次最终推送，所以挂起 / 删除前的状态尽量新。
+- **bucket 挂载为卷**：ActorTemplate 声明 `volumes[].objectStoreBucket`（secretRef
+  → 本 namespace 的 `mfpi-minio-admin` Secret 的 `endpoint`/`root-user`/
+  `root-password` 键）并挂载到 `/data/pi-agent`。agent **直接写该目录**——actor 内
+  只剩「起 sessiond + 起 web」的普通 supervisor，没有任何同步脚本。
+- **atelet 双向同步**：运行期间每 20s 把目录打成单个 `profile.tar.gz` 对象推回
+  bucket（排除 `*.log`/`*.sock`/`*.tmp`）；挂起 / 删除前再做一次**最终推送
+  （fail-closed）**。对象布局与对象 key 与旧版 broker 兼容，`check-minio-users.sh`
+  与管理页徽标原样可用。
+- **重载自动恢复**：删除重建后的全新文件系统上，atelet 挂载时发现本地目录为空且
+  bucket 有对象 → 自动下载解包（rehydrate）；bucket 为空（全新用户）→ 留空，由
+  pi-web bootstrap 播种内置 skills；同一实例 suspend/resume → 本地为准，不被更旧
+  的 bucket 副本覆盖。
+- **凭据只在控制面**：只有 ate-api-server 读取 `mfpi-minio-admin` Secret（RBAC
+  `ate-api-server-env-sources`），解析出的 endpoint/凭据/bucket 经 RPC 传给
+  atelet；actor 与 atelet 均不读 k8s Secret。Full 快照的文件系统增量排除
+  `/data/pi-agent`（bucket 即真相）。
 - **删除保留 bucket**：`delete-user.sh` / 管理 UI「删除」只删 Actor（及其本地会话
   历史），**MinIO 里的 bucket 与对象刻意保留**——这正是「重置 = 删除 + 重建」后
   数据能自动恢复的原因。
 - 管理 UI 用户列表的「**MinIO Profile**」徽标（已同步 / 未同步）直接读 S3 对象
-  （`HeadObject` LastModified），MinIO 即真相，无需镜像 Secret。
+  （`HeadObject` LastModified）；mfpi-admin 只读不写。完整设计见
+  `perUserMinioProfile.md` 与 `mount_minio_v2.md`。
 
 **重置一个用户并验证自动恢复**：
 
 ```bash
 ./delete-user.sh alice        # 删除 Actor（bucket alice 保留）
 ./create-user.sh alice        # 重建同名 Actor（挂起态）
-kubectl ate resume actor alice -a mfpi   # 冷启动 → supervisor 从 MinIO 拉回 profile
+kubectl ate resume actor alice -a mfpi   # 挂载时 atelet 自动从 bucket rehydrate
 ```
 
 拉回后，alice 的专属 DeepSeek key（`auth.json`）、已安装的 skills 与会话历史会自动
-出现，**无需**重新驱动注入。完整设计见 `perUserMinioProfile.md`。
+出现，**无需**重新驱动注入。
 
-**配置（均可覆盖）**：`MFPI_PROFILE_TOKEN`（共享 token，重部署时保持稳定——优先
-读既有 Secret）、`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`（默认
+**配置（均可覆盖）**：`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`（默认
 `minioadmin` / 随机）、`MINIO_IMAGE`（默认
 `quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z`）。MinIO 镜像不在本地仓库时会
 由 `deploy.sh` 自动从本地 docker 缓存 tag/push。
@@ -356,9 +358,8 @@ MFPI_WORKER_REPLICAS=8 ... ./hack/install-ate-kind.sh --deploy-demo-mf-pi
 
 ### 验证持久化
 
-本演示不挂载 `durableDir` 卷，会话历史与 skills 随容器的文件系统一起保存在
-Full 快照中（session JSONL 位于 `/data/pi-agent/sessions/`）。确认它在挂起/恢复
-后仍然存在：
+`/data/pi-agent` 由 objectStoreBucket 卷支撑（MinIO bucket 即真相），Full 快照的文
+件系统增量会排除该目录。挂起 / 恢复后（同一实例，本地目录为准）确认会话历史仍在：
 
 ```bash
 # 在 UI 中为 alice 建立会话，然后挂起：
@@ -368,7 +369,8 @@ kubectl ate resume actor alice -a mfpi
 ```
 
 恢复后，alice 的聊天历史应仍可加载（sessiond 的 unix socket 在恢复后需重新建
-立，web 可能短暂 503，稍候重试即可）。
+立，web 可能短暂 503，稍候重试即可）。挂起时 atelet 还会做一次最终导出，所以
+bucket 中的 `profile.tar.gz` 与本地一致。
 
 > [!NOTE]
 > 挂起 / 恢复（Full 快照）只能保住**同一实例**的会话。若想验证「**删除并重建**

@@ -42,7 +42,6 @@
 | provider Secret | `mf-pi-provider-config` | 同左 |
 | per-user key Secret | `mfpi-user-provider-keys` | 同左（`mfpi-admin-keys` Role/RoleBinding） |
 | MinIO（profile 存储） | `mfpi-minio` + PVC + Service + `mfpi-minio-admin` | 同左（test ns 内） |
-| profile token Secret | `mfpi-profile-token` | 同左 |
 | Cookie 名 | `mfpi_user` | `mfpi_user_test` |
 | nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
 | 入口端口 | **58681** | 59881 |
@@ -60,10 +59,11 @@ key 的完整设计与实现进度（驱动 actor 内 pi-web api-key 登录流�
 `mfpi-user-provider-keys` Secret；入口 = mfpi-admin Web UI/REST 与
 `set-user-apikey.sh` / `clear-user-apikey.sh`（及 `-test`））。
 
-另见 `perUserMinioProfile.md`：将每用户 profile（`auth.json` / skills /
-`sessions/` 等）持续备份到专属 MinIO bucket 的完整设计与实现进度（mfpi-admin 为
-唯一 S3 broker，actor 内经 token 网关 `GET/PUT /internal/actor/{name}/profile`
-拉取 / 推送；删除重建后冷启动自动拉回，重置不丢数据）。
+另见 `perUserMinioProfile.md` 与 `mount_minio_v2.md`：每用户 profile（`auth.json`
+/ skills / `sessions/` 等）经 ate 核心卷类型 `objectStoreBucket` 持续备份到专属
+MinIO bucket（ateapi 解析 Secret，atelet 挂载 `/data/pi-agent`、bucket 空挂载时自
+动 rehydrate、周期与挂起前导出；actor 内无任何同步逻辑；删除重建后自动恢复，重置
+不丢数据）。
 
 ## Actor 容器关键设计（核心难点）
 
@@ -188,8 +188,9 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
   但进程内存快照比 mf-cc（Bun）更大，挂起略慢，属预期。
 - 单容器双进程（sessiond+web）通过 unix socket 通信；Actor 恢复后 socket 需重新
   建立，web 可能短暂 503，等几秒重试（同 mf-cc 首访语义）。
-- gVisor 下 `/data` 为容器文件系统（无 durableDir），skills/sessions 依赖 Full
-  快照持久化，与 mf-cc 一致。
+- gVisor 下 `/data/pi-agent` 由 objectStoreBucket 卷支撑（每用户 MinIO bucket），
+  挂起/恢复会话经 Full 快照（进程内存 + 其余文件系统增量），重置（删除重建）经
+  bucket rehydrate——见 `perUserMinioProfile.md`。
 
 ---
 
