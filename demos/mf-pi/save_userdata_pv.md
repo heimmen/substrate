@@ -102,7 +102,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
       update `main_test.go` (`newTestServer`).
 - [x] **#14 Update deploy scripts** — `deploy.sh` + `deploy-test.sh`: drop `MFPI_PROFILE_TOKEN`,
       `MINIO_ROOT_*`, `MINIO_IMAGE`, minio digest localization + `sed` substitutions.
-- [ ] **#15 Update verifier scripts** — `check-minio-users.sh` drop/repurpose; rewrite
+- [x] **#15 Update verifier scripts** — `check-minio-users.sh` drop/repurpose; rewrite
       `validate-templates.sh` to assert NO minio/profile-token artifacts and the new
       `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
 - [ ] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite

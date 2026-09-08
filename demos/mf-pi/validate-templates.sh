@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Validate that the mf-pi manifest templates render to valid YAML.
+# Validate that the mf-pi manifest templates render to valid YAML and wire the
+# sticky per-user userdata volume (no MinIO / profile-token artifacts).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -25,10 +26,6 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${MF_PI_DIGEST}|${DIGEST}|g" \
       -e "s|\${PAUSE_DIGEST}|sha256:placeholder|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|2|g" \
-      -e "s|\${MFPI_PROFILE_TOKEN}|test-profile-token|g" \
-      -e "s|\${MINIO_DIGEST}|${DIGEST}|g" \
-      -e "s|\${MINIO_ROOT_USER}|minioadmin|g" \
-      -e "s|\${MINIO_ROOT_PASSWORD}|minioadmin|g" \
       "$t" > /tmp/mfpi-render-check.yaml
   python3 - /tmp/mfpi-render-check.yaml "$t" <<'PYEOF'
 import sys, yaml
@@ -36,46 +33,54 @@ path, name = sys.argv[1], sys.argv[2]
 with open(path) as f:
     docs = [d for d in yaml.safe_load_all(f) if d]
 kinds = [d.get("kind") for d in docs]
-assert kinds == ["Namespace", "Secret", "Role", "RoleBinding", "Secret",
+assert kinds == ["Namespace", "Secret", "Role", "RoleBinding",
                  "WorkerPool", "ActorTemplate", "ConfigMap", "ServiceAccount",
                  "Role", "RoleBinding", "Secret", "Role", "RoleBinding",
-                 "Secret", "PersistentVolumeClaim", "Deployment", "Service",
                  "Deployment", "Service"], kinds
-# Per-user MinIO profile sync objects (mfpi-minio + shared token Secret) exist.
+
 def get(kind, name):
     return next(d for d in docs if d.get("kind") == kind and d.get("metadata", {}).get("name") == name)
 
-assert get("Secret", "mfpi-profile-token"), "missing mfpi-profile-token Secret"
-assert get("Secret", "mfpi-minio-admin"), "missing mfpi-minio-admin Secret"
-assert get("PersistentVolumeClaim", "mfpi-minio-data"), "missing mfpi-minio-data PVC"
-minio = get("Deployment", "mfpi-minio")
-minio_img = minio["spec"]["template"]["spec"]["containers"][0]["image"]
-assert minio_img.startswith("localhost:5001/minio@"), minio_img
-minio_env = {e["name"]: e for e in minio["spec"]["template"]["spec"]["containers"][0]["env"]}
-assert "MINIO_ROOT_USER" in minio_env and "MINIO_ROOT_PASSWORD" in minio_env, minio_env
-# ActorTemplate: supervisor script + env for the sync endpoints.
+# No MinIO / profile-token artifacts remain anywhere.
+raw = open(path).read()
+for banned in ("minio", "MinIO", "MINIO", "MFPI_PROFILE_TOKEN", "mfpi-profile-token",
+               "MFPI_ADMIN_URL", "internal/actor"):
+    assert banned not in raw, "leftover %r in %s" % (banned, path)
+
+# ActorTemplate: sticky userdata volume mounted at /data/pi-agent.
 at = next(d for d in docs if d["kind"] == "ActorTemplate")
-c = at["spec"]["containers"][0]
+spec = at["spec"]
+vols = spec.get("volumes") or []
+assert len(vols) == 1, vols
+v = vols[0]
+assert v["name"] == "userdata", v
+assert "externalVolumeTemplate" in v, v
+ev = v["externalVolumeTemplate"]
+assert ev["capacity"], ev
+assert ev["storageClassName"], ev
+c = spec["containers"][0]
 assert c["image"].startswith("localhost:5001/pi-web@"), c["image"]
 assert "command" not in c, "command must not be set (keeps image ENTRYPOINT)"
 assert c["args"][:2] == ["sh", "-c"], c["args"][:2]
 script = c["args"][2]
-assert "pull_profile()" in script and "push_profile()" in script, "supervisor must pull/push"
-assert "/internal/actor/$actor/profile" in script, "supervisor must call the broker endpoint"
+assert "pull_profile" not in script and "push_profile" not in script, "sync must be gone"
+mounts = c.get("volumeMounts") or []
+assert mounts == [{"name": "userdata", "mountPath": "/data/pi-agent"}], mounts
 env = {e["name"]: e for e in c["env"]}
 assert env["PI_WEB_PORT"].get("value") == "80", env
 assert env["HOSTEXEC_MODE"].get("value") == "disabled", env
-assert env["MFPI_ADMIN_URL"]["value"].startswith("http://mfpi-admin."), env
-assert env["MFPI_PROFILE_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "mfpi-profile-token", env
-# mfpi-admin Deployment: MinIO broker env wired.
+assert not any(k.startswith("MFPI_") for k in env), sorted(env)
+
+# mfpi-admin Deployment: no MinIO broker env.
 admin = get("Deployment", "mfpi-admin")
 admin_env = {e["name"]: e for e in admin["spec"]["template"]["spec"]["containers"][0]["env"]}
-assert admin_env["MINIO_ENDPOINT"]["value"].startswith("http://mfpi-minio."), admin_env
-assert admin_env["MFPI_PROFILE_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "mfpi-profile-token", admin_env
-# ate-api-server must be able to read the token Secret for ActorTemplate env.
+assert not any(k.startswith("MINIO_") or k.startswith("MFPI_") for k in admin_env), sorted(admin_env)
+
+# ate-api-server env-sources Role: only the provider-config Secret.
 env_role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "ate-api-server-env-sources")
-assert any("mfpi-profile-token" in (r.get("resourceNames") or []) for r in env_role["rules"]), env_role
-print(name, "OK:", len(docs), "docs; MinIO profile sync wired")
+assert len(env_role["rules"]) == 1, env_role
+assert env_role["rules"][0]["resourceNames"] == ["mf-pi-provider-config"], env_role
+print(name, "OK:", len(docs), "docs; sticky userdata volume wired, MinIO gone")
 PYEOF
   rm -f /tmp/mfpi-render-check.yaml
 done
