@@ -79,10 +79,10 @@ MFPI_WORKER_REPLICAS=4 \
   析的 RBAC 规则。
 - 创建 `WorkerPool` 和 `ActorTemplate`（Actor 容器只设 `args`，保留镜像
   ENTRYPOINT `tini -- pi-web-bootstrap`：首启安装内置 skills，随后 exec
-  sessiond+web supervisor 并监听 80 端口）。
-- 创建每用户 **MinIO** 对象存储（`mfpi-minio` Deployment + PVC + Service +
-  `mfpi-minio-admin` Secret），用于 profile 持久化（见下文
-  [每用户 MinIO Profile 持久化](#每用户-minio-profile-持久化重置后自动恢复)）。
+  sessiond+web supervisor 并监听 80 端口）。ActorTemplate 声明一个 sticky 的
+  **userdata 外部卷**（`externalVolumeTemplate`）挂载到 `/data/pi-agent`，用于
+  用户数据持久化（见下文
+  [用户数据持久化](#用户数据持久化重置后自动恢复)）。
 - 创建 `mfpi-admin` Deployment 与 Service（用户管理 Web UI，见下文
   [用户管理 UI（Web 界面）](#用户管理-uiweb-界面)）。
 
@@ -298,49 +298,37 @@ key，见 `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽�
 - 设置 / 清除都会在需要时自动恢复 `SUSPENDED` 的 actor。挂起 / 恢复（Full 快照）
   保留 `auth.json`，因此已设的 key 在挂起 / 恢复后依然生效。
 
-### 每用户 MinIO Profile 持久化（重置后自动恢复）
+### 用户数据持久化（重置后自动恢复）
 
 每个用户的数据（`/data/pi-agent` 下的 `auth.json`、skills、`sessions/`、
-`models.json`、`settings.json`）会**持续备份到专属 MinIO 对象存储**中
-（每个用户一个独立 bucket，bucket 名 = 用户名），使「删除并重建」式的实例重置
-**不再丢失用户数据**：
+`models.json`、`settings.json`）保存在一个 **sticky 的 per-actor 持久卷**上
+（ActorTemplate 声明的 `externalVolumeTemplate` 卷 `userdata`，挂载到
+`/data/pi-agent`），使「删除并重建」式的实例重置（例如刷新 actor 镜像后重新部
+署）**不再丢失用户数据**：
 
-- 部署时在演示命名空间内创建一个自包含的 **MinIO**（`mfpi-minio` Deployment +
-  PVC + Service + `mfpi-minio-admin` Secret）。生产与测试环境各自独立（prod/test
-  bucket 永不共用）。
-- **mfpi-admin 是唯一持有 MinIO 凭据的 S3 broker**：Actor 内的 supervisor（容器
-  `args` 里的 sh 脚本）通过 mfpi-admin 的 token 网关接口
-  `GET/PUT /internal/actor/{name}/profile`（共享 token
-  `MFPI_PROFILE_TOKEN`，见 `mfpi-profile-token` Secret）拉取 / 推送 profile，**从
-  不接触 MinIO 凭据**。
-- **冷启动拉取**：删除重建后的全新文件系统上，supervisor 在启动
-  `pi-web-sessiond` 之前先从 MinIO 拉取该用户的 profile 并解包到 `/data/pi-agent`
-  （Full 快照恢复则跳过——本地数据即真相，避免被更旧的 MinIO 副本覆盖）。
-- **周期推送**：运行期间每 `MFPI_PROFILE_PUSH_INTERVAL`（默认 `20s`）把 profile
-  打成 tar.gz 推送到该用户的 bucket（排除 `*.log` / `*.sock` / `*.tmp`）；容器收到
-  TERM 时再做一次最终推送，所以挂起 / 删除前的状态尽量新。
-- **删除保留 bucket**：`delete-user.sh` / 管理 UI「删除」只删 Actor（及其本地会话
-  历史），**MinIO 里的 bucket 与对象刻意保留**——这正是「重置 = 删除 + 重建」后
-  数据能自动恢复的原因。
-- 管理 UI 用户列表的「**MinIO Profile**」徽标（已同步 / 未同步）直接读 S3 对象
-  （`HeadObject` LastModified），MinIO 即真相，无需镜像 Secret。
+- substrate 的 volume 插件把卷的 backing 目录按** actor 稳定名**
+  （`<atespace>-<actorName>-<volName>`）放在 worker 节点上
+  （`/var/lib/ateom-gvisor/stickyvolumes/`），并在每次挂载时 symlink 到 actor
+  沙箱的挂载点。
+- **删除不删数据**：actor 删除时卷的 backing 目录**刻意保留**——这正是「重置 =
+  删除 + 重建」后数据能自动恢复的原因。重建同名用户时，`CreateVolume` 返回同样
+  的稳定名，新实例重新挂到同一目录，旧数据原样可见。
+- **actor 直接读写**：`/data/pi-agent` 就是持久卷本身，无需 supervisor 同步、
+  broker 或 token；actor 内不持有任何存储凭据。
+- 镜像刷新后重建的实例会带上**新版本的功能**，同时自动看到**旧数据**（skills 已
+  安装、`auth.json` / 会话历史原样保留）。
 
 **重置一个用户并验证自动恢复**：
 
 ```bash
-./delete-user.sh alice        # 删除 Actor（bucket alice 保留）
+./delete-user.sh alice        # 删除 Actor（持久卷数据保留）
 ./create-user.sh alice        # 重建同名 Actor（挂起态）
-kubectl ate resume actor alice -a mfpi   # 冷启动 → supervisor 从 MinIO 拉回 profile
+kubectl ate resume actor alice -a mfpi   # 恢复 → 自动挂回同一持久卷
 ```
 
-拉回后，alice 的专属 DeepSeek key（`auth.json`）、已安装的 skills 与会话历史会自动
-出现，**无需**重新驱动注入。完整设计见 `perUserMinioProfile.md`。
-
-**配置（均可覆盖）**：`MFPI_PROFILE_TOKEN`（共享 token，重部署时保持稳定——优先
-读既有 Secret）、`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`（默认
-`minioadmin` / 随机）、`MINIO_IMAGE`（默认
-`quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z`）。MinIO 镜像不在本地仓库时会
-由 `deploy.sh` 自动从本地 docker 缓存 tag/push。
+恢复后，alice 的专属 DeepSeek key（`auth.json`）、已安装的 skills 与会话历史会自动
+出现，**无需**重新驱动注入。完整设计见 `save_userdata_pv.md` 与
+`perUserDataVolume.md`。
 
 ### 容量配置
 
@@ -373,8 +361,8 @@ kubectl ate resume actor alice -a mfpi
 > [!NOTE]
 > 挂起 / 恢复（Full 快照）只能保住**同一实例**的会话。若想验证「**删除并重建**
 > 同一用户」后数据仍在，见上文
-> [每用户 MinIO Profile 持久化](#每用户-minio-profile-持久化重置后自动恢复)：profile
-> 会被持续备份到 MinIO，重建后冷启动自动拉回。
+> [用户数据持久化](#用户数据持久化重置后自动恢复)：数据保存在 sticky 持久卷上，
+> 重建后自动重新挂载。
 
 ## 测试环境（Test Environment）
 
@@ -394,7 +382,7 @@ kubectl ate resume actor alice -a mfpi
 | nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
 | 工作负载标签 | `workload: mf-pi` | `workload: mf-pi-test` |
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
-| MinIO（profile 存储） | `mfpi-minio`@`ate-demo-mf-pi` | `mfpi-minio`@`ate-demo-mf-pi-test` |
+| userdata 持久卷 | sticky per-actor 卷（随 ActorTemplate） | 同左（test ns 内） |
 | `MFPI_WORKER_REPLICAS` 默认 | `16`（deploy.sh）/ `4`（install-ate） | `2` |
 
 > [!NOTE]
@@ -515,7 +503,7 @@ Deployment / Service / RBAC）：
 > 连接会断开，需要刷新页面。
 
 > [!NOTE]
-> 卸载（`--delete-demo-mf-pi` / `--delete-demo-mf-pi-test`）会连同命名空间一并删
-> 除每用户 MinIO 对象存储（`mfpi-minio` PVC 与其中所有 bucket/对象）。MinIO 的
-> profile 持久化是**随命名空间**的：跨卸载重建不会保留用户 profile。若需在卸载
-> 后保留 profile，请另行备份 MinIO 数据卷（`mfpi-minio-data` PVC）。
+> 卸载（`--delete-demo-mf-pi` / `--delete-demo-mf-pi-test`）会删除 Actor 与
+> ActorTemplate 等资源；用户数据保存在 worker 节点上的 sticky 卷目录
+> （`/var/lib/ateom-gvisor/stickyvolumes/`）中，该目录不随命名空间删除。若需在
+> 卸载后彻底清除用户数据，请到对应 worker 节点删除该目录。

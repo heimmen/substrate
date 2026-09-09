@@ -105,7 +105,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 - [x] **#15 Update verifier scripts** — `check-minio-users.sh` drop/repurpose; rewrite
       `validate-templates.sh` to assert NO minio/profile-token artifacts and the new
       `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
-- [ ] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite
+- [x] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite
       `perUserMinioProfile.md` as sticky-PV doc; update `mfpi.md` + `README.md` (drop MinIO refs).
 - [ ] **#17 Build, test, verify, manual check** — gofmt/build/vet/test (ateapi, atelet, internal/volume,
       mf-pi/admin); `validate-templates.sh`; `make verify`; manual: create actor → write
