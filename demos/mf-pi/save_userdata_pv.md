@@ -107,6 +107,14 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
       `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
 - [x] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite
       `perUserMinioProfile.md` as sticky-PV doc; update `mfpi.md` + `README.md` (drop MinIO refs).
-- [ ] **#17 Build, test, verify, manual check** — gofmt/build/vet/test (ateapi, atelet, internal/volume,
+- [x] **#17 Build, test, verify, manual check** — gofmt/build/vet/test (ateapi, atelet, internal/volume,
       mf-pi/admin); `validate-templates.sh`; `make verify`; manual: create actor → write
       `/data/pi-agent` file → refresh image (delete+recreate) → confirm file persists.
+      Status: gofmt clean; `go build ./...` OK; vet OK; tests pass (sticky, atelet,
+      controlapi, mf-pi/admin, pkg/api/v1alpha1); `validate-templates.sh` OK (both
+      templates, 15 docs); go-generate/gofmt/licenses/go-modules OK. Remaining verify
+      failures are pre-existing and untouched by this branch (shellcheck on
+      clear-user-apikey.sh / set-user-apikey.sh / stop-nginx.sh; boilerplate on
+      demos/mf-cc/mfcc-admin.htpasswd). NOTE: the live-cluster manual check (delete +
+      recreate an actor and confirm `/data/pi-agent` data persists) still needs to be
+      run once a kind cluster with the rebuilt images is available.
