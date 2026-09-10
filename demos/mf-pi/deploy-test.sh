@@ -173,7 +173,7 @@ cmd_deploy() {
   kubectl rollout status deployment/mfpi-admin -n "${NAMESPACE}" --timeout=120s
 
   echo "mf-pi test environment deployed."
-  echo "  management UI: run ./run-nginx-test.sh, then open http://localhost:59881/usermanagement/"
+  echo "  management UI: run ./run-nginx-test.sh, then open http://localhost:59681/usermanagement/"
 }
 
 usage() {

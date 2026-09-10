@@ -367,13 +367,13 @@ kubectl ate resume actor alice -a mfpi
 ## 测试环境（Test Environment）
 
 除了上面的生产环境外，还提供了一套与生产**完全隔离**的测试环境，入口端口为
-`59881`（生产 `58681`）。两者可同时运行在同一台机器 / 同一个集群上，互不冲突。
+`59681`（生产 `58681`）。两者可同时运行在同一台机器 / 同一个集群上，互不冲突。
 
 ### 隔离概览
 
 | 项 | 生产 | 测试 |
 |---|---|---|
-| 入口端口 | `58681` | `59881` |
+| 入口端口 | `58681` | `59681` |
 | Namespace | `ate-demo-mf-pi` | `ate-demo-mf-pi-test` |
 | Atespace | `mfpi` | `mfpi-test` |
 | Router port-forward | `58680` | `59880` |
@@ -387,7 +387,7 @@ kubectl ate resume actor alice -a mfpi
 
 > [!NOTE]
 > **为什么需要这些隔离**：Atespace 是集群级资源；nginx cookie 忽略端口（同一宿主
-> 上 `58681` 与 `59881` 共享 `mfpi_user` cookie）；worker 按标签调度且匹配范围是整
+> 上 `58681` 与 `59681` 共享 `mfpi_user` cookie）；worker 按标签调度且匹配范围是整
 > 个集群；路由器按 Host 头的 atespace 路由。因此测试环境必须使用不同的 atespace、
 > cookie 名、worker 标签和快照路径，才能与生产互不干扰。
 
@@ -410,12 +410,12 @@ cd demos/mf-pi
 
 它会自动启动两个 kubectl port-forward（`59880` → atenet-router、`59882` →
 `ate-demo-mf-pi-test` namespace 的 `mfpi-admin`），并运行 `mfpi-nginx-test` 容器
-（监听 `59881`）。该容器复用同一个 `mfpi-nginx` 镜像，但通过 bind-mount
+（监听 `59681`）。该容器复用同一个 `mfpi-nginx` 镜像，但通过 bind-mount
 `nginx-test.conf` 覆盖镜像内 bake 的生产配置，并使用独立的 htpasswd 文件
 （`/tmp/mfpi-admin-test.htpasswd`）。
 
-- 用户 Agent 页：`http://localhost:59881/<username>`（cookie 为 `mfpi_user_test`）
-- 管理 UI：`http://localhost:59881/usermanagement/`（账号密码同生产，默认
+- 用户 Agent 页：`http://localhost:59681/<username>`（cookie 为 `mfpi_user_test`）
+- 管理 UI：`http://localhost:59681/usermanagement/`（账号密码同生产，默认
   `admin` / `mf@pass2026`，可用 `ADMIN_USER` / `ADMIN_PASSWORD` 覆盖）
 - 免 nginx 直连：`curl -H "Host: <username>.mfpi-test.actors.resources.substrate.ate.dev" http://127.0.0.1:59880/`
 

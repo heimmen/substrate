@@ -5,7 +5,7 @@
 > create/list/delete 用户脚本、Full 快照持久化、nginx 反代、deploy 脚本、
 > `install-ate.sh` harness、生产+测试两套环境），把 `/home/liuchong/git/pi-web` 的
 > 镜像作为 Substrate Actor 运行。用户管理入口为 **58681**（生产）/
-> **59881**（测试）。
+> **59681**（测试）。
 
 ## 关键事实（已调研确认）
 
@@ -44,7 +44,7 @@
 | userdata 卷 | ActorTemplate `userdata` externalVolumeTemplate（sticky，挂载 `/data/pi-agent`） | 同左（test ns 内） |
 | Cookie 名 | `mfpi_user` | `mfpi_user_test` |
 | nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
-| 入口端口 | **58681** | 59881 |
+| 入口端口 | **58681** | 59681 |
 | router port-forward | 58680 | 59880 |
 | admin port-forward | 58682 | 59882 |
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
@@ -211,7 +211,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 
 ### 阶段 D：nginx 反代与镜像
 - [x] D1. `nginx.conf`（生产，listen 58681，转发 58680/58682，cookie `mfpi_user`，atespace `mfpi`；`nginx -t` 通过）
-- [x] D2. `nginx-test.conf`（测试，59881/59880/59882，`mfpi_user_test`，`mfpi-test`；`nginx -t` 通过）
+- [x] D2. `nginx-test.conf`（测试，59681/59880/59882，`mfpi_user_test`，`mfpi-test`；`nginx -t` 通过）
 - [x] D3. `Dockerfile` + `mfpi-admin.htpasswd`
 - [x] D4. `build-image.sh`（`mfpi-nginx` 镜像构建成功）
 - [x] D5. `run-nginx.sh` / `run-nginx-test.sh`
@@ -228,7 +228,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] F3. 在 `hack/install-ate.sh` 追加 `source` 两行新 harness
 
 ### 阶段 G：文档与验证
-- [x] G1. 完善本文档 `demos/mf-pi/mfpi.md`（含 TODO 跟踪；已修正测试环境端口笔误 59681→59881）
+- [x] G1. 完善本文档 `demos/mf-pi/mfpi.md`（含 TODO 跟踪；测试环境入口端口为 `59681`，与 `nginx-test.conf` / `run-nginx-test.sh` 一致）
 - [x] G2. `demos/mf-pi/README.md`
 - [x] G3. `gofmt -l demos/mf-pi/admin/`、`go test ./demos/mf-pi/admin/...` 通过；`make verify` 中 mf-pi 相关检查（gofmt/shellcheck/boilerplate，无 mf-pi 文件被标记）通过
 - [x] G4. 端到端验证（见下方「验证结果」）

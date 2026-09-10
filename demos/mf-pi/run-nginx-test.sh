@@ -61,11 +61,11 @@ printf '%s:%s\n' "$ADMIN_USER" "$(openssl passwd -apr1 "$ADMIN_PASSWORD")" > "$H
 chmod 644 "$HTPASSWD_FILE"
 
 docker rm -f mfpi-nginx-test 2>/dev/null || true
-docker run -d -p 59881:59881 --name mfpi-nginx-test --network host \
+docker run -d -p 59681:59681 --name mfpi-nginx-test --network host \
   -v "$HTPASSWD_FILE:/etc/nginx/mfpi-admin.htpasswd:ro" \
   -v "$PWD/nginx-test.conf:/etc/nginx/conf.d/default.conf:ro" \
   mfpi-nginx
 
 echo "mfpi-nginx-test running."
-echo "  users:          http://localhost:59881/<username>"
-echo "  management UI:  http://localhost:59881/usermanagement/ (login: ${ADMIN_USER}/${ADMIN_PASSWORD})"
+echo "  users:          http://localhost:59681/<username>"
+echo "  management UI:  http://localhost:59681/usermanagement/ (login: ${ADMIN_USER}/${ADMIN_PASSWORD})"

@@ -114,5 +114,5 @@ demo-mf-pi-test_usage() {
   echo "  Required env: DEEPSEEK_API_KEY, BUCKET_NAME, KO_DOCKER_REPO"
   echo "  Optional env: MFPI_WORKER_REPLICAS (default 2; max concurrently-active users)"
   echo "  Deploys: pi-web test actors + the mfpi-admin user-management UI (namespace ate-demo-mf-pi-test, atespace mfpi-test; user data persists on a sticky per-actor volume)"
-  echo "  UI access: http://<hostname>:59881/usermanagement/ (via run-nginx-test.sh)"
+  echo "  UI access: http://<hostname>:59681/usermanagement/ (via run-nginx-test.sh)"
 }
