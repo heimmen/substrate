@@ -164,6 +164,10 @@ func (s *secretKeyStore) persist(data map[string]string) error {
 type actorAuthClient interface {
 	setPersonalKey(ctx context.Context, host, apiKey string) error
 	clearPersonalKey(ctx context.Context, host string) error
+	// isKeyStored reports whether the actor currently has a stored deepseek
+	// provider credential (source=="stored"). Used by the reconciler to avoid
+	// re-driving the login flow on actors that already hold the key.
+	isKeyStored(ctx context.Context, host string) (bool, error)
 }
 
 // httpActorAuthClient implements actorAuthClient over the atenet router. Each
@@ -226,6 +230,23 @@ func (c *httpActorAuthClient) setPersonalKey(ctx context.Context, host, apiKey s
 		return err
 	}
 	return c.respondAndVerify(ctx, host, state.FlowID, prompt.RequestID, apiKey)
+}
+
+// isKeyStored reports whether the actor's deepseek provider currently holds a
+// stored credential (source=="stored"), as opposed to one inherited from the
+// environment (DEEPSEEK_API_KEY). A Pi-web that is not yet reachable returns an
+// error so callers can treat it as "unknown" and retry.
+func (c *httpActorAuthClient) isKeyStored(ctx context.Context, host string) (bool, error) {
+	providers, err := c.getProviders(ctx, host)
+	if err != nil {
+		return false, err
+	}
+	for i := range providers {
+		if providers[i].ID == "deepseek" && providers[i].Status.Source == "stored" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *httpActorAuthClient) clearPersonalKey(ctx context.Context, host string) error {

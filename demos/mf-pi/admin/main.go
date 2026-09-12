@@ -52,8 +52,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
+	"syscall"
 	"strconv"
 	"strings"
 	"sync"
@@ -319,6 +321,14 @@ type server struct {
 	keys              keyStore
 	actors            actorAuthClient
 	now               func() time.Time
+
+	// reconcileMu guards lastAttempt. The reconciler re-injects stored keys
+	// onto running actors (see startReconciler), so a missed injection — e.g.
+	// an actor resumed outside the admin flow via refresh-actor.sh — is
+	// recovered. lastAttempt records the last failed inject attempt per actor
+	// so we back off instead of hammering the login flow.
+	reconcileMu sync.Mutex
+	lastAttempt map[string]time.Time
 }
 
 // userSummary is the JSON shape the UI renders.
@@ -733,6 +743,105 @@ func (s *server) injectStoredKey(ctx context.Context, name string, alreadyResume
 	return ""
 }
 
+// reconcileInterval is how often the background key reconciler scans actors.
+const reconcileInterval = 30 * time.Second
+
+// reconcileCooldown is the minimum gap between key-injection retries for an
+// actor whose last attempt failed, so a wedged actor is not hammered every
+// tick.
+const reconcileCooldown = 60 * time.Second
+
+// startReconciler runs the key reconciler until ctx is cancelled. It periodically
+// re-applies any stored per-user DeepSeek key onto RUNNING actors that do not
+// currently hold it. This recovers keys after an actor is resumed by any path
+// that skips the admin's create-user flow — in particular demos/mf-pi/
+// refresh-actor.sh, which does a raw kubectl-ate create+resume. Without this, a
+// refresh recreates the actor with an empty credential store even though the key
+// still lives in the mfpi-user-provider-keys Secret.
+func (s *server) startReconciler(ctx context.Context) {
+	log.Printf("mfpi-admin key reconciler started (interval=%s)", reconcileInterval)
+	ticker := time.NewTicker(reconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("mfpi-admin key reconciler stopped")
+			return
+		case <-ticker.C:
+			rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			s.reconcileKeys(rctx)
+			cancel()
+		}
+	}
+}
+
+// reconcileKeys re-applies stored keys onto running actors missing them.
+func (s *server) reconcileKeys(ctx context.Context) {
+	resp, err := s.client.ListActors(ctx, &ateapipb.ListActorsRequest{
+		Atespace: s.atespace,
+		PageSize: 1000,
+	})
+	if err != nil {
+		// Best-effort: log and let the next tick retry.
+		log.Printf("reconcile: list actors: %v", err)
+		return
+	}
+	for _, a := range resp.GetActors() {
+		name := a.GetMetadata().GetName()
+		key, ok := s.keys.Get(name)
+		if !ok {
+			continue
+		}
+		if a.GetStatus() != ateapipb.Actor_STATUS_RUNNING {
+			continue
+		}
+		host := actorHostname(name, s.atespace)
+		stored, err := s.actors.isKeyStored(ctx, host)
+		if err != nil {
+			// pi-web not reachable yet (actor still booting). Skip this tick;
+			// a later tick retries. No cooldown here so we don't mask a
+			// transient outage from the injection backoff.
+			continue
+		}
+		if stored {
+			s.clearReconcileAttempt(name)
+			continue
+		}
+		if !s.shouldReconcileAttempt(name) {
+			continue
+		}
+		if err := s.actors.setPersonalKey(ctx, host, key); err != nil {
+			s.noteReconcileAttempt(name)
+			log.Printf("reconcile: failed to re-inject stored key for %q: %v", name, err)
+			continue
+		}
+		s.clearReconcileAttempt(name)
+		log.Printf("reconcile: re-injected stored key for %q", name)
+	}
+}
+
+func (s *server) shouldReconcileAttempt(name string) bool {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	l, ok := s.lastAttempt[name]
+	if !ok {
+		return true
+	}
+	return time.Since(l) >= reconcileCooldown
+}
+
+func (s *server) noteReconcileAttempt(name string) {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	s.lastAttempt[name] = time.Now()
+}
+
+func (s *server) clearReconcileAttempt(name string) {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	delete(s.lastAttempt, name)
+}
+
 // handleDeleteUser mirrors the delete-user.sh script: suspend first (the API
 // rejects deleting a RUNNING actor), then delete.
 func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -945,6 +1054,7 @@ func main() {
 		keys:              keys,
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
 		now:               time.Now,
+		lastAttempt:       make(map[string]time.Time),
 	}
 
 	mux := http.NewServeMux()
@@ -953,6 +1063,10 @@ func main() {
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go srv.startReconciler(ctx)
 
 	addr := "0.0.0.0:" + envOr("PORT", defaultPort)
 	log.Printf("mfpi-admin serving on %s (atespace=%s template=%s/%s)",

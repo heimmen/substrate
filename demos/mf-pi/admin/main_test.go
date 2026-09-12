@@ -229,6 +229,14 @@ func (f *fakeActorAuth) clearPersonalKey(_ context.Context, host string) error {
 	return nil
 }
 
+// isKeyStored reports whether the host holds a key in the in-memory map, which
+// setPersonalKey populates and clearPersonalKey empties — mirroring pi-web's
+// source=="stored" vs "environment" distinction.
+func (f *fakeActorAuth) isKeyStored(_ context.Context, host string) (bool, error) {
+	_, ok := f.storedByHost[host]
+	return ok, nil
+}
+
 func newTestServer(f *fakeControlClient) *server {
 	return &server{
 		atespace:          "mfpi",
@@ -239,6 +247,7 @@ func newTestServer(f *fakeControlClient) *server {
 		keys:              newFakeKeyStore(),
 		actors:            newFakeActorAuth(),
 		now:               func() time.Time { return fixedNow },
+		lastAttempt:       make(map[string]time.Time),
 	}
 }
 
@@ -980,6 +989,94 @@ func TestActorHostname(t *testing.T) {
 	}
 	if got := actorHostname("alice", "mfpi-test"); got != "alice.mfpi-test.actors.resources.substrate.ate.dev" {
 		t.Errorf("actorHostname(test) = %q", got)
+	}
+}
+
+// TestReconcileInjectsKeyIntoRunningActor verifies the reconciler re-applies a
+// stored key to a RUNNING actor that does not yet hold it — the recovery path
+// for an actor resumed outside the admin flow (e.g. refresh-actor.sh).
+func TestReconcileInjectsKeyIntoRunningActor(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", "sk-x")
+
+	s.reconcileKeys(context.Background())
+
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+		t.Fatalf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
+	}
+	if got := auth.storedByHost[aliceHost]; got != "sk-x" {
+		t.Errorf("injected key = %q, want sk-x", got)
+	}
+}
+
+// TestReconcileSkipsNonRunningActor confirms the reconciler never drives the
+// login flow against a non-RUNNING actor (which cannot accept it).
+func TestReconcileSkipsNonRunningActor(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	s.keys.(*fakeKeyStore).Set("alice", "sk-x")
+
+	s.reconcileKeys(context.Background())
+
+	auth := s.actors.(*fakeActorAuth)
+	if len(auth.setCalls) != 0 {
+		t.Errorf("setCalls = %v, want none for a SUSPENDED actor", auth.setCalls)
+	}
+}
+
+// TestReconcileSkipsAlreadyStored confirms an actor that already holds the key
+// is not re-driven, so the reconciler is idempotent and cheap.
+func TestReconcileSkipsAlreadyStored(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", "sk-x")
+	auth.storedByHost[aliceHost] = "sk-x" // simulate already applied
+
+	s.reconcileKeys(context.Background())
+
+	if len(auth.setCalls) != 0 {
+		t.Errorf("setCalls = %v, want none when already stored", auth.setCalls)
+	}
+}
+
+// TestReconcileSkipsActorWithoutStoredKey confirms actors with no key in the
+// Secret are left untouched.
+func TestReconcileSkipsActorWithoutStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	// No key stored for alice.
+
+	s.reconcileKeys(context.Background())
+
+	auth := s.actors.(*fakeActorAuth)
+	if len(auth.setCalls) != 0 || len(auth.storedByHost) != 0 {
+		t.Errorf("setCalls=%v stored=%v, want untouched", auth.setCalls, auth.storedByHost)
+	}
+}
+
+// TestReconcileIgnoresOtherAtespace confirms only the configured atespace is
+// reconciled.
+func TestReconcileIgnoresOtherAtespace(t *testing.T) {
+	f := newFake()
+	addActor(f, "other", "zoe", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	store.Set("zoe", "sk-z") // key for the wrong atespace's actor name
+
+	s.reconcileKeys(context.Background())
+
+	auth := s.actors.(*fakeActorAuth)
+	if len(auth.setCalls) != 0 {
+		t.Errorf("setCalls = %v, want none (actor is in a different atespace)", auth.setCalls)
 	}
 }
 
