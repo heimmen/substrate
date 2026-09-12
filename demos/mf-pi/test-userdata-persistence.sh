@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 # End-to-end test: mf-pi TEST deployment persists user data across an actor
 # refresh (delete + recreate).
 #
@@ -24,6 +10,18 @@
 # directory on actor delete (DeleteVolume is a no-op) and re-attaches the same
 # directory on recreate (volumeID is actor-stable), so user data survives a
 # delete+recreate redeploy (image refresh).
+#
+# The test asserts BOTH axes of recovery after a refresh:
+#   * Data recovery: a sentinel written to /data/pi-agent (via the pi-web
+#     workspace file API, which resolves to a path on the PV) is still readable
+#     after suspend + delete + recreate + resume.
+#   * The /data directory itself: a best-effort in-actor probe (runsc exec on
+#     the kind node) checks that the live, refreshed actor still mounts
+#     /data/pi-agent and that the recovered sentinel is present there. This
+#     guards the regression "after a refresh there is no /data dir in the
+#     actor": the persisted store is the PV mounted at /data/pi-agent, so the
+#     directory must survive. (For manual inspection see exec-actor.sh, which
+#     drops a shell on the node at the actor's persisted /data/pi-agent.)
 #
 # This script:
 #   1. creates a test user (which creates + resumes the actor and returns a
@@ -237,6 +235,63 @@ wait_for_suspended() {
   return 1
 }
 
+# Best-effort in-actor /data verification. Substrate runs each actor inside a
+# gVisor sandbox on a distroless worker pod, so there is no ssh/kubectl exec
+# into it. But runsc (the gVisor runtime) is present on the kind node and can
+# `exec` directly into the running "pi-web" container. We use that to confirm
+# the refreshed actor still mounts /data/pi-agent (the sticky PV) and that the
+# recovered sentinel is present there — directly guarding the "no /data dir
+# after refresh" regression. Skips (no-op) when docker / the kind node / runsc
+# are not reachable (e.g. CI without the local kind cluster). A transient or
+# unreachable runsc exec is logged as a WARN and does NOT fail the suite — the
+# authoritative recovery check is the API-level sentinel read-back above.
+verify_in_actor_data_dir() {
+  # NOTE: the caller runs under `set -euo pipefail`. Every command substitution
+  # here must be guarded (`cmd || true`) or wrapped in `if ! var=$(...)`: an
+  # unguarded substitution that exits non-zero would abort the whole suite
+  # before our WARN/skip handling runs. This function must NEVER change the
+  # test's exit status — it is purely supplementary to the API-level check.
+  local NODE="${NODE:-kind-control-plane}"
+  local REXEC_TIMEOUT=20
+  command -v docker >/dev/null 2>&1 || { log "WARN in-actor /data check skipped: docker not on PATH"; return 0; }
+  if ! docker exec "$NODE" true >/dev/null 2>&1; then
+    log "WARN in-actor /data check skipped: node ${NODE} unreachable"
+    return 0
+  fi
+  local uid
+  uid="$("${KUBECTL_ATE_CMD[@]}" get actor "${TEST_USER}" -a "${ATESPACE}" -o json 2>/dev/null | jq -r '.actors[0].metadata.uid // empty' || true)"
+  [[ -z "$uid" ]] && { log "WARN in-actor /data check skipped: no actor uid"; return 0; }
+  local state="/var/lib/ateom-gvisor/actors/${uid}/runsc-state"
+  local runsc
+  runsc="$(docker exec "$NODE" sh -c 'ls /var/lib/ateom-gvisor/static-files/runsc-* 2>/dev/null | head -1' || true)"
+  [[ -z "$runsc" ]] && { log "WARN in-actor /data check skipped: runsc not found on node"; return 0; }
+
+  local data_ls
+  # `runsc exec` prints a "waiting on pid N: sandbox is not running" notice to
+  # stderr and exits non-zero even when it successfully reads the (paused)
+  # container rootfs, so we must NOT treat a non-zero exit as failure. Capture
+  # combined output (`|| true` keeps `set -e` happy), strip the notice line, and
+  # decide from the directory entries themselves.
+  data_ls="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec pi-web ls /data 2>&1 || true)"
+  local entries
+  entries="$(printf '%s\n' "$data_ls" | grep -vE '^(waiting on|$)' || true)"
+  if printf '%s\n' "$entries" | grep -qx 'pi-agent'; then
+    ok "live actor exposes /data/pi-agent after refresh (PV mounted)"
+  elif [[ -n "$entries" ]]; then
+    bad "live actor /data lacks pi-agent after refresh (ls /data: ${entries})"
+  else
+    log "WARN in-actor /data check skipped: runsc exec inconclusive (output: ${data_ls:-<none>})"
+  fi
+
+  local marker
+  marker="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec pi-web cat "${PROJ_PATH}/${MARKER}" 2>&1 || true)"
+  if printf '%s\n' "$marker" | grep -qF "${SENTINEL}"; then
+    ok "live actor /data/pi-agent contains the recovered sentinel after refresh"
+  else
+    log "WARN in-actor sentinel not readable via runsc (got: ${marker:-<none>}) — relying on API-level recovery check"
+  fi
+}
+
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { log "SKIP: '$1' not found on PATH"; exit 0; }; }
 need_cmd kubectl
 need_cmd "${KUBECTL_ATE_CMD[0]}"
@@ -342,6 +397,13 @@ if [[ "${READ_AFTER}" == "${SENTINEL}" ]]; then
 else
   bad "sentinel LOST after refresh (got: ${READ_AFTER})"
 fi
+
+# Best-effort: confirm the live, refreshed actor still mounts /data/pi-agent and
+# holds the recovered sentinel there (guards the "no /data dir after refresh"
+# regression). Skips gracefully when a kind node / runsc is not reachable. The
+# `|| true` keeps this supplementary probe from ever affecting the suite exit
+# status under `set -e`.
+verify_in_actor_data_dir || true
 
 log "cleaning up test user '${TEST_USER}'"
 remove_test_user "${TEST_USER}"

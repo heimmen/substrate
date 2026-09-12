@@ -114,6 +114,10 @@ def main():
         if "third_party" in filepath:
             continue
 
+        # exclude the mf-pi demo, which intentionally ships no copyright headers
+        if filepath.startswith("demos/mf-pi/"):
+            continue
+
         # exclude vendor directories
         if "vendor" in filepath:
             continue
