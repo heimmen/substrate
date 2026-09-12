@@ -152,6 +152,14 @@ spec:
     # to actor sandboxes.
     - name: HOSTEXEC_MODE
       value: disabled
+    # Persist pi-web's data directory AND sessiond socket on the userdata PV
+    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
+    # supervisor waits on (see the args block's `sock=` default).
+    - name: PI_WEB_DATA_DIR
+      value: /data/pi-agent
+    - name: PI_WEB_SESSIOND_SOCKET
+      value: /data/pi-agent/sessiond.sock
     - name: DEEPSEEK_API_KEY
       valueFrom:
         secretKeyRef:
