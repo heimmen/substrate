@@ -31,3 +31,12 @@ type VolumePluginWorkerPlane interface {
 	MountVolume(ctx context.Context, volumeID string, targetPath string) error
 	UnmountVolume(ctx context.Context, volumeID string, targetPath string) error
 }
+
+// VolumePurger is an optional capability of a VolumePluginControlPlane whose
+// DeleteVolume intentionally keeps data (e.g. the sticky plugin, so user data
+// survives a delete+recreate actor refresh): PurgeVolume removes the backing
+// storage for good. Callers must type-assert the plugin to this interface;
+// plugins whose DeleteVolume already deletes everything need not implement it.
+type VolumePurger interface {
+	PurgeVolume(ctx context.Context, volumeID string) error
+}

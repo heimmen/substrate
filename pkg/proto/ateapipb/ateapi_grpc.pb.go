@@ -35,19 +35,20 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Control_GetActor_FullMethodName       = "/ateapi.Control/GetActor"
-	Control_CreateActor_FullMethodName    = "/ateapi.Control/CreateActor"
-	Control_UpdateActor_FullMethodName    = "/ateapi.Control/UpdateActor"
-	Control_SuspendActor_FullMethodName   = "/ateapi.Control/SuspendActor"
-	Control_PauseActor_FullMethodName     = "/ateapi.Control/PauseActor"
-	Control_ResumeActor_FullMethodName    = "/ateapi.Control/ResumeActor"
-	Control_DeleteActor_FullMethodName    = "/ateapi.Control/DeleteActor"
-	Control_ListWorkers_FullMethodName    = "/ateapi.Control/ListWorkers"
-	Control_ListActors_FullMethodName     = "/ateapi.Control/ListActors"
-	Control_CreateAtespace_FullMethodName = "/ateapi.Control/CreateAtespace"
-	Control_GetAtespace_FullMethodName    = "/ateapi.Control/GetAtespace"
-	Control_ListAtespaces_FullMethodName  = "/ateapi.Control/ListAtespaces"
-	Control_DeleteAtespace_FullMethodName = "/ateapi.Control/DeleteAtespace"
+	Control_GetActor_FullMethodName          = "/ateapi.Control/GetActor"
+	Control_CreateActor_FullMethodName       = "/ateapi.Control/CreateActor"
+	Control_UpdateActor_FullMethodName       = "/ateapi.Control/UpdateActor"
+	Control_SuspendActor_FullMethodName      = "/ateapi.Control/SuspendActor"
+	Control_PauseActor_FullMethodName        = "/ateapi.Control/PauseActor"
+	Control_ResumeActor_FullMethodName       = "/ateapi.Control/ResumeActor"
+	Control_DeleteActor_FullMethodName       = "/ateapi.Control/DeleteActor"
+	Control_PurgeActorVolumes_FullMethodName = "/ateapi.Control/PurgeActorVolumes"
+	Control_ListWorkers_FullMethodName       = "/ateapi.Control/ListWorkers"
+	Control_ListActors_FullMethodName        = "/ateapi.Control/ListActors"
+	Control_CreateAtespace_FullMethodName    = "/ateapi.Control/CreateAtespace"
+	Control_GetAtespace_FullMethodName       = "/ateapi.Control/GetAtespace"
+	Control_ListAtespaces_FullMethodName     = "/ateapi.Control/ListAtespaces"
+	Control_DeleteAtespace_FullMethodName    = "/ateapi.Control/DeleteAtespace"
 )
 
 // ControlClient is the client API for Control service.
@@ -70,6 +71,11 @@ type ControlClient interface {
 	ResumeActor(ctx context.Context, in *ResumeActorRequest, opts ...grpc.CallOption) (*ResumeActorResponse, error)
 	// Delete an actor. Only suspended actors can be deleted.
 	DeleteActor(ctx context.Context, in *DeleteActorRequest, opts ...grpc.CallOption) (*Actor, error)
+	// Permanently remove the backing storage of an actor's external volumes.
+	// Unlike DeleteActor (whose volume deletion is a no-op for sticky volumes
+	// so user data survives a delete+recreate refresh), this reclaims the
+	// storage. Refuses while the actor still exists and is RUNNING.
+	PurgeActorVolumes(ctx context.Context, in *PurgeActorVolumesRequest, opts ...grpc.CallOption) (*PurgeActorVolumesResponse, error)
 	// List Workers.
 	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
 	// List Actors.
@@ -162,6 +168,16 @@ func (c *controlClient) DeleteActor(ctx context.Context, in *DeleteActorRequest,
 	return out, nil
 }
 
+func (c *controlClient) PurgeActorVolumes(ctx context.Context, in *PurgeActorVolumesRequest, opts ...grpc.CallOption) (*PurgeActorVolumesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PurgeActorVolumesResponse)
+	err := c.cc.Invoke(ctx, Control_PurgeActorVolumes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controlClient) ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListWorkersResponse)
@@ -242,6 +258,11 @@ type ControlServer interface {
 	ResumeActor(context.Context, *ResumeActorRequest) (*ResumeActorResponse, error)
 	// Delete an actor. Only suspended actors can be deleted.
 	DeleteActor(context.Context, *DeleteActorRequest) (*Actor, error)
+	// Permanently remove the backing storage of an actor's external volumes.
+	// Unlike DeleteActor (whose volume deletion is a no-op for sticky volumes
+	// so user data survives a delete+recreate refresh), this reclaims the
+	// storage. Refuses while the actor still exists and is RUNNING.
+	PurgeActorVolumes(context.Context, *PurgeActorVolumesRequest) (*PurgeActorVolumesResponse, error)
 	// List Workers.
 	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error)
 	// List Actors.
@@ -284,6 +305,9 @@ func (UnimplementedControlServer) ResumeActor(context.Context, *ResumeActorReque
 }
 func (UnimplementedControlServer) DeleteActor(context.Context, *DeleteActorRequest) (*Actor, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteActor not implemented")
+}
+func (UnimplementedControlServer) PurgeActorVolumes(context.Context, *PurgeActorVolumesRequest) (*PurgeActorVolumesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PurgeActorVolumes not implemented")
 }
 func (UnimplementedControlServer) ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListWorkers not implemented")
@@ -450,6 +474,24 @@ func _Control_DeleteActor_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_PurgeActorVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PurgeActorVolumesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).PurgeActorVolumes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_PurgeActorVolumes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).PurgeActorVolumes(ctx, req.(*PurgeActorVolumesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Control_ListWorkers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListWorkersRequest)
 	if err := dec(in); err != nil {
@@ -592,6 +634,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteActor",
 			Handler:    _Control_DeleteActor_Handler,
+		},
+		{
+			MethodName: "PurgeActorVolumes",
+			Handler:    _Control_PurgeActorVolumes_Handler,
 		},
 		{
 			MethodName: "ListWorkers",

@@ -148,3 +148,50 @@ func TestDeleteVolumeKeepsBackingDir(t *testing.T) {
 		t.Fatalf("redeployed instance read %q, want %q", got, "user data\n")
 	}
 }
+
+// PurgeVolume is the counterpart to the no-op DeleteVolume: it must remove the
+// backing directory for good, and be idempotent (purging an unknown volume is
+// not an error — the actor record may be long gone).
+func TestPurgeVolumeRemovesBackingDir(t *testing.T) {
+	useTempBaseDir(t)
+	p := New()
+	ctx := context.Background()
+
+	if _, err := p.CreateVolume(ctx, testVolumeName, "1Gi", "standard"); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "mount-point")
+	if err := p.MountVolume(ctx, testVolumeName, target); err != nil {
+		t.Fatalf("MountVolume: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "profile.txt"), []byte("user data\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := p.UnmountVolume(ctx, testVolumeName, target); err != nil {
+		t.Fatalf("UnmountVolume: %v", err)
+	}
+
+	if err := p.PurgeVolume(ctx, testVolumeName); err != nil {
+		t.Fatalf("PurgeVolume: %v", err)
+	}
+	wantDir := filepath.Join(stickyVolumeDirectories, testVolumeName)
+	if _, err := os.Stat(wantDir); !os.IsNotExist(err) {
+		t.Fatalf("backing dir %q still exists after PurgeVolume (err=%v)", wantDir, err)
+	}
+
+	// Idempotent: purging an already-purged/unknown volume succeeds.
+	if err := p.PurgeVolume(ctx, testVolumeName); err != nil {
+		t.Fatalf("repeated PurgeVolume: %v", err)
+	}
+
+	// After a purge, a fresh create+mount starts from an empty directory.
+	if _, err := p.CreateVolume(ctx, testVolumeName, "1Gi", "standard"); err != nil {
+		t.Fatalf("post-purge CreateVolume: %v", err)
+	}
+	if err := p.MountVolume(ctx, testVolumeName, target); err != nil {
+		t.Fatalf("post-purge MountVolume: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "profile.txt")); !os.IsNotExist(err) {
+		t.Fatalf("purged data reappeared after re-create (err=%v)", err)
+	}
+}

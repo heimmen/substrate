@@ -117,6 +117,7 @@ type controlClient interface {
 	ResumeActor(ctx context.Context, req *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error)
 	DeleteActor(ctx context.Context, req *ateapipb.DeleteActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
 	SuspendActor(ctx context.Context, req *ateapipb.SuspendActorRequest, opts ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error)
+	PurgeActorVolumes(ctx context.Context, req *ateapipb.PurgeActorVolumesRequest, opts ...grpc.CallOption) (*ateapipb.PurgeActorVolumesResponse, error)
 	GetAtespace(ctx context.Context, req *ateapipb.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error)
 	CreateAtespace(ctx context.Context, req *ateapipb.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error)
 }
@@ -868,8 +869,17 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		// user is re-created with a stored key. Log rather than fail.
 		log.Printf("deleting stored DeepSeek key for %q failed: %v", name, err)
 	}
-	// User data persists via the actor's sticky userdata volume (see
-	// save_userdata_pv.md), so there is nothing extra to clean up here.
+	// Removing a user removes their data: purge the sticky userdata volume
+	// (DeleteActor keeps it by design so a delete+recreate REFRESH re-attaches
+	// it; only explicit user removal should reclaim the storage). Best-effort:
+	// the user is already gone, so a failure here leaves an orphan volume that
+	// can be cleaned up with `kubectl-ate purge volumes` later.
+	if _, err := s.client.PurgeActorVolumes(ctx, &ateapipb.PurgeActorVolumesRequest{
+		Actor:    ref,
+		Template: &ateapipb.ObjectRef{Atespace: s.templateNamespace, Name: s.templateName},
+	}); err != nil {
+		log.Printf("purging persistent volume for %q failed: %v", name, err)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "删除成功", "name": name})
 }
 

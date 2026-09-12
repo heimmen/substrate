@@ -28,7 +28,10 @@ type fakeControlClient struct {
 	suspended        []string
 	deleted          []string
 	atespacesCreated []string
+	purged           []string
+	purgeTemplates   []string
 	resumeErr        error
+	purgeErr         error
 }
 
 func newFake() *fakeControlClient {
@@ -108,6 +111,15 @@ func (f *fakeControlClient) DeleteActor(_ context.Context, req *ateapipb.DeleteA
 	delete(f.actors, k)
 	f.deleted = append(f.deleted, a.GetMetadata().GetName())
 	return a, nil
+}
+
+func (f *fakeControlClient) PurgeActorVolumes(_ context.Context, req *ateapipb.PurgeActorVolumesRequest, _ ...grpc.CallOption) (*ateapipb.PurgeActorVolumesResponse, error) {
+	if f.purgeErr != nil {
+		return nil, f.purgeErr
+	}
+	f.purged = append(f.purged, req.GetActor().GetName())
+	f.purgeTemplates = append(f.purgeTemplates, fmt.Sprintf("%s/%s", req.GetTemplate().GetAtespace(), req.GetTemplate().GetName()))
+	return &ateapipb.PurgeActorVolumesResponse{PurgedVolumeIds: []string{req.GetActor().GetAtespace() + "-" + req.GetActor().GetName() + "-userdata"}}, nil
 }
 
 func (f *fakeControlClient) GetAtespace(_ context.Context, req *ateapipb.GetAtespaceRequest, _ ...grpc.CallOption) (*ateapipb.Atespace, error) {
@@ -886,6 +898,40 @@ func TestHandleDeleteUserPurgesStoredKey(t *testing.T) {
 	}
 	if _, ok := store.Get("alice"); ok {
 		t.Errorf("stored key not purged on user delete")
+	}
+}
+
+func TestHandleDeleteUserPurgesVolume(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.purged) != 1 || f.purged[0] != "alice" {
+		t.Errorf("purged = %v, want [alice]", f.purged)
+	}
+	// The volume IDs come from the server's configured ActorTemplate.
+	wantTemplate := s.templateNamespace + "/" + s.templateName
+	if len(f.purgeTemplates) != 1 || f.purgeTemplates[0] != wantTemplate {
+		t.Errorf("purgeTemplates = %v, want [%s]", f.purgeTemplates, wantTemplate)
+	}
+}
+
+func TestHandleDeleteUserVolumePurgeFailureStillSucceeds(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	f.purgeErr = status.Error(codes.FailedPrecondition, "purge unavailable")
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (purge is best-effort); body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != "alice" {
+		t.Errorf("deleted = %v, want [alice]", f.deleted)
 	}
 }
 

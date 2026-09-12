@@ -142,6 +142,12 @@ spec:
         - name: "session-id-ca-pool"
           mountPath: "/run/session-id-ca-pool"
           readOnly: true
+        # ateom-base: the sticky volume plugin resolves PurgeActorVolumes
+        # against the node-local sticky volume backing directories under
+        # /var/lib/ateom-gvisor (see internal/volume/sticky). This assumes the
+        # single-node kind demo, where control plane and worker share one node.
+        - name: "ateom-base"
+          mountPath: "/var/lib/ateom-gvisor"
         ports:
         - containerPort: 443
         - name: prometheus
@@ -163,6 +169,12 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 10
       volumes:
+      # ateom-base: read-write hostPath so PurgeActorVolumes can remove the
+      # node-local sticky volume directories (single-node demo assumption).
+      - name: "ateom-base"
+        hostPath:
+          path: /var/lib/ateom-gvisor
+          type: DirectoryOrCreate
       - name: "servicedns"
         projected:
           sources:

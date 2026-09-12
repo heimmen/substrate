@@ -92,6 +92,19 @@ func (p *MockVolumePlugin) DeleteVolume(ctx context.Context, volumeID string) er
 	return nil
 }
 
+// PurgeVolume removes the mock volume's backing directory. Mock volumes are
+// tracked in-memory and their directories are only reclaimed here.
+func (p *MockVolumePlugin) PurgeVolume(ctx context.Context, volumeID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := os.RemoveAll(filepath.Join(mockVolumeDirectories, volumeID)); err != nil {
+		return fmt.Errorf("failed to purge mock volume %q: %w", volumeID, err)
+	}
+	delete(p.volumes, volumeID)
+	slog.InfoContext(ctx, "MockVolumePlugin.PurgeVolume", slog.String("volumeID", volumeID))
+	return nil
+}
+
 // AttachVolume simulates volume attachment to a node.
 func (p *MockVolumePlugin) AttachVolume(ctx context.Context, volumeID string, node string) error {
 	p.mu.Lock()

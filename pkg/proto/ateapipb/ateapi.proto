@@ -45,6 +45,12 @@ service Control {
   // Delete an actor. Only suspended actors can be deleted.
   rpc DeleteActor(DeleteActorRequest) returns (Actor) {}
 
+  // Permanently remove the backing storage of an actor's external volumes.
+  // Unlike DeleteActor (whose volume deletion is a no-op for sticky volumes
+  // so user data survives a delete+recreate refresh), this reclaims the
+  // storage. Refuses while the actor still exists and is RUNNING.
+  rpc PurgeActorVolumes(PurgeActorVolumesRequest) returns (PurgeActorVolumesResponse) {}
+
   // List Workers.
   rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse) {}
 
@@ -280,6 +286,22 @@ message ResumeActorResponse {
 
 message DeleteActorRequest {
   ObjectRef actor = 1;
+}
+
+message PurgeActorVolumesRequest {
+  // The actor whose external volumes should be purged. The actor record may
+  // already be deleted; volume IDs are derived from the template below.
+  ObjectRef actor = 1;
+
+  // The ActorTemplate the actor was created from. Its external volume
+  // templates determine which volume IDs are purged. Required because the
+  // actor record may no longer exist.
+  ObjectRef template = 2;
+}
+
+message PurgeActorVolumesResponse {
+  // Volume IDs whose backing storage was removed.
+  repeated string purged_volume_ids = 1;
 }
 
 message ListWorkersRequest {

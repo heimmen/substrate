@@ -80,13 +80,27 @@ func (p *Plugin) CreateVolume(ctx context.Context, name string, capacity string,
 
 // DeleteVolume intentionally does NOT remove the backing directory: user data
 // must survive actor deletion so a later redeploy of the same actor can
-// re-attach it. Reclaiming the storage is left to the demo environment
-// (mirroring the mock plugin, which also never cleans up its directories).
+// re-attach it. Reclaiming the storage is left to PurgeVolume.
 func (p *Plugin) DeleteVolume(ctx context.Context, volumeID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	slog.InfoContext(ctx, "StickyVolumePlugin.DeleteVolume (backing directory kept)", slog.String("volumeID", volumeID))
 	delete(p.created, volumeID)
+	return nil
+}
+
+// PurgeVolume removes the sticky backing directory and everything in it. This
+// is the only path that reclaims a sticky volume's storage: DeleteVolume
+// deliberately keeps the directory so a delete+recreate refresh re-attaches
+// it. Purging is intended for user/account deletion, after the actor is gone.
+func (p *Plugin) PurgeVolume(ctx context.Context, volumeID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := os.RemoveAll(p.dir(volumeID)); err != nil {
+		return fmt.Errorf("failed to purge sticky volume %q: %w", volumeID, err)
+	}
+	delete(p.created, volumeID)
+	slog.InfoContext(ctx, "StickyVolumePlugin.PurgeVolume (backing directory removed)", slog.String("volumeID", volumeID))
 	return nil
 }
 
