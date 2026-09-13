@@ -101,6 +101,30 @@ spec:
       # so no profile sync or admin broker is involved
       # (see save_userdata_pv.md).
 
+      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
+      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
+      # on first start only, so a brand-new user resumed from the golden base
+      # snapshot never runs that install and starts without skills. Mirror its
+      # no-clobber copy here on every pass: missing skills are installed,
+      # existing ones are left untouched.
+      (
+        while true; do
+          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
+          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          if [ -d "$skills_src" ]; then
+            mkdir -p "$skills_dst"
+            for skill_dir in "$skills_src"/*/; do
+              [ -d "$skill_dir" ] || continue
+              skill_name=$(basename "$skill_dir")
+              if [ ! -e "$skills_dst/$skill_name" ]; then
+                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
+              fi
+            done
+          fi
+          sleep 10
+        done
+      ) &
+
       # Recover project working directories. projects.json is persisted on the
       # PV, but a project's working directory itself may live outside
       # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
