@@ -102,6 +102,34 @@ spec:
       # so no profile sync or admin broker is involved
       # (see save_userdata_pv.md).
 
+      # Recover project working directories. projects.json is persisted on the
+      # PV, but a project's working directory itself may live outside
+      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # refuses to open a session whose stored cwd no longer exists. The actor
+      # sandbox is normally restored from a snapshot (golden base or suspend
+      # checkpoint), so a one-shot boot-time fix would never re-run; instead
+      # run this as a background loop: the restored process continues after
+      # every resume and re-creates any project directory that went missing.
+      (
+        while true; do
+          node -e '
+            const fs = require("fs");
+            try {
+              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
+              const projects = (JSON.parse(raw).projects || []);
+              for (const p of projects) {
+                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
+                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+                  }
+                }
+              }
+            } catch (e) { /* no projects.json yet: nothing to recover */ }
+          ' || true
+          sleep 10
+        done
+      ) &
+
       sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
       pi-web-sessiond &
       sessiond_pid=$!
