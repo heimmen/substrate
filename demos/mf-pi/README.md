@@ -206,7 +206,8 @@ pi-web 前端所有请求（API `/api/...`、插件资源 `/pi-web-plugins/...`�
   密码**（见下文「鉴权」），并**立即恢复**该 Actor，新建用户的 Agent 页面无需
   等待懒恢复即可直接打开（若恢复失败——例如没有空闲 worker——用户仍会创建成
   功，页面会在首次访问时再触发恢复）
-- **删除用户**：先挂起再删除（对应 `delete-user.sh`）
+- **删除用户**：先挂起再删除（对应 `delete-user.sh`），并**同时 purge 该用户的
+  持久卷**（见下文「用户数据持久化 → 彻底删除（purge）」）
 - **DeepSeek Key**：每行显示该用户是否已设专属 DeepSeek API Key（「已设置 /
   未设置」徽标），并提供「**设置 Key**」/「**清除**」按钮，为指定用户动态注入或
   退出其专属 key（详见下文「每用户专属 DeepSeek API Key」）
@@ -285,8 +286,10 @@ env（无需重启）；清除后该用户回退到 env key。
 
 **持久化**：key 同时写入预创建的 Secret `mfpi-user-provider-keys`（username →
 key，见 `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽标；Actor 删除
-重建后 key 仍在 Secret 中，重新创建用户时会自动重放注入；删除用户时该 key 一并清
-除。
+重建后 key 仍在 Secret 中，重新创建用户时会自动重放注入。此外 `mfpi-admin` 内有
+一个每 30s 的 reconcile 循环：为已 `RUNNING` 但凭据尚未注入的 actor 重放 stored
+key，因此任何 resume 路径（包括 `refresh-actor.sh` 的删除重建）都会自动找回 key；
+删除用户时该 key 一并清除。
 
 **语义**：
 
@@ -304,19 +307,73 @@ key，见 `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽�
 `models.json`、`settings.json`）保存在一个 **sticky 的 per-actor 持久卷**上
 （ActorTemplate 声明的 `externalVolumeTemplate` 卷 `userdata`，挂载到
 `/data/pi-agent`），使「删除并重建」式的实例重置（例如刷新 actor 镜像后重新部
-署）**不再丢失用户数据**：
+署）**不再丢失用户数据**。
 
-- substrate 的 volume 插件把卷的 backing 目录按** actor 稳定名**
-  （`<atespace>-<actorName>-<volName>`）放在 worker 节点上
-  （`/var/lib/ateom-gvisor/stickyvolumes/`），并在每次挂载时 symlink 到 actor
-  沙箱的挂载点。
-- **删除不删数据**：actor 删除时卷的 backing 目录**刻意保留**——这正是「重置 =
-  删除 + 重建」后数据能自动恢复的原因。重建同名用户时，`CreateVolume` 返回同样
-  的稳定名，新实例重新挂到同一目录，旧数据原样可见。
-- **actor 直接读写**：`/data/pi-agent` 就是持久卷本身，无需 supervisor 同步、
-  broker 或 token；actor 内不持有任何存储凭据。
-- 镜像刷新后重建的实例会带上**新版本的功能**，同时自动看到**旧数据**（skills 已
-  安装、`auth.json` / 会话历史原样保留）。
+#### PV 如何挂载到 actor
+
+- `ActorTemplate` 声明 `externalVolumeTemplate` 卷 `userdata`（5Gi，
+  `storageClassName: standard`），容器的 `volumeMounts` 把它挂到
+  `/data/pi-agent`。
+- 控制面按 **actor 稳定名**生成卷 ID：`<atespace>-<actorName>-<volName>`
+  （例如 `mfpi-alice-userdata`）。sticky 卷插件的 backing 目录就是 worker 节点上
+  的 `/var/lib/ateom-gvisor/stickyvolumes/<卷ID>`；`CreateVolume` 幂等（同名卷
+  直接复用），`DeleteVolume` 刻意保留目录（回收存储见下文「彻底删除（purge）」）。
+- actor 启动 / 恢复时，节点侧（ateom）把 backing 目录 symlink 到沙箱挂载点。
+  因此 `/data/pi-agent` **就是**持久卷本身：actor 直接读写，无需 supervisor 同
+  步、broker 或 token，actor 内不持有任何存储凭据。
+
+#### 哪些数据会自动恢复
+
+| 数据 | 存放位置 | 删除重建（refresh）后 |
+|---|---|---|
+| 会话历史、`auth.json`、`settings.json`、models 等 | PV（`/data/pi-agent`） | ✅ 原样恢复 |
+| skills（镜像内置） | 镜像 `/opt/pi-web/skills` → supervisor 恢复循环补装 | ✅ 自动补齐 |
+| project 工作目录（PV 外，如 `/dtom2`） | 沙箱临时层 | ⚠️ 目录自动重建（历史内容不恢复） |
+
+后两项由 actor supervisor 内的两个**后台恢复循环**（每 10s）处理：
+
+- **skills 恢复**：镜像内置 skills 由 `pi-web-bootstrap` 只在**首次启动**时装
+  入；而新用户的沙箱是从 golden base 快照**恢复**的（bootstrap 已在 golden
+  actor 里跑过、装到了 golden 卷上），不会再执行，新用户会「没有 skill」。
+  supervisor 循环按 bootstrap 相同的**不覆盖**语义，把缺失的 skill 从镜像补装
+  到用户 PV；用户已有的 skill（可能被修改）一律不动。
+- **project 目录恢复**：会话文件（PV 上）记录了工作目录（如 `/dtom2`），而该目
+  录本身若建在 PV 外，刷新后即消失，pi agent 会拒绝打开会话（"Stored session
+  working directory does not exist"）。supervisor 循环读取 PV 上持久化的
+  `projects.json`，为每个 project 路径 `mkdir -p` 重建空目录。
+
+> [!NOTE]
+> 为什么必须是 supervisor 内的**后台循环**而不是一次性启动步骤：refresh 后沙箱
+> 是从快照（golden base 或挂起 checkpoint）**恢复**的，恢复的进程从快照断点继
+> 续运行，启动期的一次性步骤永远不会重跑；循环进程被恢复后会继续运行，每次
+> resume 后数秒内即完成重建。
+
+#### 彻底删除（purge）
+
+删除 actor **刻意不删**持久卷数据——这正是「重置 = 删除 + 重建」后数据能自动恢
+复的原因（`delete-user.sh` 同样只删 actor、保留数据）。只有**删除用户**才回收
+存储，两条途径：
+
+```bash
+# 1) 管理流程：admin 删除用户（管理 UI「删除」按钮 / DELETE /api/users/<name>）
+#    会在删除 actor 后自动 purge 其持久卷；purge 失败会留下孤儿卷，可再用方式 2 清理
+
+# 2) 手动 purge（按模板推导卷 ID，actor 记录可已不存在；RUNNING 的 actor 会被拒绝）
+./remove-pv.sh tom3 --test        # 测试环境（mfpi-test）
+./remove-pv.sh alice              # 生产环境（mfpi）
+# 等价 CLI：
+kubectl ate purge volumes <user> -a <atespace> -t <templateNS>/<templateName>
+```
+
+#### 检查与验证工具
+
+- `./exec-actor.sh <user> [--test]`：在节点上打开该用户 PV 的 shell（以
+  `data/pi-agent/` 视图呈现，即 actor 内 `/data/pi-agent` 的内容）。
+- `./list-pvs.sh [--test] [--detail] [--show-auth]`：列出所有用户 PV 及数据概
+  况（actor 状态、大小、mtime、文件数、顶层内容；`--show-auth` 会输出
+  `auth.json`，含 API key，谨慎使用）。
+- `./test-userdata-persistence.sh`：端到端验证——写入哨兵文件 → refresh → 读
+  回，并用 `runsc exec` 校验刷新后 actor 内 `/data/pi-agent` 仍挂载且哨兵可读。
 
 **重置一个用户并验证自动恢复**：
 
@@ -357,6 +414,12 @@ kubectl ate resume actor alice -a mfpi
 
 恢复后，alice 的聊天历史应仍可加载（sessiond 的 unix socket 在恢复后需重新建
 立，web 可能短暂 503，稍候重试即可）。
+
+> [!TIP]
+> 「删除并重建」式持久化的完整端到端验证可直接运行
+> `./test-userdata-persistence.sh`（测试环境）：自动创建测试用户、写入哨兵文件、
+> refresh、读回并断言，另用 `runsc exec` 校验刷新后 actor 内 `/data/pi-agent`
+> 仍挂载且哨兵可读，无需手动操作。
 
 > [!NOTE]
 > 挂起 / 恢复（Full 快照）只能保住**同一实例**的会话。若想验证「**删除并重建**
@@ -506,4 +569,5 @@ Deployment / Service / RBAC）：
 > 卸载（`--delete-demo-mf-pi` / `--delete-demo-mf-pi-test`）会删除 Actor 与
 > ActorTemplate 等资源；用户数据保存在 worker 节点上的 sticky 卷目录
 > （`/var/lib/ateom-gvisor/stickyvolumes/`）中，该目录不随命名空间删除。若需在
-> 卸载后彻底清除用户数据，请到对应 worker 节点删除该目录。
+> 卸载后彻底清除用户数据，可在卸载前对每个用户运行 `./remove-pv.sh <user>
+> [--test]` 逐个回收，或到对应 worker 节点删除该目录。
