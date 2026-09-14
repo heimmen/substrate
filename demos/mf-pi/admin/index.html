@@ -92,6 +92,44 @@
   td.actions { white-space: nowrap; }
   td a, td a:visited { color: var(--accent); text-decoration: none; }
   td a:hover { text-decoration: underline; }
+  .dropdown { position: relative; display: inline-block; }
+  .dropdown-toggle {
+    padding: 4px 10px;
+    font-size: 13px;
+    background: #eef0f3;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .dropdown-toggle:hover { background: #e2e5ea; }
+  .dropdown-menu {
+    position: fixed;
+    min-width: 140px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    z-index: 1000;
+    padding: 4px;
+    display: none;
+  }
+  .dropdown.open .dropdown-menu { display: block; }
+  .dropdown-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 13px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .dropdown-menu button:hover { background: var(--gray-bg); }
+  .dropdown-menu button.danger { color: var(--danger); }
+  .dropdown-menu button.danger:hover { background: var(--red-bg); }
   .badge {
     display: inline-block;
     padding: 2px 10px;
@@ -228,12 +266,42 @@
         '<td class="mono">' + esc(u.ip) + "</td>" +
         "<td>" + esc(u.version) + "</td>" +
         "<td>" + esc(u.age) + "</td>" +
-        '<td class="actions">' +
-        '<button class="secondary mini copy-pwd">复制密码</button> ' +
-        '<button class="secondary mini reset-pwd">重置密码</button> ' +
-        '<button class="secondary mini set-key" title="为运行中的 agent 写入专属 DeepSeek API Key">设置 Key</button> ' +
-        '<button class="secondary mini clear-key" title="退出登录并清除专属 DeepSeek API Key">清除</button> ' +
-        '<button class="danger mini del">删除</button></td>';
+        '<td class="actions"><div class="dropdown">' +
+        '<button class="dropdown-toggle">操作 ▾</button>' +
+        '<div class="dropdown-menu">' +
+        '<button class="copy-pwd">复制密码</button>' +
+        '<button class="reset-pwd">重置密码</button>' +
+        '<button class="set-key" title="为运行中的 agent 写入专属 DeepSeek API Key">设置 Key</button>' +
+        '<button class="clear-key" title="退出登录并清除专属 DeepSeek API Key">清除 Key</button>' +
+        '<button class="danger del">删除</button>' +
+        "</div></div></td>";
+      tr.querySelector(".dropdown-toggle").addEventListener("click", function (e) {
+        e.stopPropagation();
+        var dropdown = this.parentElement;
+        var menu = dropdown.querySelector(".dropdown-menu");
+        var wasOpen = dropdown.classList.contains("open");
+        // 关闭其它已打开的菜单（避免多个同时显示）。
+        document.querySelectorAll(".dropdown.open").forEach(function (d) {
+          d.classList.remove("open");
+        });
+        if (wasOpen) return;
+        dropdown.classList.add("open");
+        // 使用 fixed 定位并依据按钮位置计算坐标，避免被 .card 的
+        // overflow-x:auto 裁剪（短列表时下拉会超出卡片底部被截掉）。
+        var rect = this.getBoundingClientRect();
+        var mw = menu.offsetWidth;
+        var mh = menu.offsetHeight;
+        var left = rect.right - mw;
+        var top = rect.bottom + 4;
+        // 下方空间不足时向上弹出。
+        if (top + mh > window.innerHeight - 8) {
+          top = rect.top - mh - 4;
+        }
+        // 超出左边界时夹紧到可视区内。
+        if (left < 8) left = 8;
+        menu.style.left = left + "px";
+        menu.style.top = top + "px";
+      });
       tr.querySelector(".copy-pwd").addEventListener("click", function () {
         copyPassword(u.name);
       });
@@ -460,6 +528,21 @@
   });
 
   document.getElementById("refresh-btn").addEventListener("click", listUsers);
+
+  // 点击其他区域时关闭已打开的下拉菜单。
+  document.addEventListener("click", function () {
+    document.querySelectorAll(".dropdown.open").forEach(function (d) {
+      d.classList.remove("open");
+    });
+  });
+
+  // 滚动时关闭菜单：菜单为 fixed 定位，页面/卡片滚动后按钮位置会变化，
+  // 留在原处的菜单会与按钮错位。
+  window.addEventListener("scroll", function () {
+    document.querySelectorAll(".dropdown.open").forEach(function (d) {
+      d.classList.remove("open");
+    });
+  }, true);
 
   listUsers();
   setInterval(listUsers, 5000);
