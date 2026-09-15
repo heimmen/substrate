@@ -1354,3 +1354,242 @@ func TestHTTPActorAuthClientClearDrivesLogout(t *testing.T) {
 		}
 	}
 }
+
+// ---- Activation expiry + resource tier (resource_quota_plan.md, Part D) ----
+
+func TestHandleSetExpirySuccess(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.expiries.(*fakeExpiryStore)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/expiry", `{"duration":"168h"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		ExpiresAt string `json:"expiresAt"`
+	}](t, rec)
+	want := fixedNow.Add(168 * time.Hour).UTC().Format(time.RFC3339)
+	if resp.ExpiresAt != want {
+		t.Errorf("expiresAt = %q, want %q", resp.ExpiresAt, want)
+	}
+	if got, ok := store.Get("alice"); !ok || got != want {
+		t.Errorf("stored expiry = %q (ok=%v), want %q", got, ok, want)
+	}
+}
+
+func TestHandleSetExpiryInvalidDuration(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+
+	for _, dur := range []string{"bogus", "0", "-3h", ""} {
+		rec := doRequest(s, http.MethodPost, "/api/users/alice/expiry", `{"duration":"`+dur+`"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("duration %q: status = %d, want 400; body=%s", dur, rec.Code, rec.Body.String())
+		}
+	}
+	if _, ok := s.expiries.(*fakeExpiryStore).Get("alice"); ok {
+		t.Errorf("expiry stored for invalid durations")
+	}
+}
+
+func TestHandleSetExpiryMissingActor(t *testing.T) {
+	f := newFake() // no alice actor
+	s := newTestServer(f)
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/expiry", `{"duration":"24h"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleClearExpiryIdempotent(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.expiries.(*fakeExpiryStore)
+	store.Set("alice", fixedNow.Add(time.Hour).UTC().Format(time.RFC3339))
+
+	// First clear removes it.
+	if rec := doRequest(s, http.MethodDelete, "/api/users/alice/expiry", ""); rec.Code != http.StatusOK {
+		t.Fatalf("first clear status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := store.Get("alice"); ok {
+		t.Errorf("expiry still present after clear")
+	}
+	// Second clear is a no-op (idempotent).
+	if rec := doRequest(s, http.MethodDelete, "/api/users/alice/expiry", ""); rec.Code != http.StatusOK {
+		t.Fatalf("second clear status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReconcileExpireSuspendExpiredRunner(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	s.expiries.(*fakeExpiryStore).Set("alice", fixedNow.Add(-time.Minute).UTC().Format(time.RFC3339))
+
+	s.reconcileExpirations(context.Background())
+
+	if len(f.suspended) != 1 || f.suspended[0] != "alice" {
+		t.Errorf("suspended = %v, want [alice]", f.suspended)
+	}
+}
+
+func TestReconcileExpireSkipsNotExpired(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	s.expiries.(*fakeExpiryStore).Set("alice", fixedNow.Add(time.Hour).UTC().Format(time.RFC3339))
+
+	s.reconcileExpirations(context.Background())
+
+	if len(f.suspended) != 0 {
+		t.Errorf("suspended = %v, want none (not yet expired)", f.suspended)
+	}
+}
+
+func TestReconcileExpireSkipsNonRunning(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	s.expiries.(*fakeExpiryStore).Set("alice", fixedNow.Add(-time.Minute).UTC().Format(time.RFC3339))
+
+	s.reconcileExpirations(context.Background())
+
+	if len(f.suspended) != 0 {
+		t.Errorf("suspended = %v, want none for a SUSPENDED actor", f.suspended)
+	}
+}
+
+func TestHandleSetTierValid(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.tiers.(*fakeTierStore)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/tier", `{"tier":"mid"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok := store.Get("alice"); !ok || got != "mid" {
+		t.Errorf("stored tier = %q (ok=%v), want mid", got, ok)
+	}
+}
+
+func TestHandleSetTierInvalid(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+
+	for _, tier := range []string{"huge", "", "Small"} {
+		rec := doRequest(s, http.MethodPost, "/api/users/alice/tier", `{"tier":"`+tier+`"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("tier %q: status = %d, want 400; body=%s", tier, rec.Code, rec.Body.String())
+		}
+	}
+	if _, ok := s.tiers.(*fakeTierStore).Get("alice"); ok {
+		t.Errorf("tier stored for invalid value")
+	}
+}
+
+func TestHandleSetTierMissingActor(t *testing.T) {
+	f := newFake() // no alice actor
+	s := newTestServer(f)
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/tier", `{"tier":"mid"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleCreateUserUsesTierTemplate(t *testing.T) {
+	f := newFake()
+	s := newTestServer(f)
+	s.tiers.(*fakeTierStore).Set("alice", "mid")
+
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.created) != 1 {
+		t.Fatalf("created = %d actors, want 1", len(f.created))
+	}
+	if got := f.created[0].GetActorTemplateName(); got != "mf-pi-mid" {
+		t.Errorf("actor template = %q, want mf-pi-mid", got)
+	}
+}
+
+func TestHandleCreateUserDefaultTier(t *testing.T) {
+	f := newFake()
+	s := newTestServer(f) // no tier set -> defaultTier "small"
+
+	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := f.created[0].GetActorTemplateName(); got != "mf-pi-small" {
+		t.Errorf("actor template = %q, want mf-pi-small (default tier)", got)
+	}
+}
+
+func TestHandleListUsersReportsExpiryAndTier(t *testing.T) {
+	f := newFake()
+	f.atespaces["mfpi"] = &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: "mfpi"}}
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	addActor(f, "mfpi", "bob", "STATUS_SUSPENDED", fixedNow.Add(-2*time.Hour))
+	s := newTestServer(f)
+	s.expiries.(*fakeExpiryStore).Set("alice", fixedNow.Add(time.Hour).UTC().Format(time.RFC3339))
+	s.tiers.(*fakeTierStore).Set("bob", "large")
+
+	rec := doRequest(s, http.MethodGet, "/api/users", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Users []userSummary `json:"users"`
+	}](t, rec)
+	if len(resp.Users) != 2 {
+		t.Fatalf("len(users) = %d, want 2", len(resp.Users))
+	}
+	for _, u := range resp.Users {
+		switch u.Name {
+		case "alice":
+			if !u.HasExpiry {
+				t.Errorf("alice hasExpiry = false, want true")
+			}
+			if want := fixedNow.Add(time.Hour).UTC().Format(time.RFC3339); u.Expiry != want {
+				t.Errorf("alice expiry = %q, want %q", u.Expiry, want)
+			}
+			if u.Tier != "small" {
+				t.Errorf("alice tier = %q, want default small", u.Tier)
+			}
+		case "bob":
+			if u.HasExpiry {
+				t.Errorf("bob hasExpiry = true, want false")
+			}
+			if u.Tier != "large" {
+				t.Errorf("bob tier = %q, want large", u.Tier)
+			}
+		}
+	}
+}
+
+func TestHandleDeleteUserCleansExpiryAndTier(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	s.expiries.(*fakeExpiryStore).Set("alice", fixedNow.Add(time.Hour).UTC().Format(time.RFC3339))
+	s.tiers.(*fakeTierStore).Set("alice", "mid")
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := s.expiries.(*fakeExpiryStore).Get("alice"); ok {
+		t.Errorf("expiry not cleaned up after delete")
+	}
+	if _, ok := s.tiers.(*fakeTierStore).Get("alice"); ok {
+		t.Errorf("tier not cleaned up after delete")
+	}
+}

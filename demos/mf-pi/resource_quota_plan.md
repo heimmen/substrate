@@ -193,5 +193,5 @@
   - `tier.go` 增加 `tierNames`(=small/mid/large)与 `buildTierTemplates(base)`。
   - 测试侧 `main_test.go` 增加 `fakeExpiryStore`/`fakeTierStore` 并装配进 `newTestServer`。
 - [x] **Part C - Web UI**：`index.html` 增加「有效期」「档位」两列(有效期列：未设置显示 `—`、已到期且 RUNNING 显示 `已到期`)；「操作 ▾」菜单新增「设置有效期」「清除有效期」「设置资源档位」。`renderUsers` 透出 `u.hasExpiry`/`u.expiry`/`u.tier`，新增 `setUserExpiry`/`clearUserExpiry`/`setUserTier` 与 `expiryDisplayHtml` 辅助函数。
-- [ ] **Part D**：`main_test.go` 增加 expiry/tier 相关用例(set/非法/用户不存在/delete 幂等、reconcile 到期挂起、create-with-tier、list 带出、delete 清理)。
+- [x] **Part D - 测试**：`main_test.go` 新增 14 个用例，覆盖 expiry set/非法时长/用户不存在/delete 幂等、reconcile 到期挂起 + 未到期跳过 + 非 RUNNING 跳过、tier 合法/非法/用户不存在、create-with-tier(用 `mf-pi-<tier>`)与默认档、list 带出 HasExpiry/Expiry/Tier、delete 清理 expiry 与 tier。`go test ./demos/mf-pi/admin/` 通过。
 - [ ] **Part E**：`mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` 增加每档 WorkerPool+ActorTemplate、预建 ConfigMap、Role/RoleBinding、Deployment env。
