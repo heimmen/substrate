@@ -194,4 +194,9 @@
   - 测试侧 `main_test.go` 增加 `fakeExpiryStore`/`fakeTierStore` 并装配进 `newTestServer`。
 - [x] **Part C - Web UI**：`index.html` 增加「有效期」「档位」两列(有效期列：未设置显示 `—`、已到期且 RUNNING 显示 `已到期`)；「操作 ▾」菜单新增「设置有效期」「清除有效期」「设置资源档位」。`renderUsers` 透出 `u.hasExpiry`/`u.expiry`/`u.tier`，新增 `setUserExpiry`/`clearUserExpiry`/`setUserTier` 与 `expiryDisplayHtml` 辅助函数。
 - [x] **Part D - 测试**：`main_test.go` 新增 14 个用例，覆盖 expiry set/非法时长/用户不存在/delete 幂等、reconcile 到期挂起 + 未到期跳过 + 非 RUNNING 跳过、tier 合法/非法/用户不存在、create-with-tier(用 `mf-pi-<tier>`)与默认档、list 带出 HasExpiry/Expiry/Tier、delete 清理 expiry 与 tier。`go test ./demos/mf-pi/admin/` 通过。
-- [ ] **Part E**：`mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` 增加每档 WorkerPool+ActorTemplate、预建 ConfigMap、Role/RoleBinding、Deployment env。
+- [x] **Part E - 清单文件**：
+  - `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` 各新增每档 `mf-pi-wp-<tier>` WorkerPool(worker 标签 `mf-pi-<tier>` / 测试 `mf-pi-<tier>-test`，`spec.template.resources.requests/limits` 限制 CPU/内存)与 `mf-pi-<tier>` ActorTemplate(复制基础模板，`workerSelector` 指向对应 worker 标签，磁盘 `small=5Gi/mid=20Gi/large=50Gi`)。
+  - 预建空 ConfigMap `mfpi-user-expirations` 与 `mfpi-user-tiers`；新增 `mfpi-admin-expirations`、`mfpi-admin-tiers` 两个 Role/RoleBinding(仅 get/update)。
+  - mfpi-admin Deployment env 新增 `EXPIRY_CONFIGMAP`/`EXPIRY_NAMESPACE`/`TIERS_CONFIGMAP`/`TIERS_NAMESPACE`/`DEFAULT_TIER`。
+  - `deploy.sh` 对 base + 三个档位 ActorTemplate 均做不可变 spec 变更时重建。
+  - `validate-templates.sh` 改为按资源计数断言，并校验全部 4 个 ActorTemplate 均带 sticky userdata 卷、档位 worker 标签映射与每档 WorkerPool 资源限制；`mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` 各 27 个文档均通过校验。

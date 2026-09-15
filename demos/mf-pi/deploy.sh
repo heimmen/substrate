@@ -145,9 +145,12 @@ cmd_deploy() {
   local manifest
   manifest="$(mktemp)"
   render > "${manifest}"
-  # Delete the immutable ActorTemplate first when its spec has changed; the
-  # apply below then recreates it (see ensure_at_recreate_if_changed).
-  ensure_at_recreate_if_changed "${manifest}" "${NAMESPACE}" mf-pi
+  # ActorTemplate specs are immutable, so delete any base/per-tier template
+  # whose spec changed before applying (see ensure_at_recreate_if_changed).
+  # Base mf-pi (legacy/default) plus one template per resource tier.
+  for at in mf-pi mf-pi-small mf-pi-mid mf-pi-large; do
+    ensure_at_recreate_if_changed "${manifest}" "${NAMESPACE}" "${at}"
+  done
   ko apply -f "${manifest}"
   rm -f "${manifest}"
 

@@ -16,7 +16,6 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: ate-demo-mf-pi
-
 ---
 
 apiVersion: v1
@@ -29,7 +28,6 @@ stringData:
   # pi-web's built-in deepseek provider picks this up (model picker:
   # deepseek/deepseek-chat or deepseek/deepseek-reasoner).
   DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
-
 ---
 
 # Grant ate-api-server read access to the Secret that this demo's
@@ -73,6 +71,77 @@ spec:
   replicas: ${MFPI_WORKER_REPLICAS}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: mf-pi-wp-small
+  namespace: ate-demo-mf-pi
+  labels:
+    workload: mf-pi-small
+spec:
+  # Number of physical workers; bounds the max number of concurrently-active
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 4).
+  replicas: ${MFPI_WORKER_REPLICAS}
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+  template:
+    resources:
+      requests:
+        cpu: 0.5
+        memory: 1Gi
+      limits:
+        cpu: 0.5
+        memory: 1Gi
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: mf-pi-wp-mid
+  namespace: ate-demo-mf-pi
+  labels:
+    workload: mf-pi-mid
+spec:
+  # Number of physical workers; bounds the max number of concurrently-active
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 4).
+  replicas: ${MFPI_WORKER_REPLICAS}
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+  template:
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        cpu: 1
+        memory: 2Gi
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: mf-pi-wp-large
+  namespace: ate-demo-mf-pi
+  labels:
+    workload: mf-pi-large
+spec:
+  # Number of physical workers; bounds the max number of concurrently-active
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 4).
+  replicas: ${MFPI_WORKER_REPLICAS}
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+  template:
+    resources:
+      requests:
+        cpu: 2
+        memory: 4Gi
+      limits:
+        cpu: 2
+        memory: 4Gi
 ---
 
 apiVersion: ate.dev/v1alpha1
@@ -222,6 +291,448 @@ spec:
 
 ---
 
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: mf-pi-small
+  namespace: ate-demo-mf-pi
+spec:
+  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
+  containers:
+  - name: pi-web
+    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+    # Only `args` is set (no `command`), so the image's ENTRYPOINT
+    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
+    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # and then execs this single-container supervisor (sessiond + web).
+    args:
+    - sh
+    - -c
+    - |
+      set -eu
+      # Single-container supervisor (sessiond + web). User data lives on
+      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # below): everything the agent writes there is persisted by the sticky
+      # volume plugin and survives a delete+recreate redeploy (image refresh),
+      # so no profile sync or admin broker is involved
+      # (see save_userdata_pv.md).
+
+      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
+      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
+      # on first start only, so a brand-new user resumed from the golden base
+      # snapshot never runs that install and starts without skills. Mirror its
+      # no-clobber copy here on every pass: missing skills are installed,
+      # existing ones are left untouched.
+      (
+        while true; do
+          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
+          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          if [ -d "$skills_src" ]; then
+            mkdir -p "$skills_dst"
+            for skill_dir in "$skills_src"/*/; do
+              [ -d "$skill_dir" ] || continue
+              skill_name=$(basename "$skill_dir")
+              if [ ! -e "$skills_dst/$skill_name" ]; then
+                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
+              fi
+            done
+          fi
+          sleep 10
+        done
+      ) &
+
+      # Recover project working directories. projects.json is persisted on the
+      # PV, but a project's working directory itself may live outside
+      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # refuses to open a session whose stored cwd no longer exists. The actor
+      # sandbox is normally restored from a snapshot (golden base or suspend
+      # checkpoint), so a one-shot boot-time fix would never re-run; instead
+      # run this as a background loop: the restored process continues after
+      # every resume and re-creates any project directory that went missing.
+      (
+        while true; do
+          node -e '
+            const fs = require("fs");
+            try {
+              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
+              const projects = (JSON.parse(raw).projects || []);
+              for (const p of projects) {
+                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
+                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+                  }
+                }
+              }
+            } catch (e) { /* no projects.json yet: nothing to recover */ }
+          ' || true
+          sleep 10
+        done
+      ) &
+
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      pi-web-sessiond &
+      sessiond_pid=$!
+      n=0
+      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
+      if [ ! -S "$sock" ]; then
+        echo "mf-pi: sessiond socket did not appear at $sock" >&2
+        kill "$sessiond_pid" 2>/dev/null || true
+        exit 1
+      fi
+      pi-web-server &
+      web_pid=$!
+
+      term() {
+        kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
+      }
+      trap term TERM INT
+      set +e
+      wait "$web_pid"
+      web_status=$?
+      term
+      wait "$sessiond_pid" 2>/dev/null
+      exit "$web_status"
+
+    volumeMounts:
+    - name: userdata
+      mountPath: /data/pi-agent
+    env:
+    # atenet-router forwards traffic to the actor on port 80.
+    - name: PI_WEB_PORT
+      value: "80"
+    - name: PI_WEB_HOST
+      value: "0.0.0.0"
+    # The Docker host-bridge features (docker.sock, host paths) do not apply
+    # to actor sandboxes.
+    - name: HOSTEXEC_MODE
+      value: disabled
+    # Persist pi-web's data directory AND sessiond socket on the userdata PV
+    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
+    # supervisor waits on (see the args block's `sock=` default).
+    - name: PI_WEB_DATA_DIR
+      value: /data/pi-agent
+    - name: PI_WEB_SESSIOND_SOCKET
+      value: /data/pi-agent/sessiond.sock
+    - name: DEEPSEEK_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mf-pi-provider-config
+          key: DEEPSEEK_API_KEY
+  volumes:
+  - name: userdata
+    externalVolumeTemplate:
+      capacity: 5Gi
+      storageClassName: standard
+  workerSelector:
+    matchLabels:
+      workload: mf-pi-small
+  snapshotsConfig:
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see save_userdata_pv.md).
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
+
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: mf-pi-mid
+  namespace: ate-demo-mf-pi
+spec:
+  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
+  containers:
+  - name: pi-web
+    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+    # Only `args` is set (no `command`), so the image's ENTRYPOINT
+    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
+    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # and then execs this single-container supervisor (sessiond + web).
+    args:
+    - sh
+    - -c
+    - |
+      set -eu
+      # Single-container supervisor (sessiond + web). User data lives on
+      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # below): everything the agent writes there is persisted by the sticky
+      # volume plugin and survives a delete+recreate redeploy (image refresh),
+      # so no profile sync or admin broker is involved
+      # (see save_userdata_pv.md).
+
+      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
+      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
+      # on first start only, so a brand-new user resumed from the golden base
+      # snapshot never runs that install and starts without skills. Mirror its
+      # no-clobber copy here on every pass: missing skills are installed,
+      # existing ones are left untouched.
+      (
+        while true; do
+          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
+          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          if [ -d "$skills_src" ]; then
+            mkdir -p "$skills_dst"
+            for skill_dir in "$skills_src"/*/; do
+              [ -d "$skill_dir" ] || continue
+              skill_name=$(basename "$skill_dir")
+              if [ ! -e "$skills_dst/$skill_name" ]; then
+                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
+              fi
+            done
+          fi
+          sleep 10
+        done
+      ) &
+
+      # Recover project working directories. projects.json is persisted on the
+      # PV, but a project's working directory itself may live outside
+      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # refuses to open a session whose stored cwd no longer exists. The actor
+      # sandbox is normally restored from a snapshot (golden base or suspend
+      # checkpoint), so a one-shot boot-time fix would never re-run; instead
+      # run this as a background loop: the restored process continues after
+      # every resume and re-creates any project directory that went missing.
+      (
+        while true; do
+          node -e '
+            const fs = require("fs");
+            try {
+              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
+              const projects = (JSON.parse(raw).projects || []);
+              for (const p of projects) {
+                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
+                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+                  }
+                }
+              }
+            } catch (e) { /* no projects.json yet: nothing to recover */ }
+          ' || true
+          sleep 10
+        done
+      ) &
+
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      pi-web-sessiond &
+      sessiond_pid=$!
+      n=0
+      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
+      if [ ! -S "$sock" ]; then
+        echo "mf-pi: sessiond socket did not appear at $sock" >&2
+        kill "$sessiond_pid" 2>/dev/null || true
+        exit 1
+      fi
+      pi-web-server &
+      web_pid=$!
+
+      term() {
+        kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
+      }
+      trap term TERM INT
+      set +e
+      wait "$web_pid"
+      web_status=$?
+      term
+      wait "$sessiond_pid" 2>/dev/null
+      exit "$web_status"
+
+    volumeMounts:
+    - name: userdata
+      mountPath: /data/pi-agent
+    env:
+    # atenet-router forwards traffic to the actor on port 80.
+    - name: PI_WEB_PORT
+      value: "80"
+    - name: PI_WEB_HOST
+      value: "0.0.0.0"
+    # The Docker host-bridge features (docker.sock, host paths) do not apply
+    # to actor sandboxes.
+    - name: HOSTEXEC_MODE
+      value: disabled
+    # Persist pi-web's data directory AND sessiond socket on the userdata PV
+    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
+    # supervisor waits on (see the args block's `sock=` default).
+    - name: PI_WEB_DATA_DIR
+      value: /data/pi-agent
+    - name: PI_WEB_SESSIOND_SOCKET
+      value: /data/pi-agent/sessiond.sock
+    - name: DEEPSEEK_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mf-pi-provider-config
+          key: DEEPSEEK_API_KEY
+  volumes:
+  - name: userdata
+    externalVolumeTemplate:
+      capacity: 20Gi
+      storageClassName: standard
+  workerSelector:
+    matchLabels:
+      workload: mf-pi-mid
+  snapshotsConfig:
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see save_userdata_pv.md).
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
+
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: mf-pi-large
+  namespace: ate-demo-mf-pi
+spec:
+  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
+  containers:
+  - name: pi-web
+    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+    # Only `args` is set (no `command`), so the image's ENTRYPOINT
+    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
+    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # and then execs this single-container supervisor (sessiond + web).
+    args:
+    - sh
+    - -c
+    - |
+      set -eu
+      # Single-container supervisor (sessiond + web). User data lives on
+      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # below): everything the agent writes there is persisted by the sticky
+      # volume plugin and survives a delete+recreate redeploy (image refresh),
+      # so no profile sync or admin broker is involved
+      # (see save_userdata_pv.md).
+
+      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
+      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
+      # on first start only, so a brand-new user resumed from the golden base
+      # snapshot never runs that install and starts without skills. Mirror its
+      # no-clobber copy here on every pass: missing skills are installed,
+      # existing ones are left untouched.
+      (
+        while true; do
+          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
+          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          if [ -d "$skills_src" ]; then
+            mkdir -p "$skills_dst"
+            for skill_dir in "$skills_src"/*/; do
+              [ -d "$skill_dir" ] || continue
+              skill_name=$(basename "$skill_dir")
+              if [ ! -e "$skills_dst/$skill_name" ]; then
+                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
+              fi
+            done
+          fi
+          sleep 10
+        done
+      ) &
+
+      # Recover project working directories. projects.json is persisted on the
+      # PV, but a project's working directory itself may live outside
+      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # refuses to open a session whose stored cwd no longer exists. The actor
+      # sandbox is normally restored from a snapshot (golden base or suspend
+      # checkpoint), so a one-shot boot-time fix would never re-run; instead
+      # run this as a background loop: the restored process continues after
+      # every resume and re-creates any project directory that went missing.
+      (
+        while true; do
+          node -e '
+            const fs = require("fs");
+            try {
+              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
+              const projects = (JSON.parse(raw).projects || []);
+              for (const p of projects) {
+                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
+                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+                  }
+                }
+              }
+            } catch (e) { /* no projects.json yet: nothing to recover */ }
+          ' || true
+          sleep 10
+        done
+      ) &
+
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      pi-web-sessiond &
+      sessiond_pid=$!
+      n=0
+      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
+      if [ ! -S "$sock" ]; then
+        echo "mf-pi: sessiond socket did not appear at $sock" >&2
+        kill "$sessiond_pid" 2>/dev/null || true
+        exit 1
+      fi
+      pi-web-server &
+      web_pid=$!
+
+      term() {
+        kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
+      }
+      trap term TERM INT
+      set +e
+      wait "$web_pid"
+      web_status=$?
+      term
+      wait "$sessiond_pid" 2>/dev/null
+      exit "$web_status"
+
+    volumeMounts:
+    - name: userdata
+      mountPath: /data/pi-agent
+    env:
+    # atenet-router forwards traffic to the actor on port 80.
+    - name: PI_WEB_PORT
+      value: "80"
+    - name: PI_WEB_HOST
+      value: "0.0.0.0"
+    # The Docker host-bridge features (docker.sock, host paths) do not apply
+    # to actor sandboxes.
+    - name: HOSTEXEC_MODE
+      value: disabled
+    # Persist pi-web's data directory AND sessiond socket on the userdata PV
+    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
+    # supervisor waits on (see the args block's `sock=` default).
+    - name: PI_WEB_DATA_DIR
+      value: /data/pi-agent
+    - name: PI_WEB_SESSIOND_SOCKET
+      value: /data/pi-agent/sessiond.sock
+    - name: DEEPSEEK_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mf-pi-provider-config
+          key: DEEPSEEK_API_KEY
+  volumes:
+  - name: userdata
+    externalVolumeTemplate:
+      capacity: 50Gi
+      storageClassName: standard
+  workerSelector:
+    matchLabels:
+      workload: mf-pi-large
+  snapshotsConfig:
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see save_userdata_pv.md).
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
+---
+
 # ConfigMap holding per-user access passwords (username -> hash). Pre-created
 # here (empty) so the mfpi-admin server only needs get/update — RBAC cannot
 # name-restrict the `create` verb, so the server never creates it itself.
@@ -229,6 +740,24 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mfpi-user-passwords
+  namespace: ate-demo-mf-pi
+---
+# ConfigMap holding per-user activation expiries (username -> RFC3339 expiry
+# timestamp). Same pre-created + get/update RBAC pattern as the passwords
+# ConfigMap (see admin/expiry.go, env EXPIRY_CONFIGMAP).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mfpi-user-expirations
+  namespace: ate-demo-mf-pi
+---
+# ConfigMap holding per-user resource tiers (username -> tier name, e.g.
+# small/mid/large). Same pre-created + get/update RBAC pattern (see
+# admin/tier.go, env TIERS_CONFIGMAP).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mfpi-user-tiers
   namespace: ate-demo-mf-pi
 ---
 # ServiceAccount + RBAC for the mfpi-admin server to read/write the
@@ -263,6 +792,58 @@ subjects:
 roleRef:
   kind: Role
   name: mfpi-admin-passwords
+  apiGroup: rbac.authorization.k8s.io
+# Role/RoleBinding: let the mfpi-admin SA read/update the expirations ConfigMap.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mfpi-admin-expirations
+  namespace: ate-demo-mf-pi
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["mfpi-user-expirations"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mfpi-admin-expirations
+  namespace: ate-demo-mf-pi
+subjects:
+- kind: ServiceAccount
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi
+roleRef:
+  kind: Role
+  name: mfpi-admin-expirations
+  apiGroup: rbac.authorization.k8s.io
+# Role/RoleBinding: let the mfpi-admin SA read/update the tiers ConfigMap.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mfpi-admin-tiers
+  namespace: ate-demo-mf-pi
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["mfpi-user-tiers"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mfpi-admin-tiers
+  namespace: ate-demo-mf-pi
+subjects:
+- kind: ServiceAccount
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi
+roleRef:
+  kind: Role
+  name: mfpi-admin-tiers
   apiGroup: rbac.authorization.k8s.io
 ---
 # Pre-created empty Secret holding per-user DeepSeek provider keys
@@ -311,7 +892,8 @@ roleRef:
 # /usermanagement/. It authenticates in-cluster with a projected SA token
 # (audience api.ate-system.svc) and trusts the servicedns ClusterTrustBundle
 # for the ateapi serving cert. It runs as the mfpi-admin SA, which additionally
-# has RBAC for the mfpi-user-passwords ConfigMap and the per-user key Secret.
+# has RBAC for the mfpi-user-passwords / mfpi-user-expirations /
+# mfpi-user-tiers ConfigMaps and the per-user key Secret.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -356,6 +938,16 @@ spec:
           value: mfpi-user-provider-keys
         - name: KEYS_NAMESPACE
           value: ate-demo-mf-pi
+        - name: EXPIRY_CONFIGMAP
+          value: mfpi-user-expirations
+        - name: EXPIRY_NAMESPACE
+          value: ate-demo-mf-pi
+        - name: TIERS_CONFIGMAP
+          value: mfpi-user-tiers
+        - name: TIERS_NAMESPACE
+          value: ate-demo-mf-pi
+        - name: DEFAULT_TIER
+          value: small
         - name: ROUTER_ADDR
           value: http://atenet-router.ate-system.svc:80
         volumeMounts:
@@ -382,7 +974,6 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
-
 ---
 
 apiVersion: v1
