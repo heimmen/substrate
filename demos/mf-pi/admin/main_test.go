@@ -195,6 +195,68 @@ func (s *fakeKeyStore) Delete(name string) error {
 	return nil
 }
 
+// fakeExpiryStore is an in-memory expiryStore for tests.
+type fakeExpiryStore struct {
+	expiries map[string]string
+	err      error
+}
+
+func newFakeExpiryStore() *fakeExpiryStore {
+	return &fakeExpiryStore{expiries: map[string]string{}}
+}
+
+func (s *fakeExpiryStore) Get(name string) (string, bool) {
+	e, ok := s.expiries[name]
+	return e, ok
+}
+
+func (s *fakeExpiryStore) Set(name, expiresAt string) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.expiries[name] = expiresAt
+	return nil
+}
+
+func (s *fakeExpiryStore) Delete(name string) error {
+	if s.err != nil {
+		return s.err
+	}
+	delete(s.expiries, name)
+	return nil
+}
+
+// fakeTierStore is an in-memory tierStore for tests.
+type fakeTierStore struct {
+	tiers map[string]string
+	err   error
+}
+
+func newFakeTierStore() *fakeTierStore {
+	return &fakeTierStore{tiers: map[string]string{}}
+}
+
+func (s *fakeTierStore) Get(name string) (string, bool) {
+	t, ok := s.tiers[name]
+	return t, ok
+}
+
+func (s *fakeTierStore) Set(name, tier string) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.tiers[name] = tier
+	return nil
+}
+
+func (s *fakeTierStore) Delete(name string) error {
+	if s.err != nil {
+		return s.err
+	}
+	delete(s.tiers, name)
+	return nil
+}
+
 // fakeActorAuth is an in-memory actorAuthClient for tests. It records the
 // set/clear calls per host and can be configured to fail.
 type fakeActorAuth struct {
@@ -243,6 +305,10 @@ func newTestServer(f *fakeControlClient) *server {
 		client:            f,
 		passwords:         newFakePasswordStore(),
 		keys:              newFakeKeyStore(),
+		expiries:          newFakeExpiryStore(),
+		tiers:             newFakeTierStore(),
+		tierTemplates:     buildTierTemplates("mf-pi"),
+		defaultTier:       "small",
 		actors:            newFakeActorAuth(),
 		now:               func() time.Time { return fixedNow },
 		lastAttempt:       make(map[string]time.Time),

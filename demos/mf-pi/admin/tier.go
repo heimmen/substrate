@@ -20,6 +20,24 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// tierNames are the fixed resource tiers (deploy-time ActorTemplate +
+// WorkerPool per tier). The order also drives the UI's tier picker. Each must
+// correspond to an `mf-pi-<tier>` ActorTemplate/WorkerPool created by the
+// deploy manifests (see Part E of resource_quota_plan.md).
+var tierNames = []string{"small", "mid", "large"}
+
+// buildTierTemplates derives the tier -> ActorTemplate-name map from the base
+// template name (ACTOR_TEMPLATE_NAME, e.g. "mf-pi"). Each tier t maps to
+// "<base>-<t>", e.g. "mf-pi-small". The base template itself (e.g. "mf-pi")
+// is the default tier (small) template, kept for backward compatibility.
+func buildTierTemplates(base string) map[string]string {
+	out := make(map[string]string, len(tierNames))
+	for _, t := range tierNames {
+		out[t] = base + "-" + t
+	}
+	return out
+}
+
 // tierStore persists per-user resource tiers. Implemented by
 // configMapTierStore in production and by a fake in tests.
 type tierStore interface {

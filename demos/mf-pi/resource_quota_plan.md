@@ -172,3 +172,26 @@
 - `go test ./demos/mf-pi/admin/...` 通过。
 - 验收 1：到期 RUNNING 演员在后台定时后被自动挂起(SUSPENDED)，worker/Pod 释放，用户数据保留。
 - 验收 2：新建用户按所设档位使用对应 ActorTemplate + WorkerPool，CPU/内存/磁盘真正受限；存量用户不变。
+
+---
+
+## 实现进度
+
+以下记录各 commit 的落地情况(倒序，最新在上)。
+
+- [x] **A1 / B2(存储层)**：新增 `expiry.go`(configMapExpiryStore)与 `tier.go`(configMapTierStore)，均沿用「预建 ConfigMap + Get→Update/不 Create + 命名 RBAC」模式。
+  - commit b6759ea8 / ff2b36e9(已于本次任务开始前完成)。
+- [x] **A2 / B3 - main.go 服务端**：
+  - `server` 增加 `expiries`/`tiers`/`tierTemplates`/`defaultTier`；`userSummary` 增加 `HasExpiry`/`Expiry`/`Tier`。
+  - 路由新增 `/expiry`(POST/PUT set、DELETE clear)与 `/tier`(POST/PUT set)。
+  - 新增 `handleSetExpiry`/`handleClearExpiry`/`handleSetTier`：校验用户名、校验用户存在(GetActor)、set/delete 到 store。
+  - `handleCreateUser` 用 `tierTemplates[userTier(name)]` 选择 ActorTemplate(仅新建/重建生效)。
+  - `reconcileExpirations` 并入现有 30s reconcile tick：RUNNING 且 `now>expiresAt` → SuspendActor(幂等、best-effort)。
+  - `handleListUsers` 填充 `HasExpiry`/`Expiry`(Tier 已在 `summarize` 填充)。
+  - `handleDeleteUser` 清理该用户 expiry 与 tier(best-effort)。
+  - `serverConfig`/`serverConfigFromEnv` 增加 `EXPIRY_CONFIGMAP`/`EXPIRY_NAMESPACE`/`TIERS_CONFIGMAP`/`TIERS_NAMESPACE`/`DEFAULT_TIER`；`main()` 构建并 load 两个 store、装配 `tierTemplates`/`defaultTier`。
+  - `tier.go` 增加 `tierNames`(=small/mid/large)与 `buildTierTemplates(base)`。
+  - 测试侧 `main_test.go` 增加 `fakeExpiryStore`/`fakeTierStore` 并装配进 `newTestServer`。
+- [ ] **Part C**：`index.html` 增加「有效期」「档位」列与下拉菜单项(设置/清除有效期、设置资源档位)。
+- [ ] **Part D**：`main_test.go` 增加 expiry/tier 相关用例(set/非法/用户不存在/delete 幂等、reconcile 到期挂起、create-with-tier、list 带出、delete 清理)。
+- [ ] **Part E**：`mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` 增加每档 WorkerPool+ActorTemplate、预建 ConfigMap、Role/RoleBinding、Deployment env。

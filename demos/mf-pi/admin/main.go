@@ -83,6 +83,18 @@ const (
 	defaultKeysSecret    = "mfpi-user-provider-keys"
 	defaultKeysNamespace = "ate-demo-mf-pi"
 
+	// ConfigMap holding per-user activation expiries (username -> RFC3339
+	// timestamp). Same pre-created + get/update RBAC pattern as the passwords
+	// ConfigMap.
+	defaultExpiryConfigMap = "mfpi-user-expirations"
+	defaultExpiryNamespace = "ate-demo-mf-pi"
+	// ConfigMap holding per-user resource tiers (username -> tier name).
+	defaultTiersConfigMap = "mfpi-user-tiers"
+	defaultTiersNamespace = "ate-demo-mf-pi"
+	// defaultTier is the resource tier used for users with none set. It must be
+	// a member of tierNames (see tier.go).
+	defaultTier = "small"
+
 	// defaultRouterAddr is the in-cluster base URL of the atenet router that
 	// forwards per-Host requests to actor workloads.
 	defaultRouterAddr = "http://atenet-router.ate-system.svc:80"
@@ -306,8 +318,15 @@ type server struct {
 	client            controlClient
 	passwords         passwordStore
 	keys              keyStore
-	actors            actorAuthClient
-	now               func() time.Time
+	expiries          expiryStore
+	tiers             tierStore
+	// tierTemplates maps a resource tier name to the ActorTemplate name used to
+	// create a user's actor (derived from templateName at startup). See tier.go.
+	tierTemplates map[string]string
+	// defaultTier is applied when a user has no tier set.
+	defaultTier string
+	actors      actorAuthClient
+	now         func() time.Time
 
 	// reconcileMu guards lastAttempt. The reconciler re-injects stored keys
 	// onto running actors (see startReconciler), so a missed injection — e.g.
@@ -330,6 +349,12 @@ type userSummary struct {
 	// HasPersonalKey reports whether the admin has stored a per-user
 	// DeepSeek API key for this user (shown as a badge in the UI).
 	HasPersonalKey bool `json:"hasPersonalKey"`
+	// HasExpiry reports whether the user has an activation expiry set.
+	HasExpiry bool `json:"hasExpiry"`
+	// Expiry is the RFC3339 expiry timestamp (empty when HasExpiry is false).
+	Expiry string `json:"expiry"`
+	// Tier is the user's resource tier (defaults to the server default).
+	Tier string `json:"tier"`
 }
 
 func (s *server) summarize(a *ateapipb.Actor) userSummary {
@@ -349,7 +374,17 @@ func (s *server) summarize(a *ateapipb.Actor) userSummary {
 		IP:       a.GetAteomPodIp(),
 		Version:  a.GetMetadata().GetVersion(),
 		Age:      age,
+		Tier:     s.userTier(a.GetMetadata().GetName()),
 	}
+}
+
+// userTier returns the user's configured resource tier, falling back to the
+// server default when unset.
+func (s *server) userTier(name string) string {
+	if t, ok := s.tiers.Get(name); ok && t != "" {
+		return t
+	}
+	return s.defaultTier
 }
 
 func (s *server) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +414,24 @@ func (s *server) handleUserSubresource(w http.ResponseWriter, r *http.Request) {
 			s.handleSetAPIKey(w, r, name)
 		case http.MethodDelete:
 			s.handleClearAPIKey(w, r, name)
+		default:
+			http.NotFound(w, r)
+		}
+	case strings.HasSuffix(rest, "/expiry"):
+		name := strings.TrimSuffix(rest, "/expiry")
+		switch r.Method {
+		case http.MethodPost, http.MethodPut:
+			s.handleSetExpiry(w, r, name)
+		case http.MethodDelete:
+			s.handleClearExpiry(w, r, name)
+		default:
+			http.NotFound(w, r)
+		}
+	case strings.HasSuffix(rest, "/tier"):
+		name := strings.TrimSuffix(rest, "/tier")
+		switch r.Method {
+		case http.MethodPost, http.MethodPut:
+			s.handleSetTier(w, r, name)
 		default:
 			http.NotFound(w, r)
 		}
@@ -418,6 +471,10 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		name := a.GetMetadata().GetName()
 		u := s.summarize(a)
 		_, u.HasPersonalKey = s.keys.Get(name)
+		if exp, ok := s.expiries.Get(name); ok {
+			u.HasExpiry = true
+			u.Expiry = exp
+		}
 		users = append(users, u)
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].Name < users[j].Name })
@@ -477,11 +534,15 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Use the user's resource tier (defaults to the server default) to pick the
+	// ActorTemplate. The template is fixed at creation; changing the tier only
+	// takes effect on the next fresh create/recreate (see handleSetTier).
+	tpl := s.tierTemplates[s.userTier(name)]
 	actor, err := s.client.CreateActor(ctx, &ateapipb.CreateActorRequest{
 		Actor: &ateapipb.Actor{
 			Metadata:               &ateapipb.ResourceMetadata{Atespace: s.atespace, Name: name},
 			ActorTemplateNamespace: s.templateNamespace,
-			ActorTemplateName:      s.templateName,
+			ActorTemplateName:      tpl,
 		},
 	})
 	if err != nil {
@@ -663,6 +724,104 @@ func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "DeepSeek Key 已清除", "name": name})
 }
 
+// handleSetExpiry stores an activation expiry for a user. The body carries a
+// relative duration (e.g. "168h"); the effective absolute RFC3339 timestamp is
+// computed and persisted, and the reconciler suspends the actor once it passes.
+func (s *server) handleSetExpiry(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
+		return
+	}
+	var req struct {
+		Duration string `json:"duration"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	dur, err := time.ParseDuration(strings.TrimSpace(req.Duration))
+	if err != nil || dur <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法时长：应为格式如 168h / 24h30m 的正数"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+	if _, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref}); err != nil {
+		if status.Code(err) == codes.NotFound {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "用户不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询用户失败: " + err.Error()})
+		return
+	}
+
+	expiresAt := s.now().Add(dur).UTC().Format(time.RFC3339)
+	if err := s.expiries.Set(name, expiresAt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存有效期失败: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message":   "有效期限已设置",
+		"name":      name,
+		"expiresAt": expiresAt,
+	})
+}
+
+// handleClearExpiry removes a user's activation expiry (idempotent), disabling
+// the reconciler's auto-suspend for them.
+func (s *server) handleClearExpiry(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
+		return
+	}
+	if err := s.expiries.Delete(name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除有效期失败: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "有效期限已清除", "name": name})
+}
+
+// handleSetTier stores a resource tier for a user, taking effect on the next
+// fresh create/recreate of their actor (existing actors keep their template).
+func (s *server) handleSetTier(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
+		return
+	}
+	var req struct {
+		Tier string `json:"tier"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	tier := strings.TrimSpace(req.Tier)
+	if _, ok := s.tierTemplates[tier]; !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法资源档位：可选值 " + strings.Join(tierNames, ", ")})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+	if _, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref}); err != nil {
+		if status.Code(err) == codes.NotFound {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "用户不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询用户失败: " + err.Error()})
+		return
+	}
+
+	if err := s.tiers.Set(name, tier); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存资源档位失败: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "资源档位已设置（作用于下次新建/重建用户）", "name": name, "tier": tier})
+}
+
 // ensureRunningActor makes the actor RUNNING (resuming it if needed) and waits
 // until it reports RUNNING. A no-op when already RUNNING. Bounded by ctx.
 func (s *server) ensureRunningActor(ctx context.Context, name string) error {
@@ -757,6 +916,7 @@ func (s *server) startReconciler(ctx context.Context) {
 		case <-ticker.C:
 			rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			s.reconcileKeys(rctx)
+			s.reconcileExpirations(rctx)
 			cancel()
 		}
 	}
@@ -804,6 +964,48 @@ func (s *server) reconcileKeys(ctx context.Context) {
 		}
 		s.clearReconcileAttempt(name)
 		log.Printf("reconcile: re-injected stored key for %q", name)
+	}
+}
+
+// reconcileExpirations suspends RUNNING actors whose activation expiry has
+// passed, releasing their worker/Pod resources while keeping the snapshot and
+// user data (recoverable on next resume; distinct from deletion). Best-effort:
+// a failed suspend is logged and retried on the next tick.
+func (s *server) reconcileExpirations(ctx context.Context) {
+	resp, err := s.client.ListActors(ctx, &ateapipb.ListActorsRequest{
+		Atespace: s.atespace,
+		PageSize: 1000,
+	})
+	if err != nil {
+		log.Printf("reconcile-expiry: list actors: %v", err)
+		return
+	}
+	now := s.now()
+	for _, a := range resp.GetActors() {
+		if a.GetStatus() != ateapipb.Actor_STATUS_RUNNING {
+			continue
+		}
+		name := a.GetMetadata().GetName()
+		exp, ok := s.expiries.Get(name)
+		if !ok || exp == "" {
+			continue
+		}
+		expiresAt, err := time.Parse(time.RFC3339, exp)
+		if err != nil {
+			// Malformed stored value; it cannot match now. Skip and log.
+			log.Printf("reconcile-expiry: bad stored expiry for %q: %v", name, err)
+			continue
+		}
+		if !now.After(expiresAt) {
+			continue
+		}
+		ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+		if _, err := s.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: ref}); err != nil {
+			// Best-effort: log and retry on the next tick.
+			log.Printf("reconcile-expiry: failed to suspend %q (expired at %s): %v", name, exp, err)
+			continue
+		}
+		log.Printf("reconcile-expiry: suspended %q (expired at %s)", name, exp)
 	}
 }
 
@@ -868,6 +1070,16 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		// Best-effort: a stale key is harmless and replayed only if the same
 		// user is re-created with a stored key. Log rather than fail.
 		log.Printf("deleting stored DeepSeek key for %q failed: %v", name, err)
+	}
+	if err := s.expiries.Delete(name); err != nil {
+		// Best-effort: a stale expiry is harmless; a re-created user simply
+		// gets no auto-suspend until one is set again. Log rather than fail.
+		log.Printf("deleting stored expiry for %q failed: %v", name, err)
+	}
+	if err := s.tiers.Delete(name); err != nil {
+		// Best-effort: a stale tier is harmless; a re-created user falls back
+		// to the default tier. Log rather than fail.
+		log.Printf("deleting stored tier for %q failed: %v", name, err)
 	}
 	// Removing a user removes their data: purge the sticky userdata volume
 	// (DeleteActor keeps it by design so a delete+recreate REFRESH re-attaches
@@ -965,6 +1177,11 @@ type serverConfig struct {
 	passwordsNamespace string
 	keysSecret         string
 	keysNamespace      string
+	expiryConfigMap    string
+	expiryNamespace    string
+	tiersConfigMap     string
+	tiersNamespace     string
+	defaultTier        string
 	routerAddr         string
 }
 
@@ -980,6 +1197,11 @@ func serverConfigFromEnv() serverConfig {
 		passwordsNamespace: envOr("PASSWORDS_NAMESPACE", defaultPasswordsNamespace),
 		keysSecret:         envOr("KEYS_SECRET", defaultKeysSecret),
 		keysNamespace:      envOr("KEYS_NAMESPACE", defaultKeysNamespace),
+		expiryConfigMap:    envOr("EXPIRY_CONFIGMAP", defaultExpiryConfigMap),
+		expiryNamespace:    envOr("EXPIRY_NAMESPACE", defaultExpiryNamespace),
+		tiersConfigMap:     envOr("TIERS_CONFIGMAP", defaultTiersConfigMap),
+		tiersNamespace:     envOr("TIERS_NAMESPACE", defaultTiersNamespace),
+		defaultTier:        envOr("DEFAULT_TIER", defaultTier),
 		routerAddr:         envOr("ROUTER_ADDR", defaultRouterAddr),
 	}
 }
@@ -1030,6 +1252,8 @@ func main() {
 	}
 	passwords := newConfigMapPasswordStore(k8s, cfg.passwordsNamespace, cfg.passwordsConfigMap)
 	keys := newSecretKeyStore(k8s, cfg.keysNamespace, cfg.keysSecret)
+	expiries := newConfigMapExpiryStore(k8s, cfg.expiryNamespace, cfg.expiryConfigMap)
+	tiers := newConfigMapTierStore(k8s, cfg.tiersNamespace, cfg.tiersConfigMap)
 	loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := passwords.load(loadCtx); err != nil {
 		cancel()
@@ -1038,6 +1262,14 @@ func main() {
 	if err := keys.load(loadCtx); err != nil {
 		cancel()
 		log.Fatalf("loading key store: %v", err)
+	}
+	if err := expiries.load(loadCtx); err != nil {
+		cancel()
+		log.Fatalf("loading expiry store: %v", err)
+	}
+	if err := tiers.load(loadCtx); err != nil {
+		cancel()
+		log.Fatalf("loading tier store: %v", err)
 	}
 	cancel()
 
@@ -1048,6 +1280,10 @@ func main() {
 		client:            client,
 		passwords:         passwords,
 		keys:              keys,
+		expiries:          expiries,
+		tiers:             tiers,
+		tierTemplates:     buildTierTemplates(cfg.templateName),
+		defaultTier:       cfg.defaultTier,
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
 		now:               time.Now,
 		lastAttempt:       make(map[string]time.Time),
