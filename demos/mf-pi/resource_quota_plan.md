@@ -200,3 +200,4 @@
   - mfpi-admin Deployment env 新增 `EXPIRY_CONFIGMAP`/`EXPIRY_NAMESPACE`/`TIERS_CONFIGMAP`/`TIERS_NAMESPACE`/`DEFAULT_TIER`。
   - `deploy.sh` 对 base + 三个档位 ActorTemplate 均做不可变 spec 变更时重建。
   - `validate-templates.sh` 改为按资源计数断言，并校验全部 4 个 ActorTemplate 均带 sticky userdata 卷、档位 worker 标签映射与每档 WorkerPool 资源限制；`mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` 各 27 个文档均通过校验。
+  - 修正：WorkerPool `spec.template.resources` 的 `cpu` 值须为字符串(K8s resource quantity 校验)，已改为带引号的 `"0.5"` / `"1"` / `"2"`(裸数字 `0.5` 会触发 CRD 校验失败 `must be of type integer,string: "number"`)。
