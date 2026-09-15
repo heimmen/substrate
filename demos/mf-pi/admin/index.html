@@ -183,6 +183,8 @@
           <th>IP</th>
           <th>版本</th>
           <th>年龄</th>
+          <th>有效期</th>
+          <th>档位</th>
           <th>操作</th>
         </tr>
       </thead>
@@ -236,6 +238,19 @@
     });
   }
 
+  // expiryDisplayHtml renders the 有效期 column: "—" when unset, "已到期" when
+  // a RUNNING actor is past its expiry (auto-suspend pending), else the raw
+  // RFC3339 timestamp.
+  function expiryDisplayHtml(u) {
+    if (!u.hasExpiry || !u.expiry) {
+      return '<span class="badge gray">—</span>';
+    }
+    if (u.status === "STATUS_RUNNING" && new Date(u.expiry).getTime() < Date.now()) {
+      return '<span class="badge red" title="激活有效期已到（' + esc(u.expiry) + '），将由后台自动挂起释放资源">已到期</span>';
+    }
+    return '<span class="badge gray" title="激活有效期（到期后自动挂起释放资源，可恢复）">' + esc(u.expiry) + "</span>";
+  }
+
   function renderUsers(users) {
     var table = document.getElementById("user-table");
     var empty = document.getElementById("empty");
@@ -257,6 +272,10 @@
       var keyBadge = u.hasPersonalKey ?
         '<span class="badge green" title="已为该用户存储专属 DeepSeek API Key">已设置</span>' :
         '<span class="badge gray" title="未设置专属 Key，将使用 DEEPSEEK_API_KEY 环境变量">未设置</span>';
+      var expiryCell = expiryDisplayHtml(u);
+      var tierBadge = u.tier ?
+        '<span class="badge blue" title="该用户的资源档位（作用于新建/重建，存量用户不变）">' + esc(u.tier) + "</span>" :
+        '<span class="badge gray">—</span>';
       tr.innerHTML =
         '<td class="mono"><a href="' + esc(agentUrl) + '" target="_blank" rel="noopener" title="打开 agent 页面">' + esc(u.name) + "</a></td>" +
         '<td><span class="badge ' + badgeClass(u.status) + '">' + esc(statusLabel(u.status)) + "</span></td>" +
@@ -266,6 +285,8 @@
         '<td class="mono">' + esc(u.ip) + "</td>" +
         "<td>" + esc(u.version) + "</td>" +
         "<td>" + esc(u.age) + "</td>" +
+        "<td>" + expiryCell + "</td>" +
+        "<td>" + tierBadge + "</td>" +
         '<td class="actions"><div class="dropdown">' +
         '<button class="dropdown-toggle">操作 ▾</button>' +
         '<div class="dropdown-menu">' +
@@ -273,6 +294,9 @@
         '<button class="reset-pwd">重置密码</button>' +
         '<button class="set-key" title="为运行中的 agent 写入专属 DeepSeek API Key">设置 Key</button>' +
         '<button class="clear-key" title="退出登录并清除专属 DeepSeek API Key">清除 Key</button>' +
+        '<button class="set-expiry" title="设置激活有效期，到期后自动挂起释放资源">设置有效期</button>' +
+        '<button class="clear-expiry" title="撤销激活有效期，停止到期自动挂起">清除有效期</button>' +
+        '<button class="set-tier" title="设置用户资源档位（新建/重建后生效）">设置资源档位</button>' +
         '<button class="danger del">删除</button>' +
         "</div></div></td>";
       tr.querySelector(".dropdown-toggle").addEventListener("click", function (e) {
@@ -313,6 +337,15 @@
       });
       tr.querySelector(".clear-key").addEventListener("click", function () {
         clearUserAPIKey(u.name);
+      });
+      tr.querySelector(".set-expiry").addEventListener("click", function () {
+        setUserExpiry(u.name);
+      });
+      tr.querySelector(".clear-expiry").addEventListener("click", function () {
+        clearUserExpiry(u.name);
+      });
+      tr.querySelector(".set-tier").addEventListener("click", function () {
+        setUserTier(u.name, u.tier);
       });
       tr.querySelector(".del").addEventListener("click", function () {
         deleteUser(u.name);
@@ -416,6 +449,96 @@
       })
       .catch(function (err) {
         showMsg("清除 Key 失败：" + err.message, true);
+      });
+  }
+
+  // setUserExpiry prompts for an activation duration (e.g. "168h") and stores
+  // it as the user's expiry; the server computes the absolute expiry timestamp.
+  // A blank or "0"/"0h" input clears the expiry instead.
+  function setUserExpiry(name) {
+    var current = window.prompt(
+      "为 \"" + name + "\" 设置激活有效期（到期后自动挂起释放资源，数据保留可恢复）。\n" +
+      "输入持续时长，如 24h / 168h / 30m；输入 0 或留空表示清除。", "168h");
+    if (current === null) {
+      return; // 用户取消
+    }
+    var trimmed = current.trim();
+    if (trimmed === "" || trimmed === "0" || /^0+[a-z]*$/i.test(trimmed)) {
+      clearUserExpiry(name);
+      return;
+    }
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name) + "/expiry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ duration: trimmed })
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("用户 " + esc(j.name || name) + "：有效期限已设置，到期时间 " + (j.expiresAt || ""));
+        listUsers();
+      })
+      .catch(function (err) {
+        showMsg("设置有效期失败：" + err.message, true);
+      });
+  }
+
+  function clearUserExpiry(name) {
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name) + "/expiry", { method: "DELETE" })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "有效期限已清除"));
+        listUsers();
+      })
+      .catch(function (err) {
+        showMsg("清除有效期失败：" + err.message, true);
+      });
+  }
+
+  // setUserTier prompts for one of the fixed resource tiers (small/mid/large)
+  // and stores it; it only affects the user's next fresh create/recreate.
+  function setUserTier(name, currentTier) {
+    var tier = window.prompt(
+      "为 \"" + name + "\" 设置资源档位（small / mid / large）。\n" +
+      "档位将在下次新建/重建该用户时生效（存量用户保持不变）。" +
+      (currentTier ? "\n当前档位：" + currentTier : ""), currentTier || "small");
+    if (tier === null) {
+      return; // 用户取消
+    }
+    tier = tier.trim().toLowerCase();
+    if (["small", "mid", "large"].indexOf(tier) === -1) {
+      showMsg("非法资源档位：可选 small / mid / large", true);
+      return;
+    }
+    clearMsg();
+    fetch("api/users/" + encodeURIComponent(name) + "/tier", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tier: tier })
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || ("资源档位已设为 " + tier)));
+        listUsers();
+      })
+      .catch(function (err) {
+        showMsg("设置资源档位失败：" + err.message, true);
       });
   }
 
