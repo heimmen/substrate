@@ -13,6 +13,8 @@
 #   DEEPSEEK_API_KEY      (default: read from the mf-pi-provider-config secret)
 #   MFPI_WORKER_REPLICAS  (default 16)
 #   KO_DEFAULTBASEIMAGE   (default localhost:5001/distroless-static-debian13)
+#   MFPI_SKIP_REFRESH     (set 1 to skip refreshing existing users after an
+#                          ActorTemplate spec change; default is to refresh)
 #
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
@@ -22,6 +24,10 @@ cd "$(dirname "$0")"
 
 NAMESPACE="ate-demo-mf-pi"
 TEMPLATE="mf-pi.yaml.tmpl"
+# Names of the ActorTemplates whose spec changed during this deploy (see
+# ensure_at_recreate_if_changed). Existing users on a changed template are
+# refreshed after the apply (see refresh_existing_users).
+CHANGED_ATS=()
 
 # --- Defaults ---------------------------------------------------------------
 # Registry the cluster can pull from (kind/k3s local registry). Exported so
@@ -114,9 +120,75 @@ PYEOF
 )"
   rm -f "${live_file}"
   if [[ "${change}" == "1" ]]; then
+    CHANGED_ATS+=("${at}")
     echo "  ActorTemplate '${at}' spec changed; replacing it (immutable spec)."
     echo "  This regenerates the golden base snapshot; existing actors and their snapshots are unaffected."
     kubectl delete actortemplate "${at}" -n "${ns}"
+  fi
+}
+
+# refresh_existing_users rolls an ActorTemplate spec change out to live users.
+#
+# The ActorTemplate spec is immutable: when deploy.sh replaced a changed CR
+# above, actors created from the OLD spec keep running unchanged. External
+# volumes declared by the new spec are never provisioned for them (volume
+# provisioning only happens on actor creation), so the next resume of such an
+# actor fails with "volume <name> not found for actor <user>" and wedges it in
+# STATUS_RESUMING. Refreshing each affected user (suspend -> delete ->
+# recreate -> resume, via refresh-actor.sh) re-provisions volumes from the
+# current spec; the sticky userdata volume keeps user data and passwords
+# intact. Only users whose template changed are refreshed, and only when a
+# template actually changed (a no-op deploy never interrupts users). Skipped
+# entirely with MFPI_SKIP_REFRESH=1. Refresh failures are reported but do not
+# fail the deploy.
+refresh_existing_users() {
+  if [[ "${MFPI_SKIP_REFRESH:-0}" == "1" ]]; then
+    echo "  MFPI_SKIP_REFRESH=1; skipping existing-user refresh."
+    return 0
+  fi
+  if (( ${#CHANGED_ATS[@]} == 0 )); then
+    return 0   # no template changed: existing users are unaffected
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "WARNING: jq is required to refresh existing users but was not found;" >&2
+    echo "  users on changed template(s) [${CHANGED_ATS[*]}] were NOT refreshed." >&2
+    echo "  Install jq and run: ./refresh-actor.sh -y <user>..." >&2
+    return 0
+  fi
+  local actors_json users=() line u ns tpl at
+  if ! actors_json="$(kubectl ate get actor -a "${MFPI_ATESPACE:-mfpi}" -o json 2>&1)"; then
+    echo "WARNING: could not list actors in atespace '${MFPI_ATESPACE:-mfpi}': ${actors_json}" >&2
+    echo "  users on changed template(s) [${CHANGED_ATS[*]}] were NOT refreshed." >&2
+    return 0
+  fi
+  while IFS=$'\t' read -r u ns tpl; do
+    [[ -z "${u}" ]] && continue
+    for at in "${CHANGED_ATS[@]}"; do
+      if [[ "${tpl}" == "${at}" && "${ns}" == "${NAMESPACE}" ]]; then
+        users+=("${u}")
+        break
+      fi
+    done
+  done < <(printf '%s' "${actors_json}" |
+             jq -r '.actors[] | [.metadata.name,
+                                (.actorTemplateNamespace // ""),
+                                (.actorTemplateName // "")] | @tsv')
+  if (( ${#users[@]} == 0 )); then
+    echo "  no existing users on changed template(s) [${CHANGED_ATS[*]}]; nothing to refresh."
+    return 0
+  fi
+  echo "  refreshing existing users on changed template(s) [${CHANGED_ATS[*]}]:"
+  echo "    ${users[*]}"
+  echo "  (user data on the sticky userdata volume survives; set MFPI_SKIP_REFRESH=1 to skip)"
+  # deploy.sh is non-interactive, so confirm on the caller's behalf (-y) and
+  # skip the proxy probe (the port-forward usually is not up during deploy).
+  if ! MFPI_SKIP_PROXY_CHECK=1 ./refresh-actor.sh -y "${users[@]}"; then
+    echo "WARNING: some users failed to refresh (see [refresh-actor] output above)." >&2
+    echo "  A user wedged in STATUS_RESUMING cannot be suspended or deleted via the" >&2
+    echo "  CLI; recover it manually, then re-run ./refresh-actor.sh -y <user>:" >&2
+    echo "    kubectl -n ${NAMESPACE} scale workerpool mf-pi-workerpool --replicas=0" >&2
+    echo "    # wait for the actor to report STATUS_SUSPENDED, then:" >&2
+    echo "    kubectl -n ${NAMESPACE} scale workerpool mf-pi-workerpool --replicas=${MFPI_WORKER_REPLICAS:-16}" >&2
   fi
 }
 
@@ -156,6 +228,8 @@ cmd_deploy() {
 
   echo "Waiting for mfpi-admin to be ready..."
   kubectl rollout status deployment/mfpi-admin -n "${NAMESPACE}" --timeout=120s
+
+  refresh_existing_users
 
   echo "mf-pi demo deployed."
   echo "  management UI: run ./run-nginx.sh, then open http://localhost:58681/usermanagement/"

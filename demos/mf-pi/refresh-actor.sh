@@ -140,10 +140,13 @@ get_status() {
 
 get_template() {
   # Returns "<namespace>/<name>" of the actor's current template, or empty.
+  # The live actor JSON carries the template ref as top-level fields
+  # (actorTemplateName / actorTemplateNamespace); keep the dotted fallbacks
+  # for older output shapes.
   local raw ns nm
   raw="$("${KUBECTL_ATE_CMD[@]}" get actor "$1" -a "${ATESPACE}" -o json 2>&1 || true)"
-  ns="$(printf '%s' "${raw}" | jq -r '.actors[0].actor_template.namespace // .actor_template.namespace // empty' 2>/dev/null || true)"
-  nm="$(printf '%s' "${raw}" | jq -r '.actors[0].actor_template.name // .actor_template.name // empty' 2>/dev/null || true)"
+  ns="$(printf '%s' "${raw}" | jq -r '.actors[0].actorTemplateNamespace // .actor_template.namespace // empty' 2>/dev/null || true)"
+  nm="$(printf '%s' "${raw}" | jq -r '.actors[0].actorTemplateName // .actor_template.name // empty' 2>/dev/null || true)"
   if [[ -n "${ns}" && -n "${nm}" ]]; then
     printf '%s/%s' "${ns}" "${nm}"
   fi
