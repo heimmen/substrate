@@ -301,6 +301,49 @@ key，因此任何 resume 路径（包括 `refresh-actor.sh` 的删除重建）�
 - 设置 / 清除都会在需要时自动恢复 `SUSPENDED` 的 actor。挂起 / 恢复（Full 快照）
   保留 `auth.json`，因此已设的 key 在挂起 / 恢复后依然生效。
 
+### 统一安装 Skill（管理员分发到所有用户）
+
+`mfpi-admin` 是**唯一权威源**：管理员在 `/usermanagement/` 上传 / 卸载 skill，
+平台自动把它分发到**所有用户（每个用户 = 一个 pi-web Actor）**，安装到每个
+actor 的 `/data/pi-agent/skills`，新会话自动生效，已打开的会话可用「**立即应
+用**」触发 reload 热加载。完整设计与实现进度见 `deploy_skill_to_actor.md`。
+
+**分发机制（Actor 自拉）**：admin 把 skill 目录存到 PVC（`mfpi-shared-skills`，
+挂 `$SKILLS_DIR=/var/lib/mfpi-skills`，`replicas: 1` 固化），暴露两个只读端点
+`/internal/skills/manifest` 与 `/internal/skills/<name>.tgz`；每个 actor 的
+supervisor 每 10s 用 `If-None-Match` 条件拉取 manifest，按 `sha256` 增量覆盖安
+装到 `skills/`。manifest 中消失且曾被托管的 skill 会被移除；**从未托管的用户自
+建 skill 一律不动**（统一安装不破坏用户私有数据）。网络 / 解析失败静默跳过，
+绝不阻塞 web/sessiond 主进程。
+
+**立即应用（可选加速）**：对每个 `RUNNING` 用户经 router 扇出 pi-web 的
+session reload（`GET /api/projects` → `GET /api/sessions?cwd=` →
+`POST /api/sessions/:id/reload`），使已打开会话无需重启即加载新版。这是尽力而
+为：有活跃工作的会话会在下次开会话时生效。
+
+**界面（管理 UI）**：`/usermanagement/` 顶部新增「**共享 Skills**」卡片——列
+表（名称 / 大小 / 更新时间 / 删除）、上传（`.tgz` / `.zip` 或目录，自动打包）、
+「**立即应用**」按钮（应用后显示「已应用到 N/M 个在线用户」）。
+
+**CLI**（经临时 port-forward 调 mfpi-admin REST `api/skills`）：
+
+```bash
+./install-skill.sh mofang-form ./mofang-form.tgz   # 或 .zip / 目录；自动打包
+./list-skills.sh                                    # 列出已托管 skill
+./remove-skill.sh mofang-form                       # 卸载（仅删托管副本）
+./apply-skills.sh                                   # 立即应用（扇出 reload）
+# 测试环境（atespace mfpi-test）：
+./install-skill-test.sh mofang-form ./mofang-form.tgz
+./list-skills-test.sh
+./remove-skill-test.sh mofang-form
+./apply-skills-test.sh
+```
+
+**安全与边界**：上传校验——名称必须为 DNS-1123 slug，包内必须含 `SKILL.md`，
+tar/zip 解包拒绝 `../` 与绝对路径条目（zip-slip），单文件大小上限 32 MiB、整包
+64 MiB。管理端 `GET /internal/skills/*` 不做鉴权（actor 侧 env 冻结进 golden 快
+照，token 轮换对已恢复的 actor 不生效），如需要可用 NetworkPolicy 限制来源。
+
 ### 用户数据持久化（重置后自动恢复）
 
 每个用户的数据（`/data/pi-agent` 下的 `auth.json`、skills、`sessions/`、

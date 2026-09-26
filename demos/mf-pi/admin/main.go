@@ -326,7 +326,15 @@ type server struct {
 	// defaultTier is applied when a user has no tier set.
 	defaultTier string
 	actors      actorAuthClient
-	now         func() time.Time
+	// skills is the managed shared-skill store (PVC-backed). Nil when the
+	// SKILLS_DIR is unavailable; the /api/skills and /internal/skills routes
+	// are only registered when non-nil.
+	skills *skillStore
+	// applier reloads running actors' sessions so newly provisioned skills
+	// take effect without a new session. Nil in tests/handlers that don't
+	// need the apply fan-out.
+	applier applyReloader
+	now     func() time.Time
 
 	// reconcileMu guards lastAttempt. The reconciler re-injects stored keys
 	// onto running actors (see startReconciler), so a missed injection — e.g.
@@ -1183,6 +1191,7 @@ type serverConfig struct {
 	tiersNamespace     string
 	defaultTier        string
 	routerAddr         string
+	skillsDir          string
 }
 
 func serverConfigFromEnv() serverConfig {
@@ -1203,6 +1212,7 @@ func serverConfigFromEnv() serverConfig {
 		tiersNamespace:     envOr("TIERS_NAMESPACE", defaultTiersNamespace),
 		defaultTier:        envOr("DEFAULT_TIER", defaultTier),
 		routerAddr:         envOr("ROUTER_ADDR", defaultRouterAddr),
+		skillsDir:          envOr("SKILLS_DIR", defaultSkillsDir),
 	}
 }
 
@@ -1285,8 +1295,16 @@ func main() {
 		tierTemplates:     buildTierTemplates(cfg.templateName),
 		defaultTier:       cfg.defaultTier,
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
+		skills:            newSkillStore(cfg.skillsDir),
+		applier:           newHTTPApplyReloader(cfg.routerAddr),
 		now:               time.Now,
 		lastAttempt:       make(map[string]time.Time),
+	}
+
+	// Pre-create the skills store layout so a missing/mounted PVC surfaces a
+	// loud startup error rather than an opaque mid-request failure.
+	if err := srv.skills.ensureDirs(); err != nil {
+		log.Fatalf("initializing skills store at %s: %v", cfg.skillsDir, err)
 	}
 
 	mux := http.NewServeMux()
@@ -1295,6 +1313,14 @@ func main() {
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
+
+	// Shared-skills management API (admin UI) and read-only internal endpoints
+	// (consumed by the actors' pull loop).
+	mux.HandleFunc("/api/skills", srv.skills.handleAPISkills)
+	mux.HandleFunc("/api/skills/", srv.handleSkillsSubresource)
+	mux.HandleFunc("/api/skills/apply", srv.handleApplySkillsAPIRoute)
+	mux.HandleFunc("/internal/skills/manifest", srv.skills.handleInternalManifest)
+	mux.HandleFunc("/internal/skills/", srv.skills.handleInternalSkillTgz)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

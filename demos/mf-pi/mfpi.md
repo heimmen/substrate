@@ -63,6 +63,10 @@ key 的完整设计与实现进度（驱动 actor 内 pi-web api-key 登录流�
 `sessions/` 等）持久化到 sticky per-actor 卷（`externalVolumeTemplate`，挂载
 `/data/pi-agent`）的完整设计；删除重建后数据自动恢复，重置不丢数据。
 
+另见 `deploy_skill_to_actor.md`：管理员在 `mfpi-admin` 统一上传/卸载 skill，
+经 Actor 内后台拉取循环自动分发到所有用户的设计与实现进度（对应 README 的
+「统一安装 Skill」章节，含 REST/CLI/UI 与双环境支持）。
+
 ## Actor 容器关键设计（核心难点）
 
 `mf-pi.yaml.tmpl` 的 ActorTemplate 容器（测试版同，仅 label/路径不同）：

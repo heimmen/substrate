@@ -194,148 +194,126 @@ spec:
         done
       ) &
 
-      # Recover project working directories. projects.json is persisted on the
-      # PV, but a project's working directory itself may live outside
-      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
-      # refuses to open a session whose stored cwd no longer exists. The actor
-      # sandbox is normally restored from a snapshot (golden base or suspend
-      # checkpoint), so a one-shot boot-time fix would never re-run; instead
-      # run this as a background loop: the restored process continues after
-      # every resume and re-creates any project directory that went missing.
+      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # admin is the authoritative source; each actor conditionally syncs the
+      # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
+      # keying on the manifest ETag/version so unchanged skills are not
+      # re-downloaded. Only skills the admin has managed are ever touched; a
+      # user's own skills are never modified or removed. PI_WEB_SKILLS_URL is
+      # the /internal/skills base of the admin service. A network/parse failure
+      # is logged and skipped (|| true) so it never blocks sessiond/web.
       (
         while true; do
-          node -e '
-            const fs = require("fs");
-            try {
-              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
-              const projects = (JSON.parse(raw).projects || []);
-              for (const p of projects) {
-                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
-                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
-                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+          if [ -n "${PI_WEB_SKILLS_URL:-}" ]; then
+            node -e '
+              const zlib = require("zlib");
+              const fs = require("fs");
+              const path = require("path");
+              const base = process.env.PI_WEB_SKILLS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "skills");
+              const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
+              const log = (...a) => console.log("mfpi-skills:", ...a);
+              const readState = () => {
+                try { return JSON.parse(fs.readFileSync(statePath, "utf8")); }
+                catch (e) { return { version: "", managed: {} }; }
+              };
+              const writeState = (obj) => {
+                fs.mkdirSync(agentDir, { recursive: true });
+                const tmp = statePath + ".tmp";
+                fs.writeFileSync(tmp, JSON.stringify(obj));
+                fs.renameSync(tmp, statePath);
+              };
+              // Pure-node ustar .tar.gz extractor. Do not spawn the GNU `tar`
+              // binary from the gVisor sandbox: it fails to create subdirectory
+              // entries there with ENOSYS ("Function not implemented"). Use
+              // built-in zlib + a minimal ustar parser instead.
+              const oct = (s) => parseInt((s || "0").replace(/[^0-7]/g, "") || "0", 8) || 0;
+              const strip = (n) => n.replace(/\/+$/, "");
+              const extractTgz = (tgzBuf, dir) => {
+                const tar = zlib.gunzipSync(tgzBuf);
+                const BLOCK = 512;
+                let off = 0;
+                while (off + BLOCK <= tar.length) {
+                  const h = tar.slice(off, off + BLOCK);
+                  const name = h.toString("utf8", 0, 100).replace(/\0.*$/, "");
+                  if (name === "") break;
+                  const size = oct(h.toString("utf8", 124, 136));
+                  const type = String.fromCharCode(h[156] || 0x30);
+                  const dataStart = off + BLOCK;
+                  if (type === "5") {
+                    fs.mkdirSync(path.join(dir, strip(name)), { recursive: true });
+                  } else if (type === "2") {
+                    const target = path.join(dir, strip(name));
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, Buffer.alloc(0));
+                  } else {
+                    const target = path.join(dir, name);
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, tar.slice(dataStart, dataStart + size));
                   }
+                  off = dataStart + Math.ceil(size / BLOCK) * BLOCK;
                 }
-              }
-            } catch (e) { /* no projects.json yet: nothing to recover */ }
-          ' || true
-          sleep 10
-        done
-      ) &
-
-      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
-      pi-web-sessiond &
-      sessiond_pid=$!
-      n=0
-      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
-      if [ ! -S "$sock" ]; then
-        echo "mf-pi: sessiond socket did not appear at $sock" >&2
-        kill "$sessiond_pid" 2>/dev/null || true
-        exit 1
-      fi
-      pi-web-server &
-      web_pid=$!
-
-      term() {
-        kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
-      }
-      trap term TERM INT
-      set +e
-      wait "$web_pid"
-      web_status=$?
-      term
-      wait "$sessiond_pid" 2>/dev/null
-      exit "$web_status"
-
-    volumeMounts:
-    - name: userdata
-      mountPath: /data/pi-agent
-    env:
-    # atenet-router forwards traffic to the actor on port 80.
-    - name: PI_WEB_PORT
-      value: "80"
-    - name: PI_WEB_HOST
-      value: "0.0.0.0"
-    # The Docker host-bridge features (docker.sock, host paths) do not apply
-    # to actor sandboxes.
-    - name: HOSTEXEC_MODE
-      value: disabled
-    # Persist pi-web's data directory AND sessiond socket on the userdata PV
-    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
-    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
-    # supervisor waits on (see the args block's `sock=` default).
-    - name: PI_WEB_DATA_DIR
-      value: /data/pi-agent
-    - name: PI_WEB_SESSIOND_SOCKET
-      value: /data/pi-agent/sessiond.sock
-    - name: DEEPSEEK_API_KEY
-      valueFrom:
-        secretKeyRef:
-          name: mf-pi-provider-config
-          key: DEEPSEEK_API_KEY
-  volumes:
-  - name: userdata
-    externalVolumeTemplate:
-      capacity: 5Gi
-      storageClassName: standard
-  workerSelector:
-    matchLabels:
-      workload: mf-pi
-  snapshotsConfig:
-    # Full snapshots (process memory + filesystem delta). The userdata
-    # external volume is not part of the rootfs delta: user data persists on
-    # the node via the sticky volume and survives delete+recreate redeploys
-    # (see save_userdata_pv.md).
-    onPause: Full
-    onCommit: Full
-    location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
-
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: mf-pi-small
-  namespace: ate-demo-mf-pi
-spec:
-  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
-  containers:
-  - name: pi-web
-    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
-    # Only `args` is set (no `command`), so the image's ENTRYPOINT
-    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
-    # installs the baked-in skills into /data/pi-agent/skills on first start
-    # and then execs this single-container supervisor (sessiond + web).
-    args:
-    - sh
-    - -c
-    - |
-      set -eu
-      # Single-container supervisor (sessiond + web). User data lives on
-      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
-      # below): everything the agent writes there is persisted by the sticky
-      # volume plugin and survives a delete+recreate redeploy (image refresh),
-      # so no profile sync or admin broker is involved
-      # (see save_userdata_pv.md).
-
-      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
-      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
-      # on first start only, so a brand-new user resumed from the golden base
-      # snapshot never runs that install and starts without skills. Mirror its
-      # no-clobber copy here on every pass: missing skills are installed,
-      # existing ones are left untouched.
-      (
-        while true; do
-          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
-          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
-          if [ -d "$skills_src" ]; then
-            mkdir -p "$skills_dst"
-            for skill_dir in "$skills_src"/*/; do
-              [ -d "$skill_dir" ] || continue
-              skill_name=$(basename "$skill_dir")
-              if [ ! -e "$skills_dst/$skill_name" ]; then
-                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
-              fi
-            done
+              };
+              const main = async () => {
+                if (!base) return;
+                try {
+                  const state = readState();
+                  const oldManaged = state.managed || {};
+                  const res = await fetch(base + "/manifest", {
+                    headers: { "If-None-Match": state.version || "", "Accept": "application/json" },
+                    signal: AbortSignal.timeout(15000)
+                  });
+                  if (res.status === 304) return;
+                  if (!res.ok) { log("manifest HTTP", res.status); return; }
+                  const man = await res.json();
+                  const skills = (man.skills || []).map(s => ({ name: s.name, sha256: s.sha256 }));
+                  const newManaged = {};
+                  fs.mkdirSync(dst, { recursive: true });
+                  for (const s of skills) {
+                    const skillDst = path.join(dst, s.name);
+                    if (oldManaged[s.name] === s.sha256 && fs.existsSync(skillDst)) {
+                      newManaged[s.name] = s.sha256;
+                      continue;
+                    }
+                    const tmpTgz = path.join(dst, ".mfpi-tmp-" + s.name + ".tgz");
+                    const tmpDir = path.join(dst, ".mfpi-tmp-" + s.name);
+                    try {
+                      const buf = Buffer.from(await (await fetch(base + "/" + s.name + ".tgz", { signal: AbortSignal.timeout(15000) })).arrayBuffer());
+                      fs.writeFileSync(tmpTgz, buf);
+                      fs.rmSync(tmpDir, { recursive: true, force: true });
+                      fs.mkdirSync(tmpDir, { recursive: true });
+                      extractTgz(buf, tmpDir);
+                      fs.rmSync(skillDst, { recursive: true, force: true });
+                      const inner = path.join(tmpDir, s.name);
+                      if (fs.existsSync(inner)) {
+                        fs.renameSync(inner, skillDst);
+                      } else {
+                        fs.renameSync(tmpDir, skillDst);
+                      }
+                      newManaged[s.name] = s.sha256;
+                      log("installed", s.name, s.sha256);
+                    } catch (e) {
+                      log("install failed", s.name, String((e && e.message) || e));
+                    } finally {
+                      for (const f of [tmpTgz, tmpDir]) {
+                        try { fs.rmSync(f, { recursive: true, force: true }); } catch (e2) {}
+                      }
+                    }
+                  }
+                  for (const name of Object.keys(oldManaged)) {
+                    if (!newManaged[name]) {
+                      fs.rmSync(path.join(dst, name), { recursive: true, force: true });
+                      log("removed", name);
+                    }
+                  }
+                  writeState({ version: man.version || "", managed: newManaged });
+                } catch (e) {
+                  log("error", String((e && e.message) || e));
+                }
+              };
+              main();
+            ' || true
           fi
           sleep 10
         done
@@ -414,6 +392,288 @@ spec:
       value: /data/pi-agent
     - name: PI_WEB_SESSIOND_SOCKET
       value: /data/pi-agent/sessiond.sock
+    # Base of the admin's read-only /internal/skills API. The supervisor's
+    # managed-skills loop syncs administrator-provisioned skills from here.
+    # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
+    - name: PI_WEB_SKILLS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi.svc.cluster.local:8080/internal/skills
+    - name: DEEPSEEK_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mf-pi-provider-config
+          key: DEEPSEEK_API_KEY
+  volumes:
+  - name: userdata
+    externalVolumeTemplate:
+      capacity: 5Gi
+      storageClassName: standard
+  workerSelector:
+    matchLabels:
+      workload: mf-pi
+  snapshotsConfig:
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see save_userdata_pv.md).
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: mf-pi-small
+  namespace: ate-demo-mf-pi
+spec:
+  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
+  containers:
+  - name: pi-web
+    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+    # Only `args` is set (no `command`), so the image's ENTRYPOINT
+    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
+    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # and then execs this single-container supervisor (sessiond + web).
+    args:
+    - sh
+    - -c
+    - |
+      set -eu
+      # Single-container supervisor (sessiond + web). User data lives on
+      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # below): everything the agent writes there is persisted by the sticky
+      # volume plugin and survives a delete+recreate redeploy (image refresh),
+      # so no profile sync or admin broker is involved
+      # (see save_userdata_pv.md).
+
+      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
+      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
+      # on first start only, so a brand-new user resumed from the golden base
+      # snapshot never runs that install and starts without skills. Mirror its
+      # no-clobber copy here on every pass: missing skills are installed,
+      # existing ones are left untouched.
+      (
+        while true; do
+          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
+          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          if [ -d "$skills_src" ]; then
+            mkdir -p "$skills_dst"
+            for skill_dir in "$skills_src"/*/; do
+              [ -d "$skill_dir" ] || continue
+              skill_name=$(basename "$skill_dir")
+              if [ ! -e "$skills_dst/$skill_name" ]; then
+                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
+              fi
+            done
+          fi
+          sleep 10
+        done
+      ) &
+
+      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # admin is the authoritative source; each actor conditionally syncs the
+      # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
+      # keying on the manifest ETag/version so unchanged skills are not
+      # re-downloaded. Only skills the admin has managed are ever touched; a
+      # user's own skills are never modified or removed. PI_WEB_SKILLS_URL is
+      # the /internal/skills base of the admin service. A network/parse failure
+      # is logged and skipped (|| true) so it never blocks sessiond/web.
+      (
+        while true; do
+          if [ -n "${PI_WEB_SKILLS_URL:-}" ]; then
+            node -e '
+              const zlib = require("zlib");
+              const fs = require("fs");
+              const path = require("path");
+              const base = process.env.PI_WEB_SKILLS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "skills");
+              const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
+              const log = (...a) => console.log("mfpi-skills:", ...a);
+              const readState = () => {
+                try { return JSON.parse(fs.readFileSync(statePath, "utf8")); }
+                catch (e) { return { version: "", managed: {} }; }
+              };
+              const writeState = (obj) => {
+                fs.mkdirSync(agentDir, { recursive: true });
+                const tmp = statePath + ".tmp";
+                fs.writeFileSync(tmp, JSON.stringify(obj));
+                fs.renameSync(tmp, statePath);
+              };
+              // Pure-node ustar .tar.gz extractor. Do not spawn the GNU `tar`
+              // binary from the gVisor sandbox: it fails to create subdirectory
+              // entries there with ENOSYS ("Function not implemented"). Use
+              // built-in zlib + a minimal ustar parser instead.
+              const oct = (s) => parseInt((s || "0").replace(/[^0-7]/g, "") || "0", 8) || 0;
+              const strip = (n) => n.replace(/\/+$/, "");
+              const extractTgz = (tgzBuf, dir) => {
+                const tar = zlib.gunzipSync(tgzBuf);
+                const BLOCK = 512;
+                let off = 0;
+                while (off + BLOCK <= tar.length) {
+                  const h = tar.slice(off, off + BLOCK);
+                  const name = h.toString("utf8", 0, 100).replace(/\0.*$/, "");
+                  if (name === "") break;
+                  const size = oct(h.toString("utf8", 124, 136));
+                  const type = String.fromCharCode(h[156] || 0x30);
+                  const dataStart = off + BLOCK;
+                  if (type === "5") {
+                    fs.mkdirSync(path.join(dir, strip(name)), { recursive: true });
+                  } else if (type === "2") {
+                    const target = path.join(dir, strip(name));
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, Buffer.alloc(0));
+                  } else {
+                    const target = path.join(dir, name);
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, tar.slice(dataStart, dataStart + size));
+                  }
+                  off = dataStart + Math.ceil(size / BLOCK) * BLOCK;
+                }
+              };
+              const main = async () => {
+                if (!base) return;
+                try {
+                  const state = readState();
+                  const oldManaged = state.managed || {};
+                  const res = await fetch(base + "/manifest", {
+                    headers: { "If-None-Match": state.version || "", "Accept": "application/json" },
+                    signal: AbortSignal.timeout(15000)
+                  });
+                  if (res.status === 304) return;
+                  if (!res.ok) { log("manifest HTTP", res.status); return; }
+                  const man = await res.json();
+                  const skills = (man.skills || []).map(s => ({ name: s.name, sha256: s.sha256 }));
+                  const newManaged = {};
+                  fs.mkdirSync(dst, { recursive: true });
+                  for (const s of skills) {
+                    const skillDst = path.join(dst, s.name);
+                    if (oldManaged[s.name] === s.sha256 && fs.existsSync(skillDst)) {
+                      newManaged[s.name] = s.sha256;
+                      continue;
+                    }
+                    const tmpTgz = path.join(dst, ".mfpi-tmp-" + s.name + ".tgz");
+                    const tmpDir = path.join(dst, ".mfpi-tmp-" + s.name);
+                    try {
+                      const buf = Buffer.from(await (await fetch(base + "/" + s.name + ".tgz", { signal: AbortSignal.timeout(15000) })).arrayBuffer());
+                      fs.writeFileSync(tmpTgz, buf);
+                      fs.rmSync(tmpDir, { recursive: true, force: true });
+                      fs.mkdirSync(tmpDir, { recursive: true });
+                      extractTgz(buf, tmpDir);
+                      fs.rmSync(skillDst, { recursive: true, force: true });
+                      const inner = path.join(tmpDir, s.name);
+                      if (fs.existsSync(inner)) {
+                        fs.renameSync(inner, skillDst);
+                      } else {
+                        fs.renameSync(tmpDir, skillDst);
+                      }
+                      newManaged[s.name] = s.sha256;
+                      log("installed", s.name, s.sha256);
+                    } catch (e) {
+                      log("install failed", s.name, String((e && e.message) || e));
+                    } finally {
+                      for (const f of [tmpTgz, tmpDir]) {
+                        try { fs.rmSync(f, { recursive: true, force: true }); } catch (e2) {}
+                      }
+                    }
+                  }
+                  for (const name of Object.keys(oldManaged)) {
+                    if (!newManaged[name]) {
+                      fs.rmSync(path.join(dst, name), { recursive: true, force: true });
+                      log("removed", name);
+                    }
+                  }
+                  writeState({ version: man.version || "", managed: newManaged });
+                } catch (e) {
+                  log("error", String((e && e.message) || e));
+                }
+              };
+              main();
+            ' || true
+          fi
+          sleep 10
+        done
+      ) &
+
+      # Recover project working directories. projects.json is persisted on the
+      # PV, but a project's working directory itself may live outside
+      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # refuses to open a session whose stored cwd no longer exists. The actor
+      # sandbox is normally restored from a snapshot (golden base or suspend
+      # checkpoint), so a one-shot boot-time fix would never re-run; instead
+      # run this as a background loop: the restored process continues after
+      # every resume and re-creates any project directory that went missing.
+      (
+        while true; do
+          node -e '
+            const fs = require("fs");
+            try {
+              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
+              const projects = (JSON.parse(raw).projects || []);
+              for (const p of projects) {
+                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
+                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+                  }
+                }
+              }
+            } catch (e) { /* no projects.json yet: nothing to recover */ }
+          ' || true
+          sleep 10
+        done
+      ) &
+
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      pi-web-sessiond &
+      sessiond_pid=$!
+      n=0
+      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
+      if [ ! -S "$sock" ]; then
+        echo "mf-pi: sessiond socket did not appear at $sock" >&2
+        kill "$sessiond_pid" 2>/dev/null || true
+        exit 1
+      fi
+      pi-web-server &
+      web_pid=$!
+
+      term() {
+        kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
+      }
+      trap term TERM INT
+      set +e
+      wait "$web_pid"
+      web_status=$?
+      term
+      wait "$sessiond_pid" 2>/dev/null
+      exit "$web_status"
+
+    volumeMounts:
+    - name: userdata
+      mountPath: /data/pi-agent
+    env:
+    # atenet-router forwards traffic to the actor on port 80.
+    - name: PI_WEB_PORT
+      value: "80"
+    - name: PI_WEB_HOST
+      value: "0.0.0.0"
+    # The Docker host-bridge features (docker.sock, host paths) do not apply
+    # to actor sandboxes.
+    - name: HOSTEXEC_MODE
+      value: disabled
+    # Persist pi-web's data directory AND sessiond socket on the userdata PV
+    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
+    # supervisor waits on (see the args block's `sock=` default).
+    - name: PI_WEB_DATA_DIR
+      value: /data/pi-agent
+    - name: PI_WEB_SESSIOND_SOCKET
+      value: /data/pi-agent/sessiond.sock
+    # Base of the admin's read-only /internal/skills API. The supervisor's
+    # managed-skills loop syncs administrator-provisioned skills from here.
+    # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
+    - name: PI_WEB_SKILLS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi.svc.cluster.local:8080/internal/skills
     - name: DEEPSEEK_API_KEY
       valueFrom:
         secretKeyRef:
@@ -489,149 +749,126 @@ spec:
         done
       ) &
 
-      # Recover project working directories. projects.json is persisted on the
-      # PV, but a project's working directory itself may live outside
-      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
-      # refuses to open a session whose stored cwd no longer exists. The actor
-      # sandbox is normally restored from a snapshot (golden base or suspend
-      # checkpoint), so a one-shot boot-time fix would never re-run; instead
-      # run this as a background loop: the restored process continues after
-      # every resume and re-creates any project directory that went missing.
+      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # admin is the authoritative source; each actor conditionally syncs the
+      # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
+      # keying on the manifest ETag/version so unchanged skills are not
+      # re-downloaded. Only skills the admin has managed are ever touched; a
+      # user's own skills are never modified or removed. PI_WEB_SKILLS_URL is
+      # the /internal/skills base of the admin service. A network/parse failure
+      # is logged and skipped (|| true) so it never blocks sessiond/web.
       (
         while true; do
-          node -e '
-            const fs = require("fs");
-            try {
-              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
-              const projects = (JSON.parse(raw).projects || []);
-              for (const p of projects) {
-                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
-                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
-                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+          if [ -n "${PI_WEB_SKILLS_URL:-}" ]; then
+            node -e '
+              const zlib = require("zlib");
+              const fs = require("fs");
+              const path = require("path");
+              const base = process.env.PI_WEB_SKILLS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "skills");
+              const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
+              const log = (...a) => console.log("mfpi-skills:", ...a);
+              const readState = () => {
+                try { return JSON.parse(fs.readFileSync(statePath, "utf8")); }
+                catch (e) { return { version: "", managed: {} }; }
+              };
+              const writeState = (obj) => {
+                fs.mkdirSync(agentDir, { recursive: true });
+                const tmp = statePath + ".tmp";
+                fs.writeFileSync(tmp, JSON.stringify(obj));
+                fs.renameSync(tmp, statePath);
+              };
+              // Pure-node ustar .tar.gz extractor. Do not spawn the GNU `tar`
+              // binary from the gVisor sandbox: it fails to create subdirectory
+              // entries there with ENOSYS ("Function not implemented"). Use
+              // built-in zlib + a minimal ustar parser instead.
+              const oct = (s) => parseInt((s || "0").replace(/[^0-7]/g, "") || "0", 8) || 0;
+              const strip = (n) => n.replace(/\/+$/, "");
+              const extractTgz = (tgzBuf, dir) => {
+                const tar = zlib.gunzipSync(tgzBuf);
+                const BLOCK = 512;
+                let off = 0;
+                while (off + BLOCK <= tar.length) {
+                  const h = tar.slice(off, off + BLOCK);
+                  const name = h.toString("utf8", 0, 100).replace(/\0.*$/, "");
+                  if (name === "") break;
+                  const size = oct(h.toString("utf8", 124, 136));
+                  const type = String.fromCharCode(h[156] || 0x30);
+                  const dataStart = off + BLOCK;
+                  if (type === "5") {
+                    fs.mkdirSync(path.join(dir, strip(name)), { recursive: true });
+                  } else if (type === "2") {
+                    const target = path.join(dir, strip(name));
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, Buffer.alloc(0));
+                  } else {
+                    const target = path.join(dir, name);
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, tar.slice(dataStart, dataStart + size));
                   }
+                  off = dataStart + Math.ceil(size / BLOCK) * BLOCK;
                 }
-              }
-            } catch (e) { /* no projects.json yet: nothing to recover */ }
-          ' || true
-          sleep 10
-        done
-      ) &
-
-      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
-      pi-web-sessiond &
-      sessiond_pid=$!
-      n=0
-      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
-      if [ ! -S "$sock" ]; then
-        echo "mf-pi: sessiond socket did not appear at $sock" >&2
-        kill "$sessiond_pid" 2>/dev/null || true
-        exit 1
-      fi
-      pi-web-server &
-      web_pid=$!
-
-      term() {
-        kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
-      }
-      trap term TERM INT
-      set +e
-      wait "$web_pid"
-      web_status=$?
-      term
-      wait "$sessiond_pid" 2>/dev/null
-      exit "$web_status"
-
-    volumeMounts:
-    - name: userdata
-      mountPath: /data/pi-agent
-    env:
-    # atenet-router forwards traffic to the actor on port 80.
-    - name: PI_WEB_PORT
-      value: "80"
-    - name: PI_WEB_HOST
-      value: "0.0.0.0"
-    # The Docker host-bridge features (docker.sock, host paths) do not apply
-    # to actor sandboxes.
-    - name: HOSTEXEC_MODE
-      value: disabled
-    # Persist pi-web's data directory AND sessiond socket on the userdata PV
-    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
-    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
-    # supervisor waits on (see the args block's `sock=` default).
-    - name: PI_WEB_DATA_DIR
-      value: /data/pi-agent
-    - name: PI_WEB_SESSIOND_SOCKET
-      value: /data/pi-agent/sessiond.sock
-    - name: DEEPSEEK_API_KEY
-      valueFrom:
-        secretKeyRef:
-          name: mf-pi-provider-config
-          key: DEEPSEEK_API_KEY
-  volumes:
-  - name: userdata
-    externalVolumeTemplate:
-      capacity: 20Gi
-      storageClassName: standard
-  workerSelector:
-    matchLabels:
-      workload: mf-pi-mid
-  snapshotsConfig:
-    # Full snapshots (process memory + filesystem delta). The userdata
-    # external volume is not part of the rootfs delta: user data persists on
-    # the node via the sticky volume and survives delete+recreate redeploys
-    # (see save_userdata_pv.md).
-    onPause: Full
-    onCommit: Full
-    location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
-
-
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: mf-pi-large
-  namespace: ate-demo-mf-pi
-spec:
-  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
-  containers:
-  - name: pi-web
-    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
-    # Only `args` is set (no `command`), so the image's ENTRYPOINT
-    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
-    # installs the baked-in skills into /data/pi-agent/skills on first start
-    # and then execs this single-container supervisor (sessiond + web).
-    args:
-    - sh
-    - -c
-    - |
-      set -eu
-      # Single-container supervisor (sessiond + web). User data lives on
-      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
-      # below): everything the agent writes there is persisted by the sticky
-      # volume plugin and survives a delete+recreate redeploy (image refresh),
-      # so no profile sync or admin broker is involved
-      # (see save_userdata_pv.md).
-
-      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
-      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
-      # on first start only, so a brand-new user resumed from the golden base
-      # snapshot never runs that install and starts without skills. Mirror its
-      # no-clobber copy here on every pass: missing skills are installed,
-      # existing ones are left untouched.
-      (
-        while true; do
-          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
-          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
-          if [ -d "$skills_src" ]; then
-            mkdir -p "$skills_dst"
-            for skill_dir in "$skills_src"/*/; do
-              [ -d "$skill_dir" ] || continue
-              skill_name=$(basename "$skill_dir")
-              if [ ! -e "$skills_dst/$skill_name" ]; then
-                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
-              fi
-            done
+              };
+              const main = async () => {
+                if (!base) return;
+                try {
+                  const state = readState();
+                  const oldManaged = state.managed || {};
+                  const res = await fetch(base + "/manifest", {
+                    headers: { "If-None-Match": state.version || "", "Accept": "application/json" },
+                    signal: AbortSignal.timeout(15000)
+                  });
+                  if (res.status === 304) return;
+                  if (!res.ok) { log("manifest HTTP", res.status); return; }
+                  const man = await res.json();
+                  const skills = (man.skills || []).map(s => ({ name: s.name, sha256: s.sha256 }));
+                  const newManaged = {};
+                  fs.mkdirSync(dst, { recursive: true });
+                  for (const s of skills) {
+                    const skillDst = path.join(dst, s.name);
+                    if (oldManaged[s.name] === s.sha256 && fs.existsSync(skillDst)) {
+                      newManaged[s.name] = s.sha256;
+                      continue;
+                    }
+                    const tmpTgz = path.join(dst, ".mfpi-tmp-" + s.name + ".tgz");
+                    const tmpDir = path.join(dst, ".mfpi-tmp-" + s.name);
+                    try {
+                      const buf = Buffer.from(await (await fetch(base + "/" + s.name + ".tgz", { signal: AbortSignal.timeout(15000) })).arrayBuffer());
+                      fs.writeFileSync(tmpTgz, buf);
+                      fs.rmSync(tmpDir, { recursive: true, force: true });
+                      fs.mkdirSync(tmpDir, { recursive: true });
+                      extractTgz(buf, tmpDir);
+                      fs.rmSync(skillDst, { recursive: true, force: true });
+                      const inner = path.join(tmpDir, s.name);
+                      if (fs.existsSync(inner)) {
+                        fs.renameSync(inner, skillDst);
+                      } else {
+                        fs.renameSync(tmpDir, skillDst);
+                      }
+                      newManaged[s.name] = s.sha256;
+                      log("installed", s.name, s.sha256);
+                    } catch (e) {
+                      log("install failed", s.name, String((e && e.message) || e));
+                    } finally {
+                      for (const f of [tmpTgz, tmpDir]) {
+                        try { fs.rmSync(f, { recursive: true, force: true }); } catch (e2) {}
+                      }
+                    }
+                  }
+                  for (const name of Object.keys(oldManaged)) {
+                    if (!newManaged[name]) {
+                      fs.rmSync(path.join(dst, name), { recursive: true, force: true });
+                      log("removed", name);
+                    }
+                  }
+                  writeState({ version: man.version || "", managed: newManaged });
+                } catch (e) {
+                  log("error", String((e && e.message) || e));
+                }
+              };
+              main();
+            ' || true
           fi
           sleep 10
         done
@@ -710,6 +947,289 @@ spec:
       value: /data/pi-agent
     - name: PI_WEB_SESSIOND_SOCKET
       value: /data/pi-agent/sessiond.sock
+    # Base of the admin's read-only /internal/skills API. The supervisor's
+    # managed-skills loop syncs administrator-provisioned skills from here.
+    # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
+    - name: PI_WEB_SKILLS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi.svc.cluster.local:8080/internal/skills
+    - name: DEEPSEEK_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mf-pi-provider-config
+          key: DEEPSEEK_API_KEY
+  volumes:
+  - name: userdata
+    externalVolumeTemplate:
+      capacity: 20Gi
+      storageClassName: standard
+  workerSelector:
+    matchLabels:
+      workload: mf-pi-mid
+  snapshotsConfig:
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see save_userdata_pv.md).
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
+
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: mf-pi-large
+  namespace: ate-demo-mf-pi
+spec:
+  pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
+  containers:
+  - name: pi-web
+    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+    # Only `args` is set (no `command`), so the image's ENTRYPOINT
+    # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
+    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # and then execs this single-container supervisor (sessiond + web).
+    args:
+    - sh
+    - -c
+    - |
+      set -eu
+      # Single-container supervisor (sessiond + web). User data lives on
+      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # below): everything the agent writes there is persisted by the sticky
+      # volume plugin and survives a delete+recreate redeploy (image refresh),
+      # so no profile sync or admin broker is involved
+      # (see save_userdata_pv.md).
+
+      # Recover baked-in skills for the same reason. pi-web-bootstrap installs
+      # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
+      # on first start only, so a brand-new user resumed from the golden base
+      # snapshot never runs that install and starts without skills. Mirror its
+      # no-clobber copy here on every pass: missing skills are installed,
+      # existing ones are left untouched.
+      (
+        while true; do
+          skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
+          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          if [ -d "$skills_src" ]; then
+            mkdir -p "$skills_dst"
+            for skill_dir in "$skills_src"/*/; do
+              [ -d "$skill_dir" ] || continue
+              skill_name=$(basename "$skill_dir")
+              if [ ! -e "$skills_dst/$skill_name" ]; then
+                cp -a "$skill_dir" "$skills_dst/$skill_name" 2>/dev/null || true
+              fi
+            done
+          fi
+          sleep 10
+        done
+      ) &
+
+      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # admin is the authoritative source; each actor conditionally syncs the
+      # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
+      # keying on the manifest ETag/version so unchanged skills are not
+      # re-downloaded. Only skills the admin has managed are ever touched; a
+      # user's own skills are never modified or removed. PI_WEB_SKILLS_URL is
+      # the /internal/skills base of the admin service. A network/parse failure
+      # is logged and skipped (|| true) so it never blocks sessiond/web.
+      (
+        while true; do
+          if [ -n "${PI_WEB_SKILLS_URL:-}" ]; then
+            node -e '
+              const zlib = require("zlib");
+              const fs = require("fs");
+              const path = require("path");
+              const base = process.env.PI_WEB_SKILLS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "skills");
+              const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
+              const log = (...a) => console.log("mfpi-skills:", ...a);
+              const readState = () => {
+                try { return JSON.parse(fs.readFileSync(statePath, "utf8")); }
+                catch (e) { return { version: "", managed: {} }; }
+              };
+              const writeState = (obj) => {
+                fs.mkdirSync(agentDir, { recursive: true });
+                const tmp = statePath + ".tmp";
+                fs.writeFileSync(tmp, JSON.stringify(obj));
+                fs.renameSync(tmp, statePath);
+              };
+              // Pure-node ustar .tar.gz extractor. Do not spawn the GNU `tar`
+              // binary from the gVisor sandbox: it fails to create subdirectory
+              // entries there with ENOSYS ("Function not implemented"). Use
+              // built-in zlib + a minimal ustar parser instead.
+              const oct = (s) => parseInt((s || "0").replace(/[^0-7]/g, "") || "0", 8) || 0;
+              const strip = (n) => n.replace(/\/+$/, "");
+              const extractTgz = (tgzBuf, dir) => {
+                const tar = zlib.gunzipSync(tgzBuf);
+                const BLOCK = 512;
+                let off = 0;
+                while (off + BLOCK <= tar.length) {
+                  const h = tar.slice(off, off + BLOCK);
+                  const name = h.toString("utf8", 0, 100).replace(/\0.*$/, "");
+                  if (name === "") break;
+                  const size = oct(h.toString("utf8", 124, 136));
+                  const type = String.fromCharCode(h[156] || 0x30);
+                  const dataStart = off + BLOCK;
+                  if (type === "5") {
+                    fs.mkdirSync(path.join(dir, strip(name)), { recursive: true });
+                  } else if (type === "2") {
+                    const target = path.join(dir, strip(name));
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, Buffer.alloc(0));
+                  } else {
+                    const target = path.join(dir, name);
+                    fs.mkdirSync(path.dirname(target), { recursive: true });
+                    fs.writeFileSync(target, tar.slice(dataStart, dataStart + size));
+                  }
+                  off = dataStart + Math.ceil(size / BLOCK) * BLOCK;
+                }
+              };
+              const main = async () => {
+                if (!base) return;
+                try {
+                  const state = readState();
+                  const oldManaged = state.managed || {};
+                  const res = await fetch(base + "/manifest", {
+                    headers: { "If-None-Match": state.version || "", "Accept": "application/json" },
+                    signal: AbortSignal.timeout(15000)
+                  });
+                  if (res.status === 304) return;
+                  if (!res.ok) { log("manifest HTTP", res.status); return; }
+                  const man = await res.json();
+                  const skills = (man.skills || []).map(s => ({ name: s.name, sha256: s.sha256 }));
+                  const newManaged = {};
+                  fs.mkdirSync(dst, { recursive: true });
+                  for (const s of skills) {
+                    const skillDst = path.join(dst, s.name);
+                    if (oldManaged[s.name] === s.sha256 && fs.existsSync(skillDst)) {
+                      newManaged[s.name] = s.sha256;
+                      continue;
+                    }
+                    const tmpTgz = path.join(dst, ".mfpi-tmp-" + s.name + ".tgz");
+                    const tmpDir = path.join(dst, ".mfpi-tmp-" + s.name);
+                    try {
+                      const buf = Buffer.from(await (await fetch(base + "/" + s.name + ".tgz", { signal: AbortSignal.timeout(15000) })).arrayBuffer());
+                      fs.writeFileSync(tmpTgz, buf);
+                      fs.rmSync(tmpDir, { recursive: true, force: true });
+                      fs.mkdirSync(tmpDir, { recursive: true });
+                      extractTgz(buf, tmpDir);
+                      fs.rmSync(skillDst, { recursive: true, force: true });
+                      const inner = path.join(tmpDir, s.name);
+                      if (fs.existsSync(inner)) {
+                        fs.renameSync(inner, skillDst);
+                      } else {
+                        fs.renameSync(tmpDir, skillDst);
+                      }
+                      newManaged[s.name] = s.sha256;
+                      log("installed", s.name, s.sha256);
+                    } catch (e) {
+                      log("install failed", s.name, String((e && e.message) || e));
+                    } finally {
+                      for (const f of [tmpTgz, tmpDir]) {
+                        try { fs.rmSync(f, { recursive: true, force: true }); } catch (e2) {}
+                      }
+                    }
+                  }
+                  for (const name of Object.keys(oldManaged)) {
+                    if (!newManaged[name]) {
+                      fs.rmSync(path.join(dst, name), { recursive: true, force: true });
+                      log("removed", name);
+                    }
+                  }
+                  writeState({ version: man.version || "", managed: newManaged });
+                } catch (e) {
+                  log("error", String((e && e.message) || e));
+                }
+              };
+              main();
+            ' || true
+          fi
+          sleep 10
+        done
+      ) &
+
+      # Recover project working directories. projects.json is persisted on the
+      # PV, but a project's working directory itself may live outside
+      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # refuses to open a session whose stored cwd no longer exists. The actor
+      # sandbox is normally restored from a snapshot (golden base or suspend
+      # checkpoint), so a one-shot boot-time fix would never re-run; instead
+      # run this as a background loop: the restored process continues after
+      # every resume and re-creates any project directory that went missing.
+      (
+        while true; do
+          node -e '
+            const fs = require("fs");
+            try {
+              const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
+              const projects = (JSON.parse(raw).projects || []);
+              for (const p of projects) {
+                if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
+                    console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
+                  }
+                }
+              }
+            } catch (e) { /* no projects.json yet: nothing to recover */ }
+          ' || true
+          sleep 10
+        done
+      ) &
+
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      pi-web-sessiond &
+      sessiond_pid=$!
+      n=0
+      until [ -S "$sock" ] || [ "$n" -ge 150 ]; do sleep 0.2; n=$((n+1)); done
+      if [ ! -S "$sock" ]; then
+        echo "mf-pi: sessiond socket did not appear at $sock" >&2
+        kill "$sessiond_pid" 2>/dev/null || true
+        exit 1
+      fi
+      pi-web-server &
+      web_pid=$!
+
+      term() {
+        kill -TERM "$web_pid" "$sessiond_pid" 2>/dev/null || true
+      }
+      trap term TERM INT
+      set +e
+      wait "$web_pid"
+      web_status=$?
+      term
+      wait "$sessiond_pid" 2>/dev/null
+      exit "$web_status"
+
+    volumeMounts:
+    - name: userdata
+      mountPath: /data/pi-agent
+    env:
+    # atenet-router forwards traffic to the actor on port 80.
+    - name: PI_WEB_PORT
+      value: "80"
+    - name: PI_WEB_HOST
+      value: "0.0.0.0"
+    # The Docker host-bridge features (docker.sock, host paths) do not apply
+    # to actor sandboxes.
+    - name: HOSTEXEC_MODE
+      value: disabled
+    # Persist pi-web's data directory AND sessiond socket on the userdata PV
+    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
+    # supervisor waits on (see the args block's `sock=` default).
+    - name: PI_WEB_DATA_DIR
+      value: /data/pi-agent
+    - name: PI_WEB_SESSIOND_SOCKET
+      value: /data/pi-agent/sessiond.sock
+    # Base of the admin's read-only /internal/skills API. The supervisor's
+    # managed-skills loop syncs administrator-provisioned skills from here.
+    # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
+    - name: PI_WEB_SKILLS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi.svc.cluster.local:8080/internal/skills
     - name: DEEPSEEK_API_KEY
       valueFrom:
         secretKeyRef:
@@ -912,6 +1432,8 @@ spec:
         app: mfpi-admin
     spec:
       serviceAccountName: mfpi-admin
+      securityContext:
+        fsGroup: 65532
       containers:
       - name: mfpi-admin
         image: ko://github.com/agent-substrate/substrate/demos/mf-pi/admin
@@ -950,6 +1472,10 @@ spec:
           value: small
         - name: ROUTER_ADDR
           value: http://atenet-router.ate-system.svc:80
+        # Shared, administrator-managed skills live on the mfpi-shared-skills PVC.
+        # Acts must be kept RWO-compatible: this Deployment MUST stay replicas: 1.
+        - name: SKILLS_DIR
+          value: /var/lib/mfpi-skills
         volumeMounts:
         - name: ateapi-token
           mountPath: /run/ateapi-token
@@ -957,6 +1483,8 @@ spec:
         - name: servicedns-ca
           mountPath: /run/servicedns-ca
           readOnly: true
+        - name: skills
+          mountPath: /var/lib/mfpi-skills
       volumes:
       - name: ateapi-token
         projected:
@@ -974,6 +1502,26 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+      - name: skills
+        persistentVolumeClaim:
+          claimName: mfpi-shared-skills
+---
+
+# Shared skills PVC: the admin is the authoritative source for skills
+# distributed to every user. RWO storage, so the mfpi-admin Deployment must
+# remain single-replica (replicas: 1). See deploy_skill_to_actor.md.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mfpi-shared-skills
+  namespace: ate-demo-mf-pi
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
 ---
 
 apiVersion: v1

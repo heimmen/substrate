@@ -33,6 +33,7 @@ assert counts == Counter({
     "ServiceAccount": 1,
     "Deployment": 1,
     "Service": 1,
+    "PersistentVolumeClaim": 1,  # mfpi-shared-skills
 }), counts
 
 def get(kind, name):
@@ -72,6 +73,12 @@ for at in atl_all:
     assert env["PI_WEB_PORT"].get("value") == "80", (at["metadata"]["name"], env)
     assert env["HOSTEXEC_MODE"].get("value") == "disabled", (at["metadata"]["name"], env)
     assert not any(k.startswith("MFPI_") for k in env), (at["metadata"]["name"], sorted(env))
+    # Managed-skills pull loop: PI_WEB_SKILLS_URL set (pointing at the admin's
+    # /internal/skills base) and the supervisor script contains the 10s loop.
+    url = env["PI_WEB_SKILLS_URL"].get("value") or ""
+    assert url.endswith("/internal/skills"), (at["metadata"]["name"], url)
+    assert ".mfpi-managed-skills.json" in script, (at["metadata"]["name"], "pull loop missing")
+    assert "fetch(base + \"/manifest\"" in script, (at["metadata"]["name"], "manifest fetch missing")
     # Record the base worker label from mf-pi, then check tier templates route
     # to the matching per-tier worker label.
     worker = spec["workerSelector"]["matchLabels"]["workload"]
@@ -90,12 +97,25 @@ for tier in ("small", "mid", "large"):
     assert res.get("requests") and res.get("limits"), (tier, res)
     assert wp["metadata"]["labels"]["workload"] == ("mf-pi-%s-test" % tier if "test" in name else "mf-pi-" + tier), wp
 
-# mfpi-admin Deployment: no MinIO broker env; expiry/tier ConfigMaps wired.
+# mfpi-admin Deployment: no MinIO broker env; expiry/tier ConfigMaps wired;
+# shared-skills PVC mounted with SKILLS_DIR set.
 admin = get("Deployment", "mfpi-admin")
-admin_env = {e["name"]: e for e in admin["spec"]["template"]["spec"]["containers"][0]["env"]}
+admin_pod = admin["spec"]["template"]["spec"]
+admin_env = {e["name"]: e for e in admin_pod["containers"][0]["env"]}
 assert not any(k.startswith("MINIO_") or k.startswith("MFPI_") for k in admin_env), sorted(admin_env)
 for k in ("EXPIRY_CONFIGMAP", "TIERS_CONFIGMAP", "DEFAULT_TIER"):
     assert k in admin_env, (k, sorted(admin_env))
+assert admin_env["SKILLS_DIR"].get("value") == "/var/lib/mfpi-skills", admin_env
+admin_mounts = {m["name"]: m for m in admin_pod["containers"][0]["volumeMounts"]}
+assert admin_mounts["skills"]["mountPath"] == "/var/lib/mfpi-skills", admin_mounts
+admin_vols = {v["name"]: v for v in admin_pod["volumes"]}
+assert admin_vols["skills"]["persistentVolumeClaim"]["claimName"] == "mfpi-shared-skills", admin_vols
+
+# Shared skills PVC: RWO, standard storage class, 1Gi.
+pvc = get("PersistentVolumeClaim", "mfpi-shared-skills")
+assert pvc["spec"]["accessModes"] == ["ReadWriteOnce"], pvc
+assert pvc["spec"]["storageClassName"] == "standard", pvc
+assert pvc["spec"]["resources"]["requests"]["storage"] == "1Gi", pvc
 
 # ate-api-server env-sources Role: only the provider-config Secret.
 env_role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "ate-api-server-env-sources")

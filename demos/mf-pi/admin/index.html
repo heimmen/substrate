@@ -63,6 +63,24 @@
     border-radius: 6px;
     font-size: 14px;
   }
+  input[type="file"] {
+    padding: 8px 4px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    color: var(--text);
+    background: #fff;
+  }
+  input[type="file"]::file-selector-button {
+    background: #eef0f3;
+    color: var(--text);
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    margin-right: 8px;
+    cursor: pointer;
+  }
+  input[type="file"]::file-selector-button:hover { background: #e2e5ea; }
   button {
     padding: 8px 16px;
     border: none;
@@ -167,6 +185,43 @@
              autocomplete="off" spellcheck="false" />
       <button type="submit">添加</button>
     </form>
+  </div>
+
+  <div class="card" id="skills-card">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+      <div>
+        <h2 style="margin-bottom:2px">共享 Skills</h2>
+        <div class="sub" style="color:var(--muted); font-size:13px;">
+          管理员托管的 skill，自动分发到所有用户；每 10 秒同步，支持 .tgz / .zip
+        </div>
+      </div>
+      <div id="apply-wrap" style="display:flex; gap:8px; align-items:center;">
+        <span id="apply-note" class="sub" style="color:var(--muted); font-size:13px;"></span>
+        <button class="secondary" id="apply-skills-btn" title="向所有运行中的用户扇出 reload，让已打开的会话立即可用新 skill">立即应用</button>
+      </div>
+    </div>
+
+    <form id="skill-upload-form" style="margin-top:12px; flex-wrap:wrap;">
+      <input type="text" id="skill-name-input" placeholder="skill 名称（小写字母/数字/中划线）" autocomplete="off" spellcheck="false"
+             style="flex:0 1 260px;" />
+      <input type="file" id="skill-file-input" accept=".tgz,.tar.gz,.zip" style="flex:1 1 220px;" />
+      <button type="submit" id="skill-upload-btn">上传</button>
+    </form>
+
+    <div id="skill-empty" style="display:none; color:var(--muted); text-align:center; padding:20px 0;">
+      尚未托管任何 skill
+    </div>
+    <table id="skill-table" style="display:none; min-width:640px;">
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>大小</th>
+          <th>更新时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="skill-body"></tbody>
+    </table>
   </div>
 
   <div class="card">
@@ -639,6 +694,178 @@
       });
   }
 
+  // ---- 共享 Skills ----
+
+  function fmtSize(bytes) {
+    if (bytes == null || bytes < 0) return "—";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  }
+
+  function renderSkills(skills) {
+    var table = document.getElementById("skill-table");
+    var empty = document.getElementById("skill-empty");
+    var body = document.getElementById("skill-body");
+    body.innerHTML = "";
+    if (!skills || skills.length === 0) {
+      table.style.display = "none";
+      empty.style.display = "block";
+      return;
+    }
+    table.style.display = "table";
+    empty.style.display = "none";
+    skills.forEach(function (s) {
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td class="mono">' + esc(s.name) + "</td>" +
+        "<td>" + esc(fmtSize(s.size)) + "</td>" +
+        "<td>" + esc(fmtTime(s.updatedAt)) + "</td>" +
+        '<td class="actions"><button class="danger mini skill-del" title="卸载该 skill（仅删除管理员托管的副本，不影响用户自建同名 skill）">删除</button></td>';
+      tr.querySelector(".skill-del").addEventListener("click", function () {
+        deleteSkill(s.name);
+      });
+      body.appendChild(tr);
+    });
+  }
+
+  function listSkills() {
+    fetch("api/skills")
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (data) {
+        renderSkills(data.skills);
+      })
+      .catch(function (err) {
+        showMsg("读取共享 Skills 失败：" + err.message, true);
+      });
+  }
+
+  function uploadSkill(name, file) {
+    clearMsg();
+    var formData = new FormData();
+    formData.append("name", name);
+    formData.append("file", file, file.name);
+    var btn = document.getElementById("skill-upload-btn");
+    btn.disabled = true;
+    btn.textContent = "上传中…";
+    fetch("api/skills", { method: "POST", body: formData })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("已安装共享 Skill：" + (j.skill ? j.skill.name : name) +
+          (j.skill && j.skill.size ? "（" + fmtSize(j.skill.size) + "）" : "") +
+          "，约 10 秒内分发到所有用户");
+        document.getElementById("skill-file-input").value = "";
+        listSkills();
+      })
+      .catch(function (err) {
+        showMsg("上传 Skill 失败：" + err.message, true);
+      })
+      .finally(function () {
+        btn.disabled = false;
+        btn.textContent = "上传";
+      });
+  }
+
+  function deleteSkill(name) {
+    if (!window.confirm("确认卸载共享 Skill \"" + name + "\"？\n" +
+        "将删除管理员托管的副本并通知所有用户移除；用户自建且未被托管的同名 skill 不会受影响。")) {
+      return;
+    }
+    clearMsg();
+    fetch("api/skills/" + encodeURIComponent(name), { method: "DELETE" })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        showMsg("已卸载共享 Skill：" + (j.message || name));
+        listSkills();
+      })
+      .catch(function (err) {
+        showMsg("卸载 Skill 失败：" + err.message, true);
+      });
+  }
+
+  function applySkills() {
+    clearMsg();
+    var btn = document.getElementById("apply-skills-btn");
+    var note = document.getElementById("apply-note");
+    btn.disabled = true;
+    btn.textContent = "应用中…";
+    note.textContent = "";
+    fetch("api/skills/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        if (j.error) {
+          showMsg("立即应用失败：" + j.error, true);
+          return;
+        }
+        var ok = j.failed === 0;
+        showMsg("立即应用完成：已将新 Skill 应用到 " + j.reloaded + " 个在线会话（" +
+          j.online + " 个在线用户）" + (j.failed > 0 ? "，" + j.failed + " 个用户未成功，将在下次开会话生效" : ""));
+        if (j.failures && j.failures.length) {
+          note.textContent = "未成功：" + j.failures.slice(0, 3).join("；") +
+            (j.failures.length > 3 ? " 等" : "");
+          note.style.color = "var(--danger)";
+        } else {
+          note.textContent = "已应用到 " + j.reloaded + "/" + j.online + " 个在线用户";
+          note.style.color = "var(--green)";
+        }
+      })
+      .catch(function (err) {
+        showMsg("立即应用失败：" + err.message, true);
+      })
+      .finally(function () {
+        btn.disabled = false;
+        btn.textContent = "立即应用";
+      });
+  }
+
+  document.getElementById("skill-upload-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = document.getElementById("skill-name-input").value.trim();
+    var fileInput = document.getElementById("skill-file-input");
+    if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name)) {
+      showMsg("非法 skill 名称：必须匹配 DNS-1123（小写字母、数字、中划线）", true);
+      return;
+    }
+    if (!fileInput.files || !fileInput.files[0]) {
+      showMsg("请先选择要上传的 .tgz / .zip 文件", true);
+      return;
+    }
+    uploadSkill(name, fileInput.files[0]);
+  });
+
+  document.getElementById("apply-skills-btn").addEventListener("click", applySkills);
+
   document.getElementById("add-form").addEventListener("submit", function (e) {
     e.preventDefault();
     var input = document.getElementById("name-input");
@@ -668,6 +895,7 @@
   }, true);
 
   listUsers();
+  listSkills();
   setInterval(listUsers, 5000);
 })();
 </script>
