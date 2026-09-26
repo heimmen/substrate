@@ -339,6 +339,12 @@ session reload（`GET /api/projects` → `GET /api/sessions?cwd=` →
 ./apply-skills-test.sh
 ```
 
+> [!TIP]
+> **完整端到端验证**可直接运行
+> `./test-skill-distribution.sh`（测试环境）：自动创建测试用户并跑通「上传新
+> skill → actor 10s 拉取安装 → 增量更新 v2 → 卸载 + 用户自建 skill 隔离保护 →
+> 立即应用（扇出 reload）」全流程并逐项断言，无需手动操作。
+
 **安全与边界**：上传校验——名称必须为 DNS-1123 slug，包内必须含 `SKILL.md`，
 tar/zip 解包拒绝 `../` 与绝对路径条目（zip-slip），单文件大小上限 32 MiB、整包
 64 MiB。管理端 `GET /internal/skills/*` 不做鉴权（actor 侧 env 冻结进 golden 快

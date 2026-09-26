@@ -254,6 +254,11 @@
 
   var atespace = null;
 
+  // openMenuUser 记录当前展开的用户操作菜单对应的用户名。用户列表每 5 秒
+  // 自动刷新并重建 <tbody>，若不记录并在重建后恢复，正在操作的菜单会被
+  // 下一次刷新"自己弄消失"（表现为 hover 菜单时菜单突然消失）。
+  var openMenuUser = null;
+
   function showMsg(text, isErr) {
     var el = document.getElementById("msg");
     el.className = isErr ? "err" : "ok";
@@ -306,10 +311,47 @@
     return '<span class="badge gray" title="激活有效期（到期后自动挂起释放资源，可恢复）">' + esc(u.expiry) + "</span>";
   }
 
+  function closeAllDropdowns() {
+    document.querySelectorAll(".dropdown.open").forEach(function (d) {
+      d.classList.remove("open");
+    });
+  }
+
+  // positionDropdown 使用 fixed 定位并依据按钮位置计算坐标，避免被 .card
+  // 的 overflow-x:auto 裁剪（短列表时下拉会超出卡片底部被截掉）。
+  function positionDropdown(toggle, menu) {
+    var rect = toggle.getBoundingClientRect();
+    var mw = menu.offsetWidth;
+    var mh = menu.offsetHeight;
+    var left = rect.right - mw;
+    var top = rect.bottom + 4;
+    // 下方空间不足时向上弹出。
+    if (top + mh > window.innerHeight - 8) {
+      top = rect.top - mh - 4;
+    }
+    // 超出左边界时夹紧到可视区内。
+    if (left < 8) left = 8;
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  }
+
+  function openUserMenu(toggle) {
+    var dropdown = toggle.parentElement;
+    var menu = dropdown.querySelector(".dropdown-menu");
+    closeAllDropdowns();
+    dropdown.classList.add("open");
+    openMenuUser = toggle.getAttribute("data-user");
+    positionDropdown(toggle, menu);
+  }
+
   function renderUsers(users) {
     var table = document.getElementById("user-table");
     var empty = document.getElementById("empty");
     var body = document.getElementById("user-body");
+    // 记住刷新前展开的菜单，重建后按用户名恢复，避免自动刷新把用户正在
+    // 操作的菜单关掉（重建期间统一清空 openMenuUser，恢复时再写回）。
+    var prevOpenUser = openMenuUser;
+    openMenuUser = null;
     body.innerHTML = "";
 
     if (!users || users.length === 0) {
@@ -343,7 +385,7 @@
         "<td>" + expiryCell + "</td>" +
         "<td>" + tierBadge + "</td>" +
         '<td class="actions"><div class="dropdown">' +
-        '<button class="dropdown-toggle">操作 ▾</button>' +
+        '<button class="dropdown-toggle" data-user="' + esc(u.name) + '">操作 ▾</button>' +
         '<div class="dropdown-menu">' +
         '<button class="copy-pwd">复制密码</button>' +
         '<button class="reset-pwd">重置密码</button>' +
@@ -357,29 +399,16 @@
       tr.querySelector(".dropdown-toggle").addEventListener("click", function (e) {
         e.stopPropagation();
         var dropdown = this.parentElement;
-        var menu = dropdown.querySelector(".dropdown-menu");
         var wasOpen = dropdown.classList.contains("open");
-        // 关闭其它已打开的菜单（避免多个同时显示）。
-        document.querySelectorAll(".dropdown.open").forEach(function (d) {
-          d.classList.remove("open");
-        });
-        if (wasOpen) return;
-        dropdown.classList.add("open");
-        // 使用 fixed 定位并依据按钮位置计算坐标，避免被 .card 的
-        // overflow-x:auto 裁剪（短列表时下拉会超出卡片底部被截掉）。
-        var rect = this.getBoundingClientRect();
-        var mw = menu.offsetWidth;
-        var mh = menu.offsetHeight;
-        var left = rect.right - mw;
-        var top = rect.bottom + 4;
-        // 下方空间不足时向上弹出。
-        if (top + mh > window.innerHeight - 8) {
-          top = rect.top - mh - 4;
+        // 再次点击已展开的按钮则收起。
+        if (wasOpen) {
+          dropdown.classList.remove("open");
+          openMenuUser = null;
+          return;
         }
-        // 超出左边界时夹紧到可视区内。
-        if (left < 8) left = 8;
-        menu.style.left = left + "px";
-        menu.style.top = top + "px";
+        // openUserMenu 会关闭其它已打开的菜单（避免多个同时显示）并记录
+        // 当前用户名，供自动刷新后恢复。
+        openUserMenu(this);
       });
       tr.querySelector(".copy-pwd").addEventListener("click", function () {
         copyPassword(u.name);
@@ -406,6 +435,11 @@
         deleteUser(u.name);
       });
       body.appendChild(tr);
+      // 该用户的菜单在刷新前是展开的：行已重建并挂到 DOM，重新展开并定位，
+      // 使用户正在操作的菜单不会因自动刷新而消失。
+      if (u.name === prevOpenUser) {
+        openUserMenu(tr.querySelector(".dropdown-toggle"));
+      }
     });
   }
 
@@ -881,17 +915,15 @@
 
   // 点击其他区域时关闭已打开的下拉菜单。
   document.addEventListener("click", function () {
-    document.querySelectorAll(".dropdown.open").forEach(function (d) {
-      d.classList.remove("open");
-    });
+    closeAllDropdowns();
+    openMenuUser = null;
   });
 
   // 滚动时关闭菜单：菜单为 fixed 定位，页面/卡片滚动后按钮位置会变化，
   // 留在原处的菜单会与按钮错位。
   window.addEventListener("scroll", function () {
-    document.querySelectorAll(".dropdown.open").forEach(function (d) {
-      d.classList.remove("open");
-    });
+    closeAllDropdowns();
+    openMenuUser = null;
   }, true);
 
   listUsers();
