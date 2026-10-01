@@ -164,7 +164,8 @@ mf-pi 支持**多用户**：每个用户对应一个独立 Actor（数据彼此�
 
 > [!NOTE]
 > `run-nginx.sh` 会自动启动两个 kubectl port-forward（`58680` → atenet-router、
-> `58682` → mfpi-admin 管理 UI；已被占用的端口会跳过），再运行 nginx 容器。
+> `58682` → mfpi-admin 管理 UI；已被占用且健康的端口会跳过，若隧道已失效——接受
+> TCP 但始终无响应——则会自动替换为新隧道）并运行 nginx 容器。
 
 > [!NOTE]
 > 容器使用 `--network host` 以访问宿主机环回地址上的 kubectl 端口转发。

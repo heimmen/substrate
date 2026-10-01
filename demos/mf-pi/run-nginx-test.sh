@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Start the two port-forwards the TEST environment needs (router + admin UI),
-# then run the mfpi-nginx-test container. Port-forwards already in use are
-# skipped so the script is re-runnable without leaving duplicates behind.
+# then run the mfpi-nginx-test container. A local port that is already in use is
+# reused if its tunnel is healthy, and replaced if the tunnel has gone stale (it
+# still accepts TCP but never answers — this happens when a tunnel is left
+# running across a router pod restart), so the script is re-runnable without
+# leaving dead tunnels behind.
 #
 # This is the test-environment counterpart of run-nginx.sh: it uses distinct
 # local ports (59880/59882), the ate-demo-mf-pi-test namespace, a distinct
@@ -15,13 +18,62 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Start a kubectl port-forward in the background unless the local port is
-# already taken (e.g. a previous run left one running).
+# Seconds to wait for an HTTP response before declaring an existing tunnel
+# stale. Override for slow clusters: MFPI_PROBE_TIMEOUT=15 ./run-nginx-test.sh
+PROBE_TIMEOUT="${MFPI_PROBE_TIMEOUT:-5}"
+
+# True if something is listening on 127.0.0.1:<port>.
+port_in_use() {
+  ss -ltn 2>/dev/null | grep -q "127.0.0.1:${1}[[:space:]]"
+}
+
+# True if the local tunnel answers with any HTTP status line within
+# PROBE_TIMEOUT seconds. A stale tunnel still accepts the TCP connection (the
+# local kubectl process is alive) but resets or times out on real requests,
+# which curl reports as status code 000.
+tunnel_healthy() {
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m "$PROBE_TIMEOUT" "http://127.0.0.1:${1}/" 2>/dev/null || true)
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# Stop the kubectl port-forward process(es) listening on the given local port.
+# Only processes whose command line contains "port-forward" are killed; if the
+# port is held by anything else, abort instead of killing an unrelated process.
+stop_port_forward() {
+  local port="$1" pid cmdline kill_pids=""
+  for pid in $(ss -tlnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do
+    cmdline=$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null || true)
+    case "$cmdline" in
+      *port-forward*) kill_pids="${kill_pids} ${pid}" ;;
+    esac
+  done
+  if [ -z "$kill_pids" ]; then
+    echo "error: port ${port} is in use by a non-port-forward process; free it and re-run" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC2086
+  kill $kill_pids 2>/dev/null || true
+  local i
+  for i in $(seq 1 20); do
+    port_in_use "$port" || return 0
+    sleep 0.5
+  done
+  echo "error: port ${port} still in use after stopping the stale port-forward" >&2
+  exit 1
+}
+
+# Start a kubectl port-forward in the background unless a healthy one is
+# already listening on the local port; a stale one is detected and replaced.
 port_forward() {
   local local_port="$1" namespace="$2" service="$3" remote_port="$4"
-  if ss -ltn 2>/dev/null | grep -q "127.0.0.1:${local_port}[[:space:]]"; then
-    echo "port ${local_port} already in use; skipping port-forward to ${namespace}/${service}"
-    return
+  if port_in_use "$local_port"; then
+    if tunnel_healthy "$local_port"; then
+      echo "port ${local_port} already in use and tunnel healthy; skipping port-forward to ${namespace}/${service}"
+      return
+    fi
+    echo "port ${local_port} in use but tunnel is stale (no HTTP response within ${PROBE_TIMEOUT}s); replacing it"
+    stop_port_forward "$local_port"
   fi
   echo "port-forward ${local_port} -> ${namespace}/${service}:${remote_port}"
   kubectl port-forward -n "${namespace}" "svc/${service}" "${local_port}:${remote_port}" &
