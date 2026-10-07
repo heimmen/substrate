@@ -449,6 +449,27 @@ MFPI_WORKER_REPLICAS=8 ./deploy.sh
 MFPI_WORKER_REPLICAS=8 ... ./hack/install-ate-kind.sh --deploy-demo-mf-pi
 ```
 
+### 空闲自动挂起（释放资源）
+
+为**mid / small 资源档位**的用户优化资源利用率：当这类 Actor **超过
+`IDLE_TIMEOUT`（默认 `90m`）没有任何输入**时，mfpi-admin 后台 reconciler（每
+30s）会自动 `SuspendActor` 释放其 worker/Pod 资源（快照与用户数据保留）；用户
+下次访问时由路由器**懒恢复**重新载入，该次访问同时重新计时。
+
+- **「输入」信号**：nginx 对每个 `/<username>/` 请求转发前都会执行
+  `auth_request /_mfpi_auth`，因此 admin 服务**成功鉴权**即是一次可靠输入
+  （含 API 轮询与 WebSocket 升级）。
+- **范围**：仅 `IDLE_TIERS`（默认 `small,mid`）内的档位生效；**large 档位
+  Actor 永不因空闲被自动挂起**（设计上常驻）。
+- **配置**：可在 `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl` 的 mfpi-admin env
+  中调整 `IDLE_TIMEOUT` 与 `IDLE_TIERS`（也可直接用 `kubectl set env` 覆盖）。
+- 与「激活有效期」的区别：有效期是管理员设定的**绝对到期**；空闲挂起是**相对
+  最近一次输入**的自动回收，属于平台级的资源复用策略。
+
+```bash
+kubectl -n ate-demo-mf-pi set env deploy/mfpi-admin IDLE_TIMEOUT=45m IDLE_TIERS=small,mid
+```
+
 ### 验证持久化
 
 本演示不挂载 `durableDir` 卷，会话历史与 skills 随容器的文件系统一起保存在
@@ -476,6 +497,51 @@ kubectl ate resume actor alice -a mfpi
 > 同一用户」后数据仍在，见上文
 > [用户数据持久化](#用户数据持久化重置后自动恢复)：数据保存在 sticky 持久卷上，
 > 重建后自动重新挂载。
+
+## 开发：运行 admin 服务单元测试
+
+`mfpi-admin`（用户管理后端，`demos/mf-pi/admin/`）的单元测试全部位于
+`main_test.go`（以及 `skills_test.go`），覆盖用户增删查、鉴权、激活有效期/资源
+档位、空闲自动挂起、每用户 DeepSeek Key 注入与 skill 分发等逻辑。它们**不需要
+集群或 gRPC 服务**——控制面通过内存 fake 客户端模拟，直接本地运行：
+
+```bash
+cd demos/mf-pi/admin
+
+# 运行全部单元测试（main_test.go + skills_test.go）
+go test ./...
+
+# 详细输出每个用例
+go test -v .
+
+# 运行某个具体用例 / 名称前缀（-run 为正则，匹配用例名）
+go test -run 'ReconcileIdle' -v .
+
+# 运行并查看覆盖
+go test -cover ./...
+```
+
+> [!NOTE]
+> 请勿使用 `go test main_test.go` 这种「只编译该文件」的写法：`main_test.go` 与
+> 实现文件同属 `package main`，单独编译会因找不到 `server`、`newFake` 等符号而
+> 构建失败；`main_test.go` 与 `skills_test.go` 也无法按文件分别运行。始终用
+> `go test .`（或 `./...`）让整个包一起编译，再用 `-run <正则>` 选取具体用例。
+
+用例速查：
+
+| 用例 | 覆盖内容 |
+|---|---|
+| `TestHandleAuth*` | nginx `/_mfpi_auth` 鉴权与输入记录（`s.idle.touch`） |
+| `TestReconcileExpire*` | 激活有效期到期自动挂起 |
+| `TestReconcileIdle*` | 空闲自动挂起（仅 mid/small、久闲、非活跃跳过等） |
+| `TestHandleSetTier*` / `TestHandleCreateUserUsesTierTemplate` | 资源档位设置与模板选择 |
+| `TestHandleSetAPIKey*` / `TestReconcileInjectsKey*` | 每用户 DeepSeek Key 注入 |
+| `TestSkill*` / `TestInternalManifestETag` / `TestApplySkills*` | skill 分发与「立即应用」扇出 |
+| `TestHandleListUsers*` / `TestHandleDeleteUser*` | 列表汇总与删除清理 |
+
+> [!NOTE]
+> 若本地 `GOFLAGS`/GOPATH 缓存权限受限导致构建报错，可指定一个可写的
+> `GOCACHE` 后重试：`GOCACHE=/tmp/mfpi-gocache go test ./...`。
 
 ## 测试环境（Test Environment）
 

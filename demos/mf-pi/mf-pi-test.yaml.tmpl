@@ -1478,6 +1478,13 @@ spec:
           value: ate-demo-mf-pi-test
         - name: DEFAULT_TIER
           value: small
+        # Idle auto-suspend: a small/mid-tier actor with no input for
+        # IDLE_TIMEOUT is suspended to release its worker. IDLE_TIERS lists
+        # the tiers subject to this; large-tier actors are never auto-suspended.
+        - name: IDLE_TIMEOUT
+          value: "90m"
+        - name: IDLE_TIERS
+          value: small,mid
         - name: ROUTER_ADDR
           value: http://atenet-router.ate-system.svc:80
         # Shared, administrator-managed skills live on the mfpi-shared-skills PVC.

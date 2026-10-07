@@ -148,10 +148,23 @@
 
 ---
 
+## Part F：空闲自动挂起(idle auto-suspend)
+
+在 A/B 之上补充一条**面向 mid/small 档位的空闲超时自动释放**规则：
+
+- **语义**：当某用户 Actor 的**资源档位 ∈ {small, mid}**(默认 `IDLE_TIERS=small,mid`)，且**超过 `IDLE_TIMEOUT`(默认 `90m`)没有任何输入**时，后台 reconciler 自动 `SuspendActor` 释放 worker/Pod 资源；用户下次访问时由路由器**懒恢复(lazy resume)** 重新载入(Substrate 内建行为)，该次访问同时重新计时。large 档位的 Actor 永不因空闲被自动挂起(设计上常驻)。
+- **「输入」信号**：mfpi-nginx 对每个 `/<username>/` 请求在转发前都会执行 `auth_request /_mfpi_auth`；因此 **admin 的 `handleAuth` 成功鉴权**即是一次可靠的「用户输入」——包括 API 轮询与 WebSocket 升级(连接建立时)。在 `handleAuth` 成功路径 `s.idle.touch(username, now)` 重置该用户的空闲时钟。
+- **存储**：新增内存态 `idleTracker`(username → 最近输入时间)，**不持久化**(瞬态运行数据)。admin 重启后因无记录不会误判为久闲，天然保守。
+- **reconciler**：并入现有 30s tick，新增 `reconcileIdle(ctx)`——ListActors，对每个 RUNNING 且档位在 `idleTiers`、且有输入记录且 `now-last > idleTimeout` 的 actor 执行 SuspendActor(best-effort，失败下个 tick 重试)。
+- **配置**：`serverConfig`/`serverConfigFromEnv` 新增 `idleTimeout`(`IDLE_TIMEOUT`，默认 `90m`)与 `idleTiers`(`IDLE_TIERS`，默认 `small,mid`)；manifest 中 mfpi-admin Deployment env 显式写入 `IDLE_TIMEOUT: "90m"` 与 `IDLE_TIERS: small,mid`。
+- **清理**：删除用户时同时清空其 idle 记录。
+
+---
+
 ## 关键注意点
 
 - 复用「Get→Update、不 Create、预创建 ConfigMap + 命名 RBAC」模式，避免 SA 需要 create 权限。
-- reconciler 与现有 `startReconciler` 同 30s tick，可合并：一个 tick 内依次调用 `reconcileKeys` 与 `reconcileExpirations`。
+- reconciler 与现有 `startReconciler` 同 30s tick，可合并：一个 tick 内依次调用 `reconcileKeys`、`reconcileExpirations` 与 `reconcileIdle`。
 - 挂起(suspend)与删除(delete)区分：挂起释放资源、保留数据可恢复；删除才会 purge 数据卷。
 - ActorTemplate 不可变：档位变更需经 `deploy.sh` 的 `ensure_at_recreate_if_changed` 或重建模板落地。
 - 档位作用于「新建/重建用户」，存量用户不动。
@@ -178,6 +191,8 @@
 ## 实现进度
 
 以下记录各 commit 的落地情况(倒序，最新在上)。
+
+- [x] **Part F - 空闲自动挂起**：新增 `admin/idle.go`(`idleTracker` + `parseIdleTiers` + `idleTiersDefault`)。`server` 增加 `idleTimeout`/`idleTiers`/`idle`；`handleAuth` 成功路径 `s.idle.touch(username, now)`(nginx auth_request 即真实用户输入)；`reconcileIdle` 并入 30s tick：对 RUNNING 且档位 ∈ {small, mid} 且久闲(> `IDLE_TIMEOUT`，默认 `90m`)的 actor 自动 SuspendActor(lazy resume 由路由器处理)。`serverConfig`/`serverConfigFromEnv` 新增 `IDLE_TIMEOUT`/`IDLE_TIERS`；`handleDeleteUser` 清理 idle 记录。manifest 两份各增 mfpi-admin env `IDLE_TIMEOUT: "90m"` / `IDLE_TIERS: small,mid`。`main_test.go` 新增 9 个用例(挂起久闲 mid / 跳活跃 / 跳 large / 跳无记录 / 跳非 RUNNING / 跳超时禁用 / auth 记录输入 / auth 失败不记录 / parseIdleTiers)；`go test ./demos/mf-pi/admin/` 通过，`validate-templates.sh` 通过(28 docs)。
 
 - [x] **A1 / B2(存储层)**：新增 `expiry.go`(configMapExpiryStore)与 `tier.go`(configMapTierStore)，均沿用「预建 ConfigMap + Get→Update/不 Create + 命名 RBAC」模式。
   - commit b6759ea8 / ff2b36e9(已于本次任务开始前完成)。

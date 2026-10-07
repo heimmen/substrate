@@ -99,6 +99,11 @@ const (
 	// forwards per-Host requests to actor workloads.
 	defaultRouterAddr = "http://atenet-router.ate-system.svc:80"
 
+	// defaultIdleTimeout is how long a small/mid-tier actor may sit without any
+	// input (an authorized proxied request) before the reconciler suspends it
+	// to release its worker/Pod resources. Overridable via IDLE_TIMEOUT.
+	defaultIdleTimeout = 90 * time.Minute
+
 	// passwordIterations is the PBKDF2 iteration count used to hash user
 	// passwords. Demo-grade (stdlib-only); swap for bcrypt if desired.
 	passwordIterations = 100_000
@@ -335,6 +340,15 @@ type server struct {
 	// need the apply fan-out.
 	applier applyReloader
 	now     func() time.Time
+
+	// idleTimeout is how long a user's actor may be without input before the
+	// reconciler suspends it (releasing resources). idleTiers is the set of
+	// resource tiers subject to idle auto-suspend (default small,mid); actors
+	// in other tiers (e.g. large) are never auto-suspended for idleness.
+	// idle tracks each user's last input time, fed by handleAuth.
+	idleTimeout time.Duration
+	idleTiers   map[string]bool
+	idle        *idleTracker
 
 	// reconcileMu guards lastAttempt. The reconciler re-injects stored keys
 	// onto running actors (see startReconciler), so a missed injection — e.g.
@@ -925,6 +939,7 @@ func (s *server) startReconciler(ctx context.Context) {
 			rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			s.reconcileKeys(rctx)
 			s.reconcileExpirations(rctx)
+			s.reconcileIdle(rctx)
 			cancel()
 		}
 	}
@@ -1017,6 +1032,51 @@ func (s *server) reconcileExpirations(ctx context.Context) {
 	}
 }
 
+// reconcileIdle suspends RUNNING actors in an idle-eligible tier (small/mid by
+// default) that have had no input for over idleTimeout, releasing their
+// worker/Pod resources while keeping the snapshot and user data. The actor is
+// lazily resumed by the router on the next user access. If the actor has no
+// recorded input yet (e.g. the admin restarted), it is not considered idle.
+// Best-effort: a failed suspend is logged and retried on the next tick.
+func (s *server) reconcileIdle(ctx context.Context) {
+	if s.idle == nil || s.idleTimeout <= 0 || len(s.idleTiers) == 0 {
+		return
+	}
+	resp, err := s.client.ListActors(ctx, &ateapipb.ListActorsRequest{
+		Atespace: s.atespace,
+		PageSize: 1000,
+	})
+	if err != nil {
+		log.Printf("reconcile-idle: list actors: %v", err)
+		return
+	}
+	now := s.now()
+	for _, a := range resp.GetActors() {
+		if a.GetStatus() != ateapipb.Actor_STATUS_RUNNING {
+			continue
+		}
+		name := a.GetMetadata().GetName()
+		if !s.idleTiers[s.userTier(name)] {
+			continue
+		}
+		last, ok := s.idle.lastInput(name)
+		if !ok {
+			// No activity recorded (e.g. process restarted); don't assume idle.
+			continue
+		}
+		if now.Sub(last) < s.idleTimeout {
+			continue
+		}
+		ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
+		if _, err := s.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: ref}); err != nil {
+			// Best-effort: log and retry on the next tick.
+			log.Printf("reconcile-idle: failed to suspend %q (idle since %s): %v", name, last.Format(time.RFC3339), err)
+			continue
+		}
+		log.Printf("reconcile-idle: suspended %q (no input since %s)", name, last.Format(time.RFC3339))
+	}
+}
+
 func (s *server) shouldReconcileAttempt(name string) bool {
 	s.reconcileMu.Lock()
 	defer s.reconcileMu.Unlock()
@@ -1089,6 +1149,9 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		// to the default tier. Log rather than fail.
 		log.Printf("deleting stored tier for %q failed: %v", name, err)
 	}
+	if s.idle != nil {
+		s.idle.delete(name)
+	}
 	// Removing a user removes their data: purge the sticky userdata volume
 	// (DeleteActor keeps it by design so a delete+recreate REFRESH re-attaches
 	// it; only explicit user removal should reclaim the storage). Best-effort:
@@ -1125,6 +1188,12 @@ func (s *server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	if !ok || user != username || !checkPassword(hash, pass) {
 		unauthorized(w, "invalid credentials")
 		return
+	}
+	// This is real user input: nginx runs auth_request for every /<username>/
+	// request (including API calls and WebSocket upgrades) before proxying, so
+	// recording here re-arms the idle auto-suspend clock for the actor.
+	if s.idle != nil {
+		s.idle.touch(username, s.now())
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -1190,12 +1259,14 @@ type serverConfig struct {
 	tiersConfigMap     string
 	tiersNamespace     string
 	defaultTier        string
+	idleTimeout        time.Duration
+	idleTiers          []string
 	routerAddr         string
 	skillsDir          string
 }
 
 func serverConfigFromEnv() serverConfig {
-	return serverConfig{
+	cfg := serverConfig{
 		atespace:           envOr("ATESPACE", defaultAtespace),
 		templateNamespace:  envOr("ACTOR_TEMPLATE_NAMESPACE", defaultTemplateNamespace),
 		templateName:       envOr("ACTOR_TEMPLATE_NAME", defaultTemplateName),
@@ -1214,6 +1285,20 @@ func serverConfigFromEnv() serverConfig {
 		routerAddr:         envOr("ROUTER_ADDR", defaultRouterAddr),
 		skillsDir:          envOr("SKILLS_DIR", defaultSkillsDir),
 	}
+	cfg.idleTimeout = defaultIdleTimeout
+	if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.idleTimeout = d
+		} else {
+			log.Printf("invalid IDLE_TIMEOUT %q, using default %s", v, defaultIdleTimeout)
+		}
+	}
+	if v := os.Getenv("IDLE_TIERS"); v != "" {
+		cfg.idleTiers = strings.Split(v, ",")
+	} else {
+		cfg.idleTiers = idleTiersDefault
+	}
+	return cfg
 }
 
 func envOr(key, fallback string) string {
@@ -1297,6 +1382,9 @@ func main() {
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
 		skills:            newSkillStore(cfg.skillsDir),
 		applier:           newHTTPApplyReloader(cfg.routerAddr),
+		idleTimeout:       cfg.idleTimeout,
+		idleTiers:         parseIdleTiers(strings.Join(cfg.idleTiers, ",")),
+		idle:              newIdleTracker(),
 		now:               time.Now,
 		lastAttempt:       make(map[string]time.Time),
 	}

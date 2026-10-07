@@ -310,6 +310,9 @@ func newTestServer(f *fakeControlClient) *server {
 		tierTemplates:     buildTierTemplates("mf-pi"),
 		defaultTier:       "small",
 		actors:            newFakeActorAuth(),
+		idleTimeout:       defaultIdleTimeout,
+		idleTiers:         parseIdleTiers("small,mid"),
+		idle:              newIdleTracker(),
 		now:               func() time.Time { return fixedNow },
 		lastAttempt:       make(map[string]time.Time),
 	}
@@ -1460,6 +1463,136 @@ func TestReconcileExpireSkipsNonRunning(t *testing.T) {
 
 	if len(f.suspended) != 0 {
 		t.Errorf("suspended = %v, want none for a SUSPENDED actor", f.suspended)
+	}
+}
+
+func TestReconcileIdleSuspendsIdleMidTier(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-2*time.Hour))
+	s := newTestServer(f)
+	s.tiers.(*fakeTierStore).Set("alice", "mid")
+	// Last input 2h ago, well past the 90m idle timeout.
+	s.idle.touch("alice", fixedNow.Add(-2*time.Hour))
+
+	s.reconcileIdle(context.Background())
+
+	if len(f.suspended) != 1 || f.suspended[0] != "alice" {
+		t.Errorf("suspended = %v, want [alice]", f.suspended)
+	}
+}
+
+func TestReconcileIdleSkipsActive(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	// Touched 1 minute ago, within the idle window.
+	s.idle.touch("alice", fixedNow.Add(-time.Minute))
+
+	s.reconcileIdle(context.Background())
+
+	if len(f.suspended) != 0 {
+		t.Errorf("suspended = %v, want none (still active)", f.suspended)
+	}
+}
+
+func TestReconcileIdleSkipsLargeTier(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-2*time.Hour))
+	s := newTestServer(f)
+	s.tiers.(*fakeTierStore).Set("alice", "large")
+	s.idle.touch("alice", fixedNow.Add(-2*time.Hour)) // idle > timeout
+
+	s.reconcileIdle(context.Background())
+
+	if len(f.suspended) != 0 {
+		t.Errorf("suspended = %v, want none for a large-tier actor", f.suspended)
+	}
+}
+
+func TestReconcileIdleSkipsNoActivityRecord(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-2*time.Hour))
+	s := newTestServer(f)
+	// No idle touch recorded (e.g. admin just restarted): not considered idle.
+	s.reconcileIdle(context.Background())
+
+	if len(f.suspended) != 0 {
+		t.Errorf("suspended = %v, want none without an activity record", f.suspended)
+	}
+}
+
+func TestReconcileIdleSkipsNonRunning(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-2*time.Hour))
+	s := newTestServer(f)
+	s.idle.touch("alice", fixedNow.Add(-2*time.Hour))
+
+	s.reconcileIdle(context.Background())
+
+	if len(f.suspended) != 0 {
+		t.Errorf("suspended = %v, want none for a SUSPENDED actor", f.suspended)
+	}
+}
+
+func TestReconcileIdleSkipsIdleTimeoutUnset(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-2*time.Hour))
+	s := newTestServer(f)
+	s.idleTimeout = 0 // disabled
+	s.idle.touch("alice", fixedNow.Add(-2*time.Hour))
+
+	s.reconcileIdle(context.Background())
+
+	if len(f.suspended) != 0 {
+		t.Errorf("suspended = %v, want none when idle timeout is disabled", f.suspended)
+	}
+}
+
+func TestHandleAuthRecordsInput(t *testing.T) {
+	s := newTestServer(newFake())
+	store := newFakePasswordStore()
+	hash, _ := hashPassword("s3cret")
+	store.Set("alice", hash)
+	s.passwords = store
+
+	rec := doAuth(s, authReq("/alice/", "", "alice", "s3cret"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	last, ok := s.idle.lastInput("alice")
+	if !ok {
+		t.Fatalf("no idle input recorded for alice after a successful auth")
+	}
+	if !last.Equal(fixedNow) {
+		t.Errorf("last input = %v, want %v", last, fixedNow)
+	}
+}
+
+func TestHandleAuthDoesNotRecordFailedAuth(t *testing.T) {
+	s := newTestServer(newFake())
+	store := newFakePasswordStore()
+	hash, _ := hashPassword("s3cret")
+	store.Set("alice", hash)
+	s.passwords = store
+
+	rec := doAuth(s, authReq("/alice/", "", "alice", "wrong"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if _, ok := s.idle.lastInput("alice"); ok {
+		t.Errorf("failed auth recorded as input for alice")
+	}
+}
+
+func TestParseIdleTiers(t *testing.T) {
+	if got := parseIdleTiers("small, mid"); !got["small"] || !got["mid"] || len(got) != 2 {
+		t.Errorf("parseIdleTiers(small, mid) = %v, want {small, mid}", got)
+	}
+	if got := parseIdleTiers(""); len(got) != 0 {
+		t.Errorf("parseIdleTiers(empty) = %v, want empty", got)
+	}
+	if got := parseIdleTiers(" large , "); !got["large"] || len(got) != 1 {
+		t.Errorf("parseIdleTiers(large) = %v, want {large}", got)
 	}
 }
 
