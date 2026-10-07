@@ -70,7 +70,12 @@ port_forward() {
     stop_port_forward "$local_port"
   fi
   echo "port-forward ${local_port} -> ${namespace}/${service}:${remote_port}"
-  kubectl port-forward -n "${namespace}" "svc/${service}" "${local_port}:${remote_port}" &
+  # Run with nohup + disown so the tunnel survives the script's exit (a plain
+  # `&` job gets SIGHUP when the parent shell finishes, so the forwarded UI
+  # port would be dead right after this script returns).
+  nohup kubectl port-forward -n "${namespace}" "svc/${service}" "${local_port}:${remote_port}" \
+    >/dev/null 2>&1 &
+  disown
   # Give the tunnel a moment to establish before nginx starts proxying to it.
   sleep 1
 }
