@@ -461,6 +461,8 @@ MFPI_WORKER_REPLICAS=8 ... ./hack/install-ate-kind.sh --deploy-demo-mf-pi
   （含 API 轮询与 WebSocket 升级）。
 - **范围**：仅 `IDLE_TIERS`（默认 `small,mid`）内的档位生效；**large 档位
   Actor 永不因空闲被自动挂起**（设计上常驻）。
+- 被挂起的用户下次访问时会先看到「**Agent 正在载入**」提示页（见
+  [Agent 载入中的提示页](#agent-载入中的提示页)），恢复完成后自动进入界面。
 - **配置**：可在 `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl` 的 mfpi-admin env
   中调整 `IDLE_TIMEOUT` 与 `IDLE_TIERS`（也可直接用 `kubectl set env` 覆盖）。
 - 与「激活有效期」的区别：有效期是管理员设定的**绝对到期**；空闲挂起是**相对
@@ -468,6 +470,79 @@ MFPI_WORKER_REPLICAS=8 ... ./hack/install-ate-kind.sh --deploy-demo-mf-pi
 
 ```bash
 kubectl -n ate-demo-mf-pi set env deploy/mfpi-admin IDLE_TIMEOUT=45m IDLE_TIERS=small,mid
+```
+
+### Agent 载入中的提示页
+
+访问一个**尚未就绪**的 Agent（已挂起需要唤醒，或正在启动、Web 服务还没起来）
+时，用户会立刻看到一个「Agent 正在载入」的提示页，而不是白屏或裸错误页：
+
+- 显示旋转指示器与**基于实时 Actor 状态**的文案：
+  - `RESUMING` / `SUSPENDED` → 「正在唤醒 Agent…（从快照恢复）」
+  - `RUNNING` → 「Agent 正在启动…（Web 服务即将就绪）」
+  - `SUSPENDING` / `PAUSING` / `PAUSED` → 「正在切换状态…」
+  - `CRASHED` → 「正在重启…」
+  - 用户不存在 → 「用户不存在」（不再自动刷新）
+- **每 3 秒自动重试**，显示已等待秒数；等待超过 60 秒会提示可能是**没有空闲
+  worker** 或恢复较慢，并给出「立即重试」按钮与用户管理入口。
+- 页面由 admin 服务根据 Actor 状态动态渲染，纯内联 HTML/CSS/JS，不依赖任何外部
+  资源（Actor 未就绪时也无从加载资源）。页面带稳定的 `mfpi-page=loading` 标记，
+  供 E2E 测试识别。
+
+#### 为什么需要「就绪门」（readiness gate）
+
+访问已挂起的 Actor 时，**路由器不会返回 5xx**：它会在 `ext_proc` 里阻塞重试
+（最多 15s）直到恢复完成，然后直接把请求代理过去。健康的挂起 Actor 因此表现为
+「白屏约 4 秒后突然出现真实页面」——nginx 没有任何错误可拦截，提示页也就无从触
+发。为了**立刻**给出反馈，nginx 对用户路径改用 `auth_request /_mfpi_gate`：
+
+| gate 返回 | 含义 | nginx 行为 |
+|---|---|---|
+| `401` | 缺少/错误凭据 | 浏览器弹出 Basic Auth 提示 |
+| `403` | 凭据正确但 Actor 未 `RUNNING` | 浏览器 → 提示页；API/WS → 原始 `503` |
+| `200` | Actor 已 `RUNNING` | 正常代理到 Actor |
+
+`/_mfpi_gate` 在返回 `403` 的同时**在后台触发恢复**（去重，避免 3 秒自动刷新堆叠
+恢复请求），因此提示页刷新几次后 Actor 就绪，自动进入真实界面。对于「已
+`RUNNING` 但 pi-web 还在启动」的窗口，`proxy_intercept_errors` 把上游
+`502/503/504` 也映射到同一个提示页。
+
+**只对浏览器导航返回 HTML**：`/_mfpi_loading` 内部 location 仅在 `Accept` 含
+`text/html` 时返回提示页；API（`Accept: application/json`）、静态资源与
+WebSocket 升级请求仍然收到原始 `503`，因此 SPA 自身的重试/报错逻辑不受影响，也
+不会把 HTML 误当作 JSON。
+
+#### 端到端验证
+
+```bash
+cd demos/mf-pi
+# 1) 让 admin 与 nginx 都跑上当前代码（gate 是新增端点）
+./deploy-test.sh          # 重新构建并部署测试环境 admin（ko apply）
+./run-nginx-test.sh       # 用当前 nginx-test.conf 重建测试 nginx 容器
+# 2) 跑 E2E：新建用户 → 挂起 → 首次访问应立刻拿到提示页 → 自动变为真实页面
+./test-loading-page.sh
+```
+
+`test-loading-page.sh` 断言：首次导航在 3 秒内返回提示页（含 `mfpi-page=loading`
+标记）并带自动刷新；随后自动变为真实 pi-web 页面（`PI WEB`）；未就绪时 API 请求
+收到原始 `503` 而非 HTML；`/_mfpi_gate`、`/_mfpi_loading` 从外部不可达（404）。
+
+> [!IMPORTANT]
+> 提示页需要**两侧都更新**，缺一会看到旧行为（白屏数秒后出现真实页面）：
+> * **nginx**：拦截规则在 `nginx.conf` / `nginx-test.conf` 内，**改后必须重建
+>   `mfpi-nginx` 镜像并重启容器**（`./build-image.sh && docker rm -f mfpi-nginx &&
+>   ./run-nginx.sh`；测试环境用 `./run-nginx-test.sh`，它 bind-mount 配置文件，
+>   重建容器即可）。
+> * **mfpi-admin**：`/_mfpi_gate`、`/_mfpi_loading` 是新端点，旧镜像会 404，需
+>   重新部署（`./deploy.sh` / `./deploy-test.sh`）。
+
+也可以手动验证生产环境（挂起后打开页面，应立刻看到「正在唤醒 Agent…」）：
+
+```bash
+kubectl ate suspend actor alice -a mfpi
+# 浏览器打开 http://<hostname>:58681/alice/（需该用户访问密码）
+# 或 curl（带上 Basic Auth 密码）确认返回的是提示页：
+curl -s -u alice:<用户密码> -H 'Accept: text/html' http://localhost:58681/alice/ | head -5
 ```
 
 ### 验证持久化
@@ -613,12 +688,29 @@ cd demos/mf-pi
 ./clear-user-apikey-test.sh alice     # 清除测试用户专属 DeepSeek Key
 ```
 
+### 端到端测试脚本
+
+```bash
+./test-loading-page.sh                # 「Agent 正在载入」提示页 + 就绪门（见上文）
+./test-skill-distribution.sh          # 管理员统一安装 Skill 的分发全流程
+./test-userdata-persistence.sh        # 用户数据持久化（删除重建后自动恢复）
+```
+
+> [!NOTE]
+> `test-loading-page.sh` 依赖 **当前版本** 的 mfpi-admin（`/_mfpi_gate`）与
+> `nginx-test.conf`：请先 `./deploy-test.sh` 与 `./run-nginx-test.sh`，否则脚本会
+> 明确报错/跳过而不是给出误导性的通过。
+
 ## 故障排查
 
 ### 访问用户时返回 503：`no free workers available`
 
 **原因**：WorkerPool 的 `replicas` 数量小于同时活跃（未挂起）的用户数。每个并发
 活跃用户占用一个 worker；当所有 worker 都被占满时，新用户无法被恢复。
+
+在浏览器里这表现为「**Agent 正在载入**」提示页长时间不消失（等待超过 60 秒时会
+提示可能没有空闲 worker）；用 `curl`/API 直接访问仍会看到原始
+`actor "..." unavailable: no free workers available` 的 503。
 
 **排查**：
 
@@ -641,8 +733,13 @@ MFPI_WORKER_REPLICAS=4 ./hack/install-ate-kind.sh --deploy-demo-mf-pi
 
 脚本创建的 Actor 初始为 `STATUS_SUSPENDED`，通过路由器发出第一个请求时才自动恢
 复。首次请求可能返回 `503`——sessiond 启动与 web 监听需要数秒（单容器内先
-sessiond、后 web），**等待几秒后重试**即可。可通过 `./list-users.sh` 确认状态已
-变为 `STATUS_RUNNING`。通过管理 UI 添加的用户会被立即恢复，通常不会遇到此情况。
+sessiond、后 web）。
+
+在浏览器里**不会再看到裸 503**：nginx 会改用「**Agent 正在载入**」提示页（见
+[Agent 载入中的提示页](#agent-载入中的提示页)），页面每 3 秒自动重试，Actor 就绪
+后自动进入正常界面。若通过 API / `curl` 访问，仍会收到原始 `503`，**等待几秒后
+重试**即可。可通过 `./list-users.sh` 确认状态已变为 `STATUS_RUNNING`。通过管理
+UI 添加的用户会被立即恢复，通常不会遇到此情况。
 
 ### `/usermanagement/` 打不开（404 或被当作用户路径路由）
 

@@ -67,6 +67,55 @@ key 的完整设计与实现进度（驱动 actor 内 pi-web api-key 登录流�
 经 Actor 内后台拉取循环自动分发到所有用户的设计与实现进度（对应 README 的
 「统一安装 Skill」章节，含 REST/CLI/UI 与双环境支持）。
 
+另见 `resource_quota_plan.md`：激活有效期与资源档位（small/mid/large）配额，
+以及 Part F 的**空闲自动挂起**（mid/small 档位 90 分钟无输入即释放 worker）。
+
+## Agent 载入提示页（唤醒/启动中）
+
+**问题**：访问一个未就绪的 Actor（挂起待唤醒，或已 RUNNING 但 pi-web 还在启动）
+时，用户应当看到明确的「正在载入」提示，而不是白屏或裸错误页。有两条路径需要覆
+盖：
+
+1. **路由失败/上游未就绪**：atenet-router 会返回 `502/503/504`
+   （`cmd/atenet/internal/router/errors.go` 把 `FailedPrecondition`/`Unavailable`
+   映射为 503，`DeadlineExceeded` 为 504；进程未监听时 Envoy 也会给 503）。
+2. **健康的挂起 Actor（关键）**：路由器在 `ext_proc` 里**阻塞**重试（最多 15s）
+   直到恢复完成再代理，**不会返回 5xx**。实测挂起→访问约 4s 后直接返回 200 真实
+   页面，nginx 根本没有错误可拦截 —— 这正是「手动测试看不到 loading」的原因。
+
+**方案**（demo 内实现，不改平台）：
+
+- **就绪门（readiness gate）**：nginx 用户路径 location 用
+  `auth_request /_mfpi_gate` 取代 `/_mfpi_auth`。`/_mfpi_gate`
+  （`admin/gate.go`）在鉴权之外检查 Actor 状态：凭据错误→401（触发浏览器 Basic
+  Auth 提示）、未 `RUNNING`→403、`RUNNING`→200。返回 403 时**后台去重触发
+  `ResumeActor`**（`triggerResume`，独立 context，不随请求取消），使提示页每 3s
+  刷新后能自然过渡到真实页面。
+- **提示页**：nginx 用 `proxy_intercept_errors on` +
+  `error_page 403 502 503 504 = /_mfpi_loading;` 把 403/502/503/504 指向
+  `internal` 的 `/_mfpi_loading`，反代到 mfpi-admin；由 admin 依 `GetActor` 的
+  **实时状态**渲染（`admin/loading.go` + `admin/loading.html`）：
+  RESUMING/SUSPENDED→正在唤醒、RUNNING→正在启动、切换中→状态切换、CRASHED→重启、
+  不存在→报错。页面每 3 秒自动重试（meta refresh），显示已等待秒数，>60s 提示可能
+  没有空闲 worker。页面带稳定标记 `mfpi-page=loading` 供 E2E 断言。
+
+**关键取舍**：**只对浏览器导航返回 HTML**——`/_mfpi_loading` 里用
+`if ($http_accept !~* "text/html") { return 503; }`，让 API（JSON）与 WebSocket
+升级仍收到原始 `503`（gate 的 403 也被映射为 503），避免 SPA 把 HTML 当 JSON 解
+析；上游 200 时完全不受影响。已用本地 nginx + mock 上游验证四态：gate 403+HTML→
+提示页、gate 403+JSON→503、gate 200→透传、gate 401→401（非提示页）、internal 路
+径→404。
+
+**E2E**：`test-loading-page.sh`（测试环境）断言首次导航 **<3s** 返回提示页标记、
+带自动刷新、随后变为真实 `PI WEB` 页面、未就绪时 API 收到原始 503、内部端点外部
+404。实测首次导航 ~1.1s 返回提示页（对比未加 gate 时 ~4s 白屏）。注意 `auth_request`
+只允许一个，故 gate 合并了鉴权与就绪检查；`auth_request` 的非 2xx/401/403 会被
+nginx 转成 500，所以 gate 用 **403** 而非 503 表达「未就绪」。
+
+**运维注意**：双侧都要更新——nginx 拦截规则在 `nginx.conf` / `nginx-test.conf`
+内，改后必须重建容器/镜像；`/_mfpi_gate` 与 `/_mfpi_loading` 是 admin 新端点，旧镜
+像会 404，需重新部署（`./deploy.sh` / `./deploy-test.sh`）。
+
 ## Actor 容器关键设计（核心难点）
 
 `mf-pi.yaml.tmpl` 的 ActorTemplate 容器（测试版同，仅 label/路径不同）：

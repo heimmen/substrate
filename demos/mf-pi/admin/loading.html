@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- mfpi-loading-page: stable marker for the E2E test (test-loading-page.sh). -->
+<meta name="mfpi-page" content="loading">
+<title>Agent 正在载入…</title>
+{{if .AutoRefresh}}<meta http-equiv="refresh" content="3">{{end}}
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1f2430; padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 460px; background: #fff; border-radius: 14px; padding: 32px 28px;
+    box-shadow: 0 8px 30px rgba(20, 30, 50, .10); text-align: center;
+  }
+  .spinner {
+    width: 46px; height: 46px; margin: 4px auto 20px; border-radius: 50%;
+    border: 4px solid #dfe3ea; border-top-color: #3b6ef5; animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h1 { font-size: 19px; margin: 0 0 10px; font-weight: 600; }
+  .msg { font-size: 14px; line-height: 1.6; color: #4a5265; margin: 0 0 18px; }
+  .who { font-size: 13px; color: #7b8296; margin: 0 0 4px; }
+  .who code { background: #eef1f6; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+  .elapsed { font-size: 13px; color: #7b8296; }
+  .hint {
+    display: none; margin-top: 18px; padding: 12px 14px; border-radius: 10px; font-size: 13px;
+    line-height: 1.6; background: #fff8e6; border: 1px solid #f2dfae; color: #7a5a12; text-align: left;
+  }
+  .hint.show { display: block; }
+  .actions { margin-top: 22px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  a.btn, button.btn {
+    appearance: none; border: 1px solid #cfd6e2; background: #fff; color: #2b3242; cursor: pointer;
+    font-size: 13px; padding: 8px 16px; border-radius: 8px; text-decoration: none; line-height: 1.2;
+  }
+  a.btn.primary, button.btn.primary { background: #3b6ef5; border-color: #3b6ef5; color: #fff; }
+  .error .spinner { display: none; }
+  .error h1 { color: #b3261e; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #14171c; color: #e7eaf0; }
+    .card { background: #1d2129; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+    .msg { color: #aeb6c4; }
+    .who code { background: #262b34; }
+    .hint { background: #2c2717; border-color: #4d431f; color: #e8cf8a; }
+    a.btn, button.btn { background: #262b34; border-color: #38404e; color: #dfe4ec; }
+    a.btn.primary, button.btn.primary { background: #3b6ef5; border-color: #3b6ef5; color: #fff; }
+  }
+</style>
+</head>
+<body>
+  <div class="card{{if .Error}} error{{end}}">
+    {{if not .Error}}<div class="spinner" aria-hidden="true"></div>{{end}}
+    <h1>{{.Title}}</h1>
+    {{if .Username}}<p class="who">用户 <code>{{.Username}}</code></p>{{end}}
+    <p class="msg">{{.Message}}</p>
+    {{if .AutoRefresh}}
+      <p class="elapsed">已等待 <span id="elapsed">0</span> 秒 · 本页每 3 秒自动重试</p>
+    {{end}}
+    <div class="hint" id="hint">
+      载入时间较长。可能是当前没有空闲 worker，或该 Agent 的会话较大、恢复较慢。
+      系统仍在重试，也可以稍后再打开，或联系管理员检查 worker 容量。
+    </div>
+    <div class="actions">
+      {{if .AutoRefresh}}
+        <a class="btn primary" href="{{.RetryURL}}">立即重试</a>
+        <a class="btn" href="/usermanagement/">用户管理</a>
+      {{else}}
+        <a class="btn primary" href="/usermanagement/">返回用户管理</a>
+      {{end}}
+    </div>
+  </div>
+  <script>
+    (function () {
+      var user = {{.Username}};
+      var auto = {{.AutoRefresh}};
+      if (!auto) { return; }
+      var now = Date.now();
+      var key = 'mfpi_loading_' + user;
+      var state = { start: now, updated: now };
+      try {
+        var raw = sessionStorage.getItem(key);
+        if (raw) {
+          var prev = JSON.parse(raw);
+          // Continue the same wait episode only if the previous load was
+          // recent (i.e. it was another auto-refresh, not a fresh visit).
+          if (prev && typeof prev.updated === 'number' && (now - prev.updated) < 10000) {
+            state.start = prev.start;
+          }
+        }
+        sessionStorage.setItem(key, JSON.stringify({ start: state.start, updated: now }));
+      } catch (e) { /* sessionStorage unavailable: degrade to a plain counter */ }
+      var startedAt = state.start;
+      var el = document.getElementById('elapsed');
+      var hint = document.getElementById('hint');
+      function tick() {
+        var secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+        if (el) { el.textContent = String(secs); }
+        if (hint && secs >= 60) { hint.className = 'hint show'; }
+      }
+      tick();
+      setInterval(tick, 1000);
+    })();
+  </script>
+</body>
+</html>

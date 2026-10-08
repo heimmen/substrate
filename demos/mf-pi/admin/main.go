@@ -60,7 +60,7 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-//go:embed index.html
+//go:embed index.html loading.html
 var staticFS embed.FS
 
 const (
@@ -349,6 +349,15 @@ type server struct {
 	idleTimeout time.Duration
 	idleTiers   map[string]bool
 	idle        *idleTracker
+
+	// resumeMu guards resuming. When the loading gate (handleGate) sees an
+	// actor that is not RUNNING it starts a resume in the background and
+	// answers "not ready" immediately, so the browser gets the loading page
+	// without waiting for the (often multi-second) resume. resuming dedupes
+	// those background attempts so the page's 3s auto-refresh does not stack
+	// them.
+	resumeMu sync.Mutex
+	resuming map[string]bool
 
 	// reconcileMu guards lastAttempt. The reconciler re-injects stored keys
 	// onto running actors (see startReconciler), so a missed injection — e.g.
@@ -1173,21 +1182,34 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 // Users without a stored password are denied until the admin assigns one via
 // the management UI.
 func (s *server) handleAuth(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authenticate(w, r); !ok {
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// authenticate resolves the target user and validates their HTTP Basic
+// credentials, which must name that same user. On failure it writes a 401
+// (prompting the browser's Basic Auth dialog) and returns ok=false. On success
+// it records the access as user input (re-arming the idle auto-suspend clock)
+// and returns the username. Shared by the auth_request targets: handleAuth
+// (pure auth) and handleGate (auth + readiness).
+func (s *server) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
 	username := targetUser(r)
 	if username == "" {
 		unauthorized(w, "missing user")
-		return
+		return "", false
 	}
 	hash, ok := s.passwords.Get(username)
 	if !ok {
 		// No password assigned: deny access until the admin generates one.
 		unauthorized(w, "no password assigned")
-		return
+		return "", false
 	}
 	user, pass, ok := r.BasicAuth()
 	if !ok || user != username || !checkPassword(hash, pass) {
 		unauthorized(w, "invalid credentials")
-		return
+		return "", false
 	}
 	// This is real user input: nginx runs auth_request for every /<username>/
 	// request (including API calls and WebSocket upgrades) before proxying, so
@@ -1195,7 +1217,7 @@ func (s *server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	if s.idle != nil {
 		s.idle.touch(username, s.now())
 	}
-	w.WriteHeader(http.StatusOK)
+	return username, true
 }
 
 // targetUser resolves the user a request is addressed to. For user-scoped
@@ -1387,6 +1409,7 @@ func main() {
 		idle:              newIdleTracker(),
 		now:               time.Now,
 		lastAttempt:       make(map[string]time.Time),
+		resuming:          make(map[string]bool),
 	}
 
 	// Pre-create the skills store layout so a missing/mounted PVC surfaces a
@@ -1400,6 +1423,12 @@ func main() {
 	mux.HandleFunc("/api/users", srv.handleUsers)
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
+	// Readiness gate: like /_mfpi_auth but also rejects (403) a request whose
+	// actor is not RUNNING, so nginx can show the loading page immediately
+	// instead of blocking on the router's resume.
+	mux.HandleFunc("/_mfpi_gate", srv.handleGate)
+	// Interstitial served via nginx error_page while a user's actor wakes up.
+	mux.HandleFunc("/_mfpi_loading", srv.handleLoadingPage)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
 
 	// Shared-skills management API (admin UI) and read-only internal endpoints

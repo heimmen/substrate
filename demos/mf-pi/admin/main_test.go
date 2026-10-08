@@ -32,6 +32,19 @@ type fakeControlClient struct {
 	purgeTemplates   []string
 	resumeErr        error
 	purgeErr         error
+
+	// resumeBlock, when non-nil, makes ResumeActor wait until it is closed.
+	// resumeCount (guarded by resumeMu) records how many resume calls have
+	// started; both exist to test the gate's resume de-duplication.
+	resumeBlock chan struct{}
+	resumeMu    sync.Mutex
+	resumeCount int
+}
+
+func (f *fakeControlClient) startedResumes() int {
+	f.resumeMu.Lock()
+	defer f.resumeMu.Unlock()
+	return f.resumeCount
 }
 
 func newFake() *fakeControlClient {
@@ -80,6 +93,13 @@ func (f *fakeControlClient) CreateActor(_ context.Context, req *ateapipb.CreateA
 }
 
 func (f *fakeControlClient) ResumeActor(_ context.Context, req *ateapipb.ResumeActorRequest, _ ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+	f.resumeMu.Lock()
+	f.resumeCount++
+	block := f.resumeBlock
+	f.resumeMu.Unlock()
+	if block != nil {
+		<-block
+	}
 	if f.resumeErr != nil {
 		return nil, f.resumeErr
 	}
@@ -315,6 +335,7 @@ func newTestServer(f *fakeControlClient) *server {
 		idle:              newIdleTracker(),
 		now:               func() time.Time { return fixedNow },
 		lastAttempt:       make(map[string]time.Time),
+		resuming:          make(map[string]bool),
 	}
 }
 
