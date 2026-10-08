@@ -152,8 +152,8 @@ metadata:
 spec:
   pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
   containers:
-  - name: pi-web
-    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+  - name: mf-agent
+    image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
     # installs the baked-in skills into /data/pi-agent/skills on first start
@@ -429,8 +429,8 @@ metadata:
 spec:
   pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
   containers:
-  - name: pi-web
-    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+  - name: mf-agent
+    image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
     # installs the baked-in skills into /data/pi-agent/skills on first start
@@ -707,8 +707,8 @@ metadata:
 spec:
   pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
   containers:
-  - name: pi-web
-    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+  - name: mf-agent
+    image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
     # installs the baked-in skills into /data/pi-agent/skills on first start
@@ -985,8 +985,8 @@ metadata:
 spec:
   pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
   containers:
-  - name: pi-web
-    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+  - name: mf-agent
+    image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
     # installs the baked-in skills into /data/pi-agent/skills on first start

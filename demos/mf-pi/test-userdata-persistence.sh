@@ -272,7 +272,7 @@ verify_in_actor_data_dir() {
   # container rootfs, so we must NOT treat a non-zero exit as failure. Capture
   # combined output (`|| true` keeps `set -e` happy), strip the notice line, and
   # decide from the directory entries themselves.
-  data_ls="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec pi-web ls /data 2>&1 || true)"
+  data_ls="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec mf-agent ls /data 2>&1 || true)"
   local entries
   entries="$(printf '%s\n' "$data_ls" | grep -vE '^(waiting on|$)' || true)"
   if printf '%s\n' "$entries" | grep -qx 'pi-agent'; then
@@ -284,7 +284,7 @@ verify_in_actor_data_dir() {
   fi
 
   local marker
-  marker="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec pi-web cat "${PROJ_PATH}/${MARKER}" 2>&1 || true)"
+  marker="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec mf-agent cat "${PROJ_PATH}/${MARKER}" 2>&1 || true)"
   if printf '%s\n' "$marker" | grep -qF "${SENTINEL}"; then
     ok "live actor /data/pi-agent contains the recovered sentinel after refresh"
   else

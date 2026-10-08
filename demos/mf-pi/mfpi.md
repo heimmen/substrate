@@ -49,7 +49,7 @@
 | admin port-forward | 58682 | 59882 |
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
 | worker replicas 默认 | 16（deploy.sh）/ 4（harness） | 2 |
-| 工作负载镜像 | `localhost:5001/pi-web@${MF_PI_DIGEST}` | 同左 |
+| 工作负载镜像 | `localhost:5001/mf-agent@${MF_PI_DIGEST}` | 同左 |
 
 Actor DNS：`<username>.mfpi.actors.resources.substrate.ate.dev`（测试：
 `<username>.mfpi-test.actors.resources.substrate.ate.dev`）。
@@ -124,8 +124,8 @@ nginx 转成 500，所以 gate 用 **403** 而非 503 表达「未就绪」。
 spec:
   pauseImage: "localhost:5001/pause:3.10.2@${PAUSE_DIGEST}"
   containers:
-  - name: pi-web
-    image: "localhost:5001/pi-web@${MF_PI_DIGEST}"
+  - name: mf-agent
+    image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # 用 args（非 command）保留镜像 ENTRYPOINT：tini -- pi-web-bootstrap。
     # bootstrap 首启拷贝 skills 到 /data/pi-agent/skills，然后 exec 下面的 supervisor。
     args:
@@ -171,6 +171,17 @@ spec:
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
 ```
 
+> [!WARNING]
+> **容器名与快照强耦合。** `onPause: Full`/`onCommit: Full` 的完整快照里记录了容器
+> **名**（当前为 `mf-agent`，早期为 `pi-web`）。若改 `containers[].name`（或换镜像/
+> 改动容器 spec），**在改动前挂起过的 Actor** 恢复时会在
+> `CallAteletRestoreStep` 校验快照 spec 失败：
+> `checkpoint image does not contain spec for container:"<新名>"` → `runsc restore`
+> exit 128，Actor 卡死在 `STATUS_RESUMING`（恢复失败不会置 CRASHED，工作流无限重
+> 试）。改容器名后须把**所有**既有挂起 Actor 迁移（缩池到 0 解除卡死 → delete →
+> recreate（当前模板）→ resume，sticky 用户数据卷保留），流程见
+> [README → 故障排查：Actor 无法恢复](#actor-无法恢复卡在-status_resuming)。
+
 - 镜像其余关键 ENV 已内建（`docker/Dockerfile`）：`HOME=/data/home`、
   `XDG_CONFIG_HOME=/data/config`、`PI_WEB_DATA_DIR=/data/pi-web`、
   `PI_WEB_SESSIOND_SOCKET=/data/pi-web/sessiond.sock`、
@@ -206,9 +217,9 @@ pi-web 前端全相对路径，nginx 只需：
 ```bash
 # 1) 构建 pi-web 镜像并推到本地 registry（kind 离线环境）
 cd /home/liuchong/git/pi-web
-PI_WEB_IMAGE=pi-web:latest docker/scripts/build-image.sh
-docker tag pi-web:latest localhost:5001/pi-web:latest
-docker push localhost:5001/pi-web:latest
+PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh
+docker tag mf-agent:latest localhost:5001/mf-agent:latest
+docker push localhost:5001/mf-agent:latest
 
 # 2) pause 镜像（与 mf-cc 共用）
 docker tag rancher/mirrored-pause:3.10.2 localhost:5001/pause:3.10.2
@@ -250,7 +261,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 
 ### 阶段 A：目录与镜像
 - [x] A1. 新建 `demos/mf-pi/` 目录（含 `admin/` 子目录）
-- [x] A2. 构建 `pi-web:latest` 镜像并推送 `localhost:5001/pi-web:latest`（tag 自既有 `pi-web:local`，digest `sha256:364a73cf…`）
+- [x] A2. 构建 `mf-agent:latest` 镜像并推送 `localhost:5001/mf-agent:latest`（tag 自既有 `pi-web:local`，digest `sha256:364a73cf…`）
 - [x] A3. 确认 `localhost:5001/pause:3.10.2` 就位（与 mf-cc 共用）
 
 ### 阶段 B：核心清单（ActorTemplate 等）

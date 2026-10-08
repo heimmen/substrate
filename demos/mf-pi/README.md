@@ -15,7 +15,7 @@ supervisor 同时运行两者（与 pi-web 仓库 `docker/scripts/run-container.
 
 - 已安装 Agent Substrate 的 k8s 集群
   （`./hack/install-ate.sh --deploy-ate-system`）。
-- 本地已构建的 pi-web 镜像 `pi-web:latest`（由 pi-web 仓库
+- 本地已构建的 pi-web 镜像 `mf-agent:latest`（由 pi-web 仓库
   `docker/scripts/build-image.sh` 构建，本地 tag 也可用 `pi-web:local`）。该镜像
   必须能被集群节点访问。
 
@@ -36,13 +36,23 @@ supervisor 同时运行两者（与 pi-web 仓库 `docker/scripts/run-container.
 
 ```bash
 # pi-web 工作负载镜像（由 pi-web 仓库的 docker/scripts/build-image.sh 构建）
-docker tag pi-web:latest localhost:5001/pi-web:latest
-docker push localhost:5001/pi-web:latest
+docker tag mf-agent:latest localhost:5001/mf-agent:latest
+docker push localhost:5001/mf-agent:latest
 
 # pause 镜像（3.10.2；可使用任意可访问的镜像源，例如 rancher/mirrored-pause）
 docker tag rancher/mirrored-pause:3.10.2 localhost:5001/pause:3.10.2
 docker push localhost:5001/pause:3.10.2
 ```
+
+> [!IMPORTANT]
+> **重命名 Actor 容器/镜像会破坏既有快照。** Actor 挂起时把整个容器的运行状态
+> 存成快照，快照里记录了容器**名**（例如 `pi-web`）与其 spec。如果你改了
+> `ActorTemplate` 里的容器名（例如改成 `mf-agent`）或镜像，那么**在重命名前挂起的
+> 所有 Actor** 恢复时都会失败：
+> `checkpoint image does not contain spec for container:"<新名>"`（`runsc restore`
+> exit 128），并会一直卡在 `STATUS_RESUMING`。这与镜像内容无关（改名后 digest 相同），
+> 纯粹是**容器名与快照 spec 不匹配**。见
+> [故障排查：Actor 无法恢复（卡在 STATUS_RESUMING）](#actor-无法恢复卡在-status_resuming)。
 
 ### 2. 部署
 
@@ -740,6 +750,63 @@ sessiond、后 web）。
 后自动进入正常界面。若通过 API / `curl` 访问，仍会收到原始 `503`，**等待几秒后
 重试**即可。可通过 `./list-users.sh` 确认状态已变为 `STATUS_RUNNING`。通过管理
 UI 添加的用户会被立即恢复，通常不会遇到此情况。
+
+### Actor 无法恢复（卡在 STATUS_RESUMING）
+
+**现象**：某个 Actor 一直处于 `STATUS_RESUMING`，浏览器一直看到「Agent 正在载
+入」或直接报错；`kubectl ate get actor <u>` 不掉出 `STATUS_RESUMING`；atelet 日志
+出现：
+
+```
+failed to validate restore spec: checkpoint image does not contain spec for container: "<name>"
+while running `runsc restore`: exit status 128
+```
+
+**原因**：该 Actor 挂起时的**快照是按旧容器名/旧模板生成的**，而当前
+`ActorTemplate` 的容器名或镜像与之不匹配（最常见是把容器名 `pi-web` 改成
+`mf-agent`、或换了镜像/改动了容器 spec）。恢复时 runsc 按当前模板的容器名去快照里
+找 spec，找不到就 exit 128。恢复失败不是「崩溃」（atelet 只对带 `actorCrashed`
+标记的错误才置 CRASHED），所以恢复工作流会**无限重试**，Actor 卡死在
+`STATUS_RESUMING`；`delete`/`suspend` 也会因「不是 SUSPENDED」被拒绝。
+
+**解决（迁移到一个新的、不带旧快照的 Actor，保留用户数据）**：
+
+关键：被删除 Worker 后，恢复工作流发现「已分配的 worker 不存在」，会把 Actor 释放
+回 `STATUS_SUSPENDED`，从而允许 `delete`。若只删一个 worker，池里的其他 worker
+会立刻把 Actor 重新拾起继续重试，所以要先把该池 `replicas` 缩到 **0**（清空该池
+worker，确保没有 worker 能再拾起它）。
+
+```bash
+# 0) 该 Actor 属于哪个 WorkerPool？例如 mf-pi-workerpool / mf-pi-wp-small
+kubectl ate get actor <u> -a <atespace>
+
+# 1) 把该池缩到 0，等 Actor 回到 SUSPENDED（这也会释放 CPU：kind 单节点容易
+#    CPU 打满导致新 worker Pending）
+kubectl patch workerpool <pool> -n <ns> --type merge -p '{"spec":{"replicas":0}}'
+until kubectl ate get actor <u> -a <atespace> -o json \
+  | jq -r '.actors[0].status // .status' | grep -q SUSPENDED; do sleep 2; done
+
+# 2) 删除并重建（当前模板 → 无旧快照，冷启动；sticky 用户数据卷会原样挂回）
+kubectl ate delete actor <u> -a <atespace>
+kubectl ate create actor <u> -a <atespace> --template <template>
+
+# 3) 把池扩回原副本数
+kubectl patch workerpool <pool> -n <ns> --type merge -p '{"spec":{"replicas":2}}'
+
+# 4) 恢复（等有 worker 再 resume；冷启动后会生成新的、匹配当前模板的快照）
+kubectl ate resume actor <u> -a <atespace>
+```
+
+**注意**：
+- 一个池里可能有多个 Actor（例如 `mf-pi-wp-small` 同时有 alice、bob）。把池缩到 0
+  会把同池**所有** RUNNING/RESUMING 的 Actor 都释放为 SUSPENDED；要在第 2 步把同池
+  所有需要迁移的 Actor 一起删建，再在第 3 步扩回并逐个恢复。
+- 重命名容器后，**所有**在重命名前挂起过的 Actor 都要这样迁移（它们都带着旧名快
+  照）；否则下次自动挂起/恢复又会卡死。
+- 迁移会中断在线用户（其进行一次冷启动），但用户数据（`/data/pi-agent` 等）在
+  sticky 卷上**不丢失**。
+- 若只是 CPU 不足（新 worker 卡 Pending、`Insufficient cpu`）而没有任何 Actor 卡
+  死不散，把没有用户使用的 mid/large 池缩到 0 即可释放 CPU，不必动 Actor。
 
 ### `/usermanagement/` 打不开（404 或被当作用户路径路由）
 

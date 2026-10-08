@@ -130,8 +130,8 @@ kubectl ate purge volumes alice -a mfpi -t ate-demo-mf-pi/mf-pi   # 等价 CLI
 ```bash
 # 构建并推送镜像到本地仓库（kind 节点无法访问外网）
 KO_DOCKER_REPO=localhost:5001 ./hack/install-ate.sh --deploy-ate-apiserver   # 控制面
-cd ../pi-web && PI_WEB_IMAGE=pi-web:latest docker/scripts/build-image.sh      # pi-web 镜像
-docker tag pi-web:latest localhost:5001/pi-web:latest && docker push localhost:5001/pi-web:latest
+cd ../pi-web && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh      # pi-web 镜像
+docker tag mf-agent:latest localhost:5001/mf-agent:latest && docker push localhost:5001/mf-agent:latest
 
 # 部署演示（解析镜像摘要、建 ns / template / admin）
 cd demos/mf-pi && ./deploy.sh          # 生产（端口 58681）

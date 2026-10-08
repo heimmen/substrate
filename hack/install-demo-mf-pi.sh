@@ -33,18 +33,18 @@ demo-mf-pi_cmdline() {
   return 0
 }
 
-# Resolve the digest-pinned references for the pi-web workload and pause
-# images already pushed to ${KO_DOCKER_REPO} (localhost:5001 for kind).
+# Resolve the digest-pinned references for the mf-agent (pi-web) workload and
+# pause images already pushed to ${KO_DOCKER_REPO} (localhost:5001 for kind).
 # The workload images are shared with the test environment.
 demo-mf-pi_images() {
   local repo="${KO_DOCKER_REPO}"
   local piweb pause
-  piweb="$(docker inspect "${repo}/pi-web:latest" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
+  piweb="$(docker inspect "${repo}/mf-agent:latest" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
   pause="$(docker inspect "${repo}/pause:3.10.2" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
   if [[ -z "${piweb}" || -z "${pause}" ]]; then
-    echo "pi-web or pause image not found in ${repo}; push them first:" >&2
-    echo "  cd /home/liuchong/git/pi-web && PI_WEB_IMAGE=pi-web:latest docker/scripts/build-image.sh" >&2
-    echo "  docker tag pi-web:latest ${repo}/pi-web:latest && docker push ${repo}/pi-web:latest" >&2
+    echo "mf-agent (pi-web) or pause image not found in ${repo}; push them first:" >&2
+    echo "  cd /home/liuchong/git/pi-web && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh" >&2
+    echo "  docker tag mf-agent:latest ${repo}/mf-agent:latest && docker push ${repo}/mf-agent:latest" >&2
     echo "  docker tag rancher/mirrored-pause:3.10.2 ${repo}/pause:3.10.2 && docker push ${repo}/pause:3.10.2" >&2
     return 1
   fi
@@ -110,7 +110,7 @@ demo-mf-pi_usage() {
   echo ""
   echo "  Required env: DEEPSEEK_API_KEY, BUCKET_NAME, KO_DOCKER_REPO"
   echo "  Optional env: MFPI_WORKER_REPLICAS (default 4; max concurrently-active users)"
-  echo "  Deploys: pi-web actors + the mfpi-admin user-management UI (user data persists on a sticky per-actor volume)"
+  echo "  Deploys: mf-agent actors + the mfpi-admin user-management UI (user data persists on a sticky per-actor volume)"
   echo "  UI access: http://<hostname>:58681/usermanagement/ (via run-nginx.sh)"
   echo "  See demos/mf-pi/mfpi.md for the walkthrough."
 }

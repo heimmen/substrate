@@ -62,7 +62,7 @@ for at in atl_all:
     assert ev["capacity"], (at["metadata"]["name"], ev)
     assert ev["storageClassName"], (at["metadata"]["name"], ev)
     c = spec["containers"][0]
-    assert c["image"].startswith("localhost:5001/pi-web@"), c["image"]
+    assert c["image"].startswith("localhost:5001/mf-agent@"), c["image"]
     assert "command" not in c, "command must not be set (keeps image ENTRYPOINT)"
     assert c["args"][:2] == ["sh", "-c"], c["args"][:2]
     script = c["args"][2]
