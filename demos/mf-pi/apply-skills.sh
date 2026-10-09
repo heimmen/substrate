@@ -5,7 +5,7 @@
 #
 # This is best-effort: sessions with active work ("Stop current session
 # activity before reloading") are left for the next sessionhare; unreachable
-# actors are reported in the failures list. See deploy_skill_to_actor.md.
+# actors are reported in the failures list. See docs/deploy_skill_to_actor.md.
 #
 # The response is printed as JSON; a non-2xx status exits non-zero. Honors the
 # MFPI_NAMESPACE env var (default ate-demo-mf-pi).

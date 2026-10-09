@@ -1379,7 +1379,7 @@ func TestHTTPActorAuthClientClearDrivesLogout(t *testing.T) {
 	}
 }
 
-// ---- Activation expiry + resource tier (resource_quota_plan.md, Part D) ----
+// ---- Activation expiry + resource tier (docs/resource_quota_plan.md, Part D) ----
 
 func TestHandleSetExpirySuccess(t *testing.T) {
 	f := newFake()

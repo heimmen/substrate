@@ -8,7 +8,7 @@
 # The admin is the authoritative source for skills distributed to every user
 # (actor). Each actor runs a 10s background pull loop that diffs the admin's
 # manifest against local state and incrementally installs/updates/removes
-# managed skills under /data/pi-agent/skills. See deploy_skill_to_actor.md.
+# managed skills under /data/pi-agent/skills. See docs/deploy_skill_to_actor.md.
 #
 # This script asserts the full lifecycle, mirroring the manual E2E that was
 # done during #12:

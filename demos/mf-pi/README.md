@@ -11,7 +11,7 @@ supervisor 同时运行两者（与 pi-web 仓库 `docker/scripts/run-container.
 器文件系统做 Full 快照，恢复时原样还原，会话、skills 与配置因此在挂起与恢复之间
 持续存在。
 
-面向外部组件开发的完整 HTTP/WebSocket 接口说明见 [`user_agent_api.md`](./user_agent_api.md)（管理面 REST + 用户 Agent pi-web API，含参数、示例、返回值与错误处理）。
+面向外部组件开发的完整 HTTP/WebSocket 接口说明见 [`docs/user_agent_api.md`](./docs/user_agent_api.md)（管理面 REST + 用户 Agent pi-web API，含参数、示例、返回值与错误处理）。
 
 ## 前提条件
 
@@ -279,7 +279,7 @@ pi-web 内建 `deepseek` provider（OpenAI 兼容，`https://api.deepseek.com`�
 **单个用户动态设置 / 清除其专属 DeepSeek API key** 的方式是：经路由器驱动该用户
 Actor 内 pi-web 自身的 api-key 登录流程，把凭据写进该 Actor 的 `auth.json`
 （`/data/pi-agent/auth.json`）。一个用户 == 一个 Actor，正好构成 per-user 的 key
-面。完整设计见 `injectDeepsseekKey.md`。
+面。完整设计见 `docs/injectDeepsseekKey.md`。
 
 pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优先于** `DEEPSEEK_API_KEY`
 env（无需重启）；清除后该用户回退到 env key。
@@ -319,7 +319,7 @@ key，因此任何 resume 路径（包括 `refresh-actor.sh` 的删除重建）�
 `mfpi-admin` 是**唯一权威源**：管理员在 `/usermanagement/` 上传 / 卸载 skill，
 平台自动把它分发到**所有用户（每个用户 = 一个 pi-web Actor）**，安装到每个
 actor 的 `/data/pi-agent/skills`，新会话自动生效，已打开的会话可用「**立即应
-用**」触发 reload 热加载。完整设计与实现进度见 `deploy_skill_to_actor.md`。
+用**」触发 reload 热加载。完整设计与实现进度见 `docs/deploy_skill_to_actor.md`。
 
 **分发机制（Actor 自拉）**：admin 把 skill 目录存到 PVC（`mfpi-shared-skills`，
 挂 `$SKILLS_DIR=/var/lib/mfpi-skills`，`replicas: 1` 固化），暴露两个只读端点
@@ -446,8 +446,8 @@ kubectl ate resume actor alice -a mfpi   # 恢复 → 自动挂回同一持久�
 ```
 
 恢复后，alice 的专属 DeepSeek key（`auth.json`）、已安装的 skills 与会话历史会自动
-出现，**无需**重新驱动注入。完整设计见 `save_userdata_pv.md` 与
-`perUserDataVolume.md`。
+出现，**无需**重新驱动注入。完整设计见 `docs/save_userdata_pv.md` 与
+`docs/perUserDataVolume.md`。
 
 ### 容量配置
 

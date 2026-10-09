@@ -15,12 +15,12 @@
 //
 // User data persistence: each actor mounts a sticky userdata volume at
 // /data/pi-agent, so a delete+recreate redeploy keeps the user's data with
-// no broker involved (see save_userdata_pv.md).
+// no broker involved (see docs/save_userdata_pv.md).
 //
 // It authenticates in-cluster exactly like ate-controller/atenet-router: a
 // projected service-account token (audience api.ate-system.svc) as Bearer
 // credential and a projected ClusterTrustBundle as the server TLS roots.
-// No RBAC beyond a valid SA token is required. See demos/mf-pi/mfpi.md.
+// No RBAC beyond a valid SA token is required. See demos/mf-pi/docs/mfpi.md.
 package main
 
 import (

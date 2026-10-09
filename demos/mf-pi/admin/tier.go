@@ -23,7 +23,7 @@ import (
 // tierNames are the fixed resource tiers (deploy-time ActorTemplate +
 // WorkerPool per tier). The order also drives the UI's tier picker. Each must
 // correspond to an `mf-pi-<tier>` ActorTemplate/WorkerPool created by the
-// deploy manifests (see Part E of resource_quota_plan.md).
+// deploy manifests (see Part E of docs/resource_quota_plan.md).
 var tierNames = []string{"small", "mid", "large"}
 
 // buildTierTemplates derives the tier -> ActorTemplate-name map from the base

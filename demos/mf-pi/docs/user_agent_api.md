@@ -2469,7 +2469,7 @@ export function sendWorkspaceRequestError(reply, error, fallbackStatus): Fastify
 
 以下 `curl` 示例统一针对 **mf-pi 多用户网关**：
 
-- 入口：`http://<host>:58681/<username>`，每个用户的流量按 URL 路径前缀路由到对应 actor（`<substrate>/demos/mf-pi/nginx.conf`；端口 58681/59681 见 `<substrate>/demos/mf-pi/mfpi.md`）。
+- 入口：`http://<host>:58681/<username>`，每个用户的流量按 URL 路径前缀路由到对应 actor（`<substrate>/demos/mf-pi/nginx.conf`；端口 58681/59681 见 `<substrate>/demos/mf-pi/docs/mfpi.md`）。
 - 鉴权：HTTP Basic，`-u <username>:<password>`（nginx `auth_request` 校验每用户密码）。
 - 网关会剥离 `/<username>` 前缀，因此后端看到的仍是 `/api/...`。
 - 非网关（直连 pi-web）部署把 `http://<host>:58681/<username>` 换成实际监听地址即可（Basic 认证可省略）。
@@ -4618,9 +4618,11 @@ WS     /api/machines/local/events
 | 管理面单测（含响应结构断言） | `demos/mf-pi/admin/main_test.go`、`skills_test.go` |
 | 用户 Agent 服务（pi-web） | 独立仓库 `cliu-pi-web`：`src/server/app.ts`（路由注册）、`src/server/sessions/*`、`src/server/sessiond.ts` |
 | 部署清单 | `demos/mf-pi/mf-pi.yaml.tmpl`、`mf-pi-test.yaml.tmpl` |
-| 演示总览 | `demos/mf-pi/README.md`、`demos/mf-pi/mfpi.md`、`demos/mf-pi/actor_inside.md` |
-| Skill 分发设计 | `demos/mf-pi/deploy_skill_to_actor.md` |
-| 专属 Key 设计 | `demos/mf-pi/injectDeepsseekKey.md` |
+| 演示总览 | `demos/mf-pi/README.md`、`demos/mf-pi/docs/mfpi.md`、`demos/mf-pi/docs/actor_inside.md` |
+| Skill 分发设计 | `demos/mf-pi/docs/deploy_skill_to_actor.md` |
+| 专属 Key 设计 | `demos/mf-pi/docs/injectDeepsseekKey.md` |
+| 每用户持久卷设计 | `demos/mf-pi/docs/save_userdata_pv.md`、`demos/mf-pi/docs/perUserDataVolume.md` |
+| 资源档位 / 有效期设计 | `demos/mf-pi/docs/resource_quota_plan.md` |
 | CLI 包装脚本 | `create-user.sh`、`delete-user.sh`、`list-users.sh`、`set-user-apikey.sh`、`clear-user-apikey.sh`、`install-skill.sh`、`list-skills.sh`、`remove-skill.sh`、`apply-skills.sh`（均含 `-test` 变体） |
 
 ### 8.4 安全与部署建议

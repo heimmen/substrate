@@ -292,7 +292,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] F3. 在 `hack/install-ate.sh` 追加 `source` 两行新 harness
 
 ### 阶段 G：文档与验证
-- [x] G1. 完善本文档 `demos/mf-pi/mfpi.md`（含 TODO 跟踪；测试环境入口端口为 `59681`，与 `nginx-test.conf` / `run-nginx-test.sh` 一致）
+- [x] G1. 完善本文档 `demos/mf-pi/docs/mfpi.md`（含 TODO 跟踪；测试环境入口端口为 `59681`，与 `nginx-test.conf` / `run-nginx-test.sh` 一致）
 - [x] G2. `demos/mf-pi/README.md`
 - [x] G3. `gofmt -l demos/mf-pi/admin/`、`go test ./demos/mf-pi/admin/...` 通过；`make verify` 中 mf-pi 相关检查（gofmt/shellcheck/boilerplate，无 mf-pi 文件被标记）通过
 - [x] G4. 端到端验证（见下方「验证结果」）
@@ -321,8 +321,8 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 
 ## 待新增文件清单
 
-### `demos/mf-pi/`（22 个）
-1. `mfpi.md`（本文档）
+### `demos/mf-pi/`（22 个；设计文档位于 `docs/`）
+1. `docs/mfpi.md`（本文档）
 2. `mf-pi.yaml.tmpl`
 3. `mf-pi-test.yaml.tmpl`
 4. `validate-templates.sh`（模板渲染校验辅助脚本）

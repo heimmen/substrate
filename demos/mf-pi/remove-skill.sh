@@ -4,7 +4,7 @@
 #
 # This only deletes the admin's managed copy and notifies actors to remove it;
 # a user's own, never-managed, same-named skill is left untouched. See
-# deploy_skill_to_actor.md for the full design.
+# docs/deploy_skill_to_actor.md for the full design.
 #
 # The response is printed as JSON; a non-2xx status exits non-zero. Honors the
 # MFPI_NAMESPACE env var (default ate-demo-mf-pi).

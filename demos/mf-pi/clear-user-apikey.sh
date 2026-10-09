@@ -6,7 +6,7 @@
 # The admin server first drives the actor's pi-web auth logout (so the agent
 # falls back to the DEEPSEEK_API_KEY env), then removes the persisted key from
 # the mfpi-user-provider-keys Secret. Idempotent: clearing a user with no key
-# succeeds. See injectDeepsseekKey.md for the full design.
+# succeeds. See docs/injectDeepsseekKey.md for the full design.
 #
 # The response is printed as JSON; a non-2xx status exits non-zero. Honors the
 # MFPI_NAMESPACE env var (default ate-demo-mf-pi; the mfpi-admin in the

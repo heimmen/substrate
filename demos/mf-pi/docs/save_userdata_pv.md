@@ -66,7 +66,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
    new `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
 10. `demos/mf-pi/admin/index.html` — the "已同步" badge reads MinIO object; update/remove.
 11. `demos/mf-pi/perUserMinioProfile.md` — rewrite as the sticky-PV design doc.
-12. `demos/mf-pi/mfpi.md` + `README.md` — drop MinIO persistence / profile-token references.
+12. `demos/mf-pi/docs/mfpi.md` + `demos/mf-pi/README.md` — drop MinIO persistence / profile-token references.
 
 ## §5 Verification
 - `go build ./...` and `go test ./cmd/ateapi/... ./cmd/atelet/... ./internal/volume/... ./demos/mf-pi/admin/...`.
@@ -106,7 +106,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
       `validate-templates.sh` to assert NO minio/profile-token artifacts and the new
       `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
 - [x] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite
-      `perUserMinioProfile.md` as sticky-PV doc; update `mfpi.md` + `README.md` (drop MinIO refs).
+      `perUserMinioProfile.md` as sticky-PV doc; update `demos/mf-pi/docs/mfpi.md` + `demos/mf-pi/README.md` (drop MinIO refs).
 - [x] **#17 Build, test, verify, manual check** — gofmt/build/vet/test (ateapi, atelet, internal/volume,
       mf-pi/admin); `validate-templates.sh`; `make verify`; manual: create actor → write
       `/data/pi-agent` file → refresh image (delete+recreate) → confirm file persists.

@@ -74,7 +74,7 @@ flowchart LR
 - [x] #8 `index.html` 新增共享 Skills 卡片（列表/上传/删除/立即应用）
 - [x] #9 更新 `validate-templates.sh` 断言（拉取循环、env、PVC、资源计数）
 - [x] #10 新增 `install/list/remove/apply skill` 脚本及 `-test` 变体
-- [x] #11 `README.md` 与 `mfpi.md` 增加统一安装 skill 章节与引用
+- [x] #11 `demos/mf-pi/README.md` 与 `mfpi.md` 增加统一安装 skill 章节与引用
 - [x] #12 `make verify` + `validate-templates.sh` + 端到端验证
   - 已通过：`go test ./demos/mf-pi/admin`（-count=1 全绿，含 HTTP apply reloader 单测）、`go build` / `go vet` / `gofmt` 无告警。
   - `validate-templates.sh`：两套模板各 28 docs 校验全部通过，含 PVC、拉取循环及 fsGroup。

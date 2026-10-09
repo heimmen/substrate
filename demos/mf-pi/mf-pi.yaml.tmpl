@@ -168,7 +168,7 @@ spec:
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
-      # (see save_userdata_pv.md).
+      # (see docs/save_userdata_pv.md).
 
       # Recover baked-in skills for the same reason. pi-web-bootstrap installs
       # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
@@ -194,7 +194,7 @@ spec:
         done
       ) &
 
-      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
       # keying on the manifest ETag/version so unchanged skills are not
@@ -414,7 +414,7 @@ spec:
     # Full snapshots (process memory + filesystem delta). The userdata
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
-    # (see save_userdata_pv.md).
+    # (see docs/save_userdata_pv.md).
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
@@ -445,7 +445,7 @@ spec:
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
-      # (see save_userdata_pv.md).
+      # (see docs/save_userdata_pv.md).
 
       # Recover baked-in skills for the same reason. pi-web-bootstrap installs
       # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
@@ -471,7 +471,7 @@ spec:
         done
       ) &
 
-      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
       # keying on the manifest ETag/version so unchanged skills are not
@@ -691,7 +691,7 @@ spec:
     # Full snapshots (process memory + filesystem delta). The userdata
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
-    # (see save_userdata_pv.md).
+    # (see docs/save_userdata_pv.md).
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
@@ -723,7 +723,7 @@ spec:
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
-      # (see save_userdata_pv.md).
+      # (see docs/save_userdata_pv.md).
 
       # Recover baked-in skills for the same reason. pi-web-bootstrap installs
       # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
@@ -749,7 +749,7 @@ spec:
         done
       ) &
 
-      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
       # keying on the manifest ETag/version so unchanged skills are not
@@ -969,7 +969,7 @@ spec:
     # Full snapshots (process memory + filesystem delta). The userdata
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
-    # (see save_userdata_pv.md).
+    # (see docs/save_userdata_pv.md).
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
@@ -1001,7 +1001,7 @@ spec:
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
-      # (see save_userdata_pv.md).
+      # (see docs/save_userdata_pv.md).
 
       # Recover baked-in skills for the same reason. pi-web-bootstrap installs
       # the image's skills (/opt/pi-web/skills) into $PI_CODING_AGENT_DIR/skills
@@ -1027,7 +1027,7 @@ spec:
         done
       ) &
 
-      # Pull administrator-managed skills (see deploy_skill_to_actor.md). The
+      # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
       # keying on the manifest ETag/version so unchanged skills are not
@@ -1247,7 +1247,7 @@ spec:
     # Full snapshots (process memory + filesystem delta). The userdata
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
-    # (see save_userdata_pv.md).
+    # (see docs/save_userdata_pv.md).
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
@@ -1516,7 +1516,7 @@ spec:
 
 # Shared skills PVC: the admin is the authoritative source for skills
 # distributed to every user. RWO storage, so the mfpi-admin Deployment must
-# remain single-replica (replicas: 1). See deploy_skill_to_actor.md.
+# remain single-replica (replicas: 1). See docs/deploy_skill_to_actor.md.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -100,7 +100,7 @@
       `validate-templates.sh` to assert NO minio/profile-token artifacts and the new
       `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
 - [x] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite
-      `perUserMinioProfile.md` as sticky-PV doc; update `mfpi.md` + `README.md` (drop MinIO refs).
+      `perUserMinioProfile.md` as sticky-PV doc; update `mfpi.md` + `demos/mf-pi/README.md` (drop MinIO refs).
 - [ ] **#17 Build, test, verify, manual check** — gofmt/build/vet/test (ateapi, atelet, internal/volume,
       mf-pi/admin); `validate-templates.sh`; `make verify`; manual: create actor → write
       `/data/pi-agent` file → refresh image (delete+recreate) → confirm file persists.

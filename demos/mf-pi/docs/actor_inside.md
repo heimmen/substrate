@@ -144,5 +144,5 @@ cd demos/mf-pi && ./deploy.sh          # 生产（端口 58681）
 # 管理页：http://localhost:59681/usermanagement/  (admin / mf@pass2026)
 ```
 
-更完整的端到端说明见 [README.md](./README.md)；PV 设计细节见
+更完整的端到端说明见 [README.md](../README.md)；PV 设计细节见
 `save_userdata_pv.md` 与 `perUserDataVolume.md`。

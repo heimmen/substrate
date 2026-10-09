@@ -112,5 +112,5 @@ demo-mf-pi_usage() {
   echo "  Optional env: MFPI_WORKER_REPLICAS (default 4; max concurrently-active users)"
   echo "  Deploys: mf-agent actors + the mfpi-admin user-management UI (user data persists on a sticky per-actor volume)"
   echo "  UI access: http://<hostname>:58681/usermanagement/ (via run-nginx.sh)"
-  echo "  See demos/mf-pi/mfpi.md for the walkthrough."
+  echo "  See demos/mf-pi/docs/mfpi.md for the walkthrough."
 }

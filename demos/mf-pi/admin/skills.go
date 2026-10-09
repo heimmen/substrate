@@ -11,7 +11,7 @@
 // Actors run a background loop that conditionally pulls the manifest and
 // applies changed skills into their $PI_CODING_AGENT_DIR/skills, so no control
 // plane, volume plugin, or per-actor plumbing is involved (see
-// deploy_skill_to_actor.md for the full design).
+// docs/deploy_skill_to_actor.md for the full design).
 //
 // The store deliberately only ever touches directories it manages: an
 // install/remove rewrites a skill under skills/<name>/ and the manifest. It

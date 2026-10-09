@@ -96,7 +96,7 @@ RUNNING：
 - `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` — 空 Secret + SA Role/RoleBinding +
   Deployment env（两套 namespace 各一份）。
 - `validate-templates.sh` — 更新精确的 doc-kind 断言列表。
-- `README.md` / `mfpi.md` — 补充文档。
+- `demos/mf-pi/README.md` / `mfpi.md` — 补充文档。
 
 ### 不改
 `mf-cc`、`cmd/`、`pkg/`、`internal/`、`Dockerfile`、`nginx*.conf`、`deploy*.sh`。
@@ -241,7 +241,7 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
 
 > 逐项完成后把 `- [ ]` 改为 `- [x]`。
 
-- [x] 1. 撰写本文档（`injectDeepsseekKey.md`）并同步 `README.md` / `mfpi.md`
+- [x] 1. 撰写本文档（`injectDeepsseekKey.md`）并同步 `demos/mf-pi/README.md` / `mfpi.md`
       （README 新增「每用户专属 DeepSeek API Key」一节 + 管理 UI/测试脚本条目；
       mfpi.md 补充命名表行与本文档指针）
 - [x] 2. `admin/apikey.go`：`keyStore`/`secretKeyStore` + `actorAuthClient`/`httpActorAuthClient` + 驱动流程

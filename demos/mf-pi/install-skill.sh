@@ -5,7 +5,7 @@
 # The admin is the authoritative source for skills that are distributed to
 # every user (actor). It validates the package (must contain a SKILL.md, and
 # reject ../ / absolute path entries), stores it under $SKILLS_DIR, and rewrites
-# the manifest. See deploy_skill_to_actor.md for the full design.
+# the manifest. See docs/deploy_skill_to_actor.md for the full design.
 #
 # Usage: install-skill.sh <name> <file.tgz|file.zip|dir>
 #   - A .tgz/.zip is uploaded as-is.

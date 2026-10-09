@@ -6,7 +6,7 @@
 # The admin server first persists the key to the mfpi-user-provider-keys
 # Secret, resumes the user's actor if it is suspended, then drives the key
 # into the actor's pi-web auth store (so it outranks DEEPSEEK_API_KEY). See
-# injectDeepsseekKey.md for the full design.
+# docs/injectDeepsseekKey.md for the full design.
 #
 # The response is printed as JSON; a non-2xx status exits non-zero. Honors the
 # MFPI_NAMESPACE env var (default ate-demo-mf-pi; the mfpi-admin in the
