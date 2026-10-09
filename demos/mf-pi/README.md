@@ -698,6 +698,17 @@ cd demos/mf-pi
 ./clear-user-apikey-test.sh alice     # 清除测试用户专属 DeepSeek Key
 ```
 
+### 故障恢复脚本
+
+```bash
+./recover-actors.sh                   # 一次性修复「所有 actor 连不上」的 golden base 故障（生产）
+./recover-actors.sh --dry-run         # 只打印计划，不做任何改动
+./recover-actors.sh --test            # 对测试环境执行（自动切到 mfpi-test/59880）
+./refresh-actor.sh alice              # 单个用户「保数据」重建（见脚本头部说明）
+./unstick-refresh.sh alice bob        # 批量解卡 + 重建（卡在 SUSPENDING 等状态）
+./remove-pv.sh alice                  # 删除某用户的 sticky 数据卷（不可恢复）
+```
+
 ### 端到端测试脚本
 
 ```bash
@@ -712,6 +723,57 @@ cd demos/mf-pi
 > 明确报错/跳过而不是给出误导性的通过。
 
 ## 故障排查
+
+### 所有用户都连不上（golden base 快照损坏）→ `./recover-actors.sh`
+
+**现象**：重部署（尤其是**改了容器名/镜像**，如 `pi-web → mf-agent`）之后，
+**所有**用户打开 `/<user>/` 都连不上：
+
+- `kubectl ate get actor <u>` 显示 `STATUS_RUNNING`，但实际**应用容器没起来**
+  （沙箱里只有 `pause` 占位容器），路由器直连返回
+  `503 upstream connect error ... connection refused`（`error 111`）。
+- **新用户**则完全起不来，resume 直接失败并卡在 `STATUS_RESUMING`：
+
+  ```
+  while running `runsc restore`: exit status 128
+  failed to load kernel: vfs.CompleteRestore() failed: failed to complete restore
+  for filesystem type "9p": failed to walk "skills" ... in mount
+  "mf-agent:/data/pi-agent": no such file or directory
+  ```
+
+**原因**：ActorTemplate 的 spec 不可变，改动后 controller 会**重新生成 golden base
+快照**（`status.goldenSnapshot`，本仓库的 `actortemplate_controller.go`）。重新生成的
+快照对本 demo 的**每用户外部卷（sticky `/data/pi-agent`）不可恢复**：runsc 恢复 9p 挂
+载时要求用户卷里存在快照记录过的 `skills` 目录，而新用户的卷是空的。于是老用户
+「恢复成功」但应用容器实际没起来，新用户直接失败。
+
+**修复（一条命令）**：
+
+```bash
+cd demos/mf-pi
+./recover-actors.sh --dry-run     # 先看计划
+./recover-actors.sh -y            # 执行
+```
+
+脚本做三件事（详见 [recover-actors.sh](recover-actors.sh) 头部注释）：
+
+1. **清空各档位模板的 `status.goldenSnapshot`**。controller 对 `phase=Ready` 是
+   no-op，不会重新生成；此后 resume 走 **boot from scratch**（
+   `workflow_resume.go`：`GoldenSnapshot` 为空即跳过恢复）——**新用户也随之修好**。
+2. 对每个**未在服务**的 actor：解卡（能 suspend 就 suspend，卡死则删掉其绑定的
+   worker pod 释放）→ delete → create（沿用原模板，档位不变）→ resume。
+   sticky 数据卷（会话历史、skills、`auth.json`、projects）**完整保留**，用户密码不变。
+3. 通过 router（绕过 nginx 鉴权）逐个校验真的 `HTTP 200` 在服务。
+
+**代价**：在平台把 golden base 修好之前，每个 actor 的**首次**恢复是冷启动
+（~25–40s，浏览器侧由「Agent 正在载入」提示页覆盖），之后的挂起/恢复仍走 actor 自己
+的快照，依然很快（实测 6s）。注意：`phase=Ready` 是 no-op，**不会自动重新生成**
+golden 快照；要重新生成需把 `status.phase` 置回 `Initial`（会再次产生坏快照，建议等
+平台修复后再做）。
+
+> [!NOTE]
+> 需要 router 的 port-forward 才能判断 actor「是否真的在服务」。请先
+> `./run-nginx.sh`（生产，58680）或 `./run-nginx-test.sh`（测试，59880）。
 
 ### 访问用户时返回 503：`no free workers available`
 
