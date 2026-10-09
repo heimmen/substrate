@@ -11,6 +11,8 @@ supervisor 同时运行两者（与 pi-web 仓库 `docker/scripts/run-container.
 器文件系统做 Full 快照，恢复时原样还原，会话、skills 与配置因此在挂起与恢复之间
 持续存在。
 
+面向外部组件开发的完整 HTTP/WebSocket 接口说明见 [`user_agent_api.md`](./user_agent_api.md)（管理面 REST + 用户 Agent pi-web API，含参数、示例、返回值与错误处理）。
+
 ## 前提条件
 
 - 已安装 Agent Substrate 的 k8s 集群
