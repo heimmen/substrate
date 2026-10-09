@@ -808,6 +808,32 @@ kubectl ate resume actor <u> -a <atespace>
 - 若只是 CPU 不足（新 worker 卡 Pending、`Insufficient cpu`）而没有任何 Actor 卡
   死不散，把没有用户使用的 mid/large 池缩到 0 即可释放 CPU，不必动 Actor。
 
+### 上传大文件返回 413（`Request Entity Too Large`）
+
+**原因**：nginx 的 `client_max_body_size` 内置默认是 **1m**；超过就会被 nginx 直接
+以 `413` 拒绝，请求根本到不了 pi-web / mfpi-admin。
+
+**当前配置**：`nginx.conf` 与 `nginx-test.conf` 的 server 块都显式设为
+**`client_max_body_size 512m;`**（覆盖 pi-web 上传与管理 UI 的 skill 包；mfpi-admin
+自身对 skill 包的限额是 64MiB/包、32MiB/文件）。要调整上限就改这两处，然后重建
+nginx 容器/镜像。
+
+**排查**：
+
+```bash
+# 看运行的容器里生效值（应为 512m；若为 1m 或缺失，说明容器是旧配置）
+docker exec mfpi-nginx nginx -T | grep client_max_body_size
+# 重建生效（生产）：
+./build-image.sh && docker rm -f mfpi-nginx && ./run-nginx.sh
+# 测试环境（bind-mount nginx-test.conf，重建容器即可）：
+docker rm -f mfpi-nginx-test && ./run-nginx-test.sh
+```
+
+> [!NOTE]
+> 管理 UI（`/usermanagement/`）的 skill 上传**经过 nginx**，受此限制；CLI
+> `./install-skill.sh` 走临时 port-forward 直连 mfpi-admin，**不经过 nginx**，因此
+> 不受该限制。
+
 ### `/usermanagement/` 打不开（404 或被当作用户路径路由）
 
 **原因**：`mfpi-nginx` 镜像是根据 `nginx.conf` 构建的。修改 `nginx.conf` 后**必须
