@@ -1468,6 +1468,12 @@ spec:
           value: mfpi-user-provider-keys
         - name: KEYS_NAMESPACE
           value: ate-demo-mf-pi-test
+        # Curated providers the usermanagement UI can store a per-user key
+        # for: comma-separated, each entry "id" or "id=Display Name" (the id
+        # is pi-web's provider id). Blank/missing falls back to the built-in
+        # default list in admin/providers.go.
+        - name: KEY_PROVIDERS
+          value: "deepseek=DeepSeek,openai=OpenAI,openrouter=OpenRouter,moonshotai=Moonshot AI (Kimi),zai=Z.AI (GLM),qwen-token-plan=Qwen (通义千问),minimax=MiniMax,groq=Groq,mistral=Mistral,xai=xAI (Grok)"
         - name: EXPIRY_CONFIGMAP
           value: mfpi-user-expirations
         - name: EXPIRY_NAMESPACE

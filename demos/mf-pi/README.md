@@ -221,9 +221,9 @@ pi-web 前端所有请求（API `/api/...`、插件资源 `/pi-web-plugins/...`�
   功，页面会在首次访问时再触发恢复）
 - **删除用户**：先挂起再删除（对应 `delete-user.sh`），并**同时 purge 该用户的
   持久卷**（见下文「用户数据持久化 → 彻底删除（purge）」）
-- **DeepSeek Key**：每行显示该用户是否已设专属 DeepSeek API Key（「已设置 /
+- **Provider Key**：每行显示该用户是否已设专属 provider API Key（「已设置 /
   未设置」徽标），并提供「**设置 Key**」/「**清除**」按钮，为指定用户动态注入或
-  退出其专属 key（详见下文「每用户专属 DeepSeek API Key」）
+  退出其专属 key（详见下文「每用户专属 provider API Key」）
 
 访问方式：`http://<hostname>:58681/usermanagement/`（经 mfpi-nginx 代理转发到
 `mfpi-admin` Service）。
@@ -271,46 +271,58 @@ pi-web 内建 `deepseek` provider（OpenAI 兼容，`https://api.deepseek.com`�
 改代码。部署时把 `DEEPSEEK_API_KEY` 注入 Actor 即可；用户在模型选择器中选择
 `deepseek/deepseek-chat` 或 `deepseek/deepseek-reasoner`。
 
-### 每用户专属 DeepSeek API Key
+### 每用户专属 provider API Key
 
-`DEEPSEEK_API_KEY` env 是**共享**的（来自 ActorTemplate 上固定的
+`DEEPSEEK_API_KEY` 等 provider env 是**共享**的（来自 ActorTemplate 上固定的
 `secretKeyRef`），且平台层无法在运行期给某个 Actor 单独注入 env/Secret：env 冻结
 在 Full 快照里、恢复时原样还原，也没有外部途径写入 Actor 文件系统。因此本演示为
-**单个用户动态设置 / 清除其专属 DeepSeek API key** 的方式是：经路由器驱动该用户
+**单个用户动态设置 / 清除其专属 provider API key** 的方式是：经路由器驱动该用户
 Actor 内 pi-web 自身的 api-key 登录流程，把凭据写进该 Actor 的 `auth.json`
 （`/data/pi-agent/auth.json`）。一个用户 == 一个 Actor，正好构成 per-user 的 key
 面。完整设计见 `docs/injectDeepsseekKey.md`。
 
-pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优先于** `DEEPSEEK_API_KEY`
-env（无需重启）；清除后该用户回退到 env key。
+provider 从管理面的**精选 OpenAI 兼容列表**中选择（`deepseek`、`openai`、
+`openrouter`、`moonshotai`、`zai`、`qwen-token-plan`、`minimax`、`groq`、
+`mistral`、`xai`；可用 `KEY_PROVIDERS` 覆盖，见 `GET /usermanagement/api/providers`）。
+**每个用户同一时间只保留一个 provider**：存入不同 provider 即为切换，服务端会先让
+该 Actor 退出旧 provider 登录。Key 落库后，该 provider 的模型会自动出现在该用户的
+pi-web 模型选择器中，**无需**修改 `models.json`。
 
-**界面（管理 UI）**：`/usermanagement/` 每行显示「DeepSeek Key」徽标（已设置 /
-未设置），并可用「**设置 Key**」（弹出输入 `sk-...`）或「**清除**」按钮操作。
+pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优先于** provider 的 env
+（如 `DEEPSEEK_API_KEY`，无需重启）；清除后该用户回退到 env key。
 
-**CLI**（经临时 port-forward 调 mfpi-admin REST `api/users/<name>/apikey`）：
+**界面（管理 UI）**：`/usermanagement/` 每行显示专属 Key 徽标（已设置 /
+未设置），并可用「**设置 Key**」（选择 provider 并输入 `sk-...`）或「**清除**」按钮操作。
+
+**CLI**（`set-user-apikey.sh <username> <api-key> [provider-id]`，经临时 port-forward
+调 mfpi-admin REST `api/users/<name>/apikey`）：
 
 ```bash
-./set-user-apikey.sh alice sk-...    # 设置（覆盖）；actor 挂起时自动先恢复
-./clear-user-apikey.sh alice         # 清除（幂等）；agent 回退到 env key
+./set-user-apikey.sh alice sk-...         # 默认 DeepSeek；actor 挂起时自动先恢复
+./set-user-apikey.sh alice sk-... openai  # 指定 provider（切换时先退出旧 provider）
+./clear-user-apikey.sh alice              # 清除（幂等）；agent 回退到 env key
 # 测试环境（atespace mfpi-test）：
 ./set-user-apikey-test.sh alice sk-...
 ./clear-user-apikey-test.sh alice
 ```
 
-**持久化**：key 同时写入预创建的 Secret `mfpi-user-provider-keys`（username →
-key，见 `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽标；Actor 删除
+**持久化**：key 同时写入预创建的 Secret `mfpi-user-provider-keys`（username → JSON
+`{"providerId":"...","apiKey":"..."}`；旧版本写入的裸 Key 仍按 `deepseek` 读回，见
+`mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽标；Actor 删除
 重建后 key 仍在 Secret 中，重新创建用户时会自动重放注入。此外 `mfpi-admin` 内有
 一个每 30s 的 reconcile 循环：为已 `RUNNING` 但凭据尚未注入的 actor 重放 stored
-key，因此任何 resume 路径（包括 `refresh-actor.sh` 的删除重建）都会自动找回 key；
-删除用户时该 key 一并清除。
+key（重试退避按 user+provider 计），因此任何 resume 路径（包括 `refresh-actor.sh`
+的删除重建）都会自动找回 key；删除用户时该 key 一并清除。
 
 **语义**：
 
 - 设置 = **先写 Secret，再**（必要时恢复并）注入；注入失败返回 502 并说明「key 已
-  存储」，可重试或等下次恢复时自动应用（提交记录优先）。
-- 清除 = **先**驱动 actor 退出 DeepSeek 登录（回退 env），**成功后才**删除 Secret
-  条目；logout 失败返回 502 且保留条目；actor 已删除时直接清空 Secret 条目（幂
-  等）。
+  存储」，可重试或等下次恢复时自动应用（提交记录优先）。若此前存的是**另一个**
+  provider，则**先**让 actor 退出旧 provider、**成功后才**提交新 Key（退出失败返回
+  502，记录仍留在旧 provider，可重试）。
+- 清除 = **先**驱动 actor 退出**所记录 provider** 的登录（回退 env），**成功后才**
+  删除 Secret 条目；logout 失败返回 502 且保留条目；没有存储记录时直接返回成功、
+  不触碰 actor（幂等）。
 - 设置 / 清除都会在需要时自动恢复 `SUSPENDED` 的 actor。挂起 / 恢复（Full 快照）
   保留 `auth.json`，因此已设的 key 在挂起 / 恢复后依然生效。
 
@@ -445,7 +457,7 @@ kubectl ate purge volumes <user> -a <atespace> -t <templateNS>/<templateName>
 kubectl ate resume actor alice -a mfpi   # 恢复 → 自动挂回同一持久卷
 ```
 
-恢复后，alice 的专属 DeepSeek key（`auth.json`）、已安装的 skills 与会话历史会自动
+恢复后，alice 的专属 provider key（`auth.json`）、已安装的 skills 与会话历史会自动
 出现，**无需**重新驱动注入。完整设计见 `docs/save_userdata_pv.md` 与
 `docs/perUserDataVolume.md`。
 
@@ -622,13 +634,31 @@ go test -cover ./...
 | `TestReconcileExpire*` | 激活有效期到期自动挂起 |
 | `TestReconcileIdle*` | 空闲自动挂起（仅 mid/small、久闲、非活跃跳过等） |
 | `TestHandleSetTier*` / `TestHandleCreateUserUsesTierTemplate` | 资源档位设置与模板选择 |
-| `TestHandleSetAPIKey*` / `TestReconcileInjectsKey*` | 每用户 DeepSeek Key 注入 |
+| `TestHandleSetAPIKey*` / `TestReconcileInjectsKey*` | 每用户 provider Key 注入与 provider 切换 |
+| `TestParseProviderOptions` / `TestSecretKeyStoreRoundTrip` | provider 列表解析、Secret 存取与旧格式兼容 |
+| `TestLivePiWebProviderKey` | （**默认跳过**）可选的真机联调：对真实 pi-web 走完整登录流 |
 | `TestSkill*` / `TestInternalManifestETag` / `TestApplySkills*` | skill 分发与「立即应用」扇出 |
 | `TestHandleListUsers*` / `TestHandleDeleteUser*` | 列表汇总与删除清理 |
 
 > [!NOTE]
 > 若本地 `GOFLAGS`/GOPATH 缓存权限受限导致构建报错，可指定一个可写的
 > `GOCACHE` 后重试：`GOCACHE=/tmp/mfpi-gocache go test ./...`。
+
+> [!TIP]
+> `TestLivePiWebProviderKey` 是一个**默认跳过**的可选联调用例，用真实 pi-web 跑
+> 一遍 admin 实际使用的 key 注入流程（存入 → 读回 `source=stored` → 清除）。需要
+> 一个可达的 pi-web 与一个真实 key：
+>
+> ```bash
+> MFPI_LIVE_PIWEB_URL=http://127.0.0.1:8599 \
+> MFPI_LIVE_PROVIDER_ID=siliconflow \
+> MFPI_LIVE_PROVIDER_KEY=sk-... \
+> go test -run TestLivePiWebProviderKey -v .
+> ```
+>
+> 加 `MFPI_LIVE_KEEP=1` 可保留凭据，便于随后用 `pi --model <provider>/<model>` 做
+> 一次真实推理验证。provider 既可以来自 pi-web 内置注册表，也可以只在 agent 目录的
+> `models.json` 里定义（自定义 OpenAI 兼容端点）。
 
 ## 测试环境（Test Environment）
 
@@ -696,8 +726,8 @@ cd demos/mf-pi
 ./create-user-test.sh alice           # 在 mfpi-test 建用户（模板 ate-demo-mf-pi-test/mf-pi）
 ./list-users-test.sh                  # 列出测试用户
 ./delete-user-test.sh alice           # 删除测试用户
-./set-user-apikey-test.sh alice sk-...  # 设置测试用户专属 DeepSeek Key
-./clear-user-apikey-test.sh alice     # 清除测试用户专属 DeepSeek Key
+./set-user-apikey-test.sh alice sk-...  # 设置测试用户专属 provider Key（可加 provider-id）
+./clear-user-apikey-test.sh alice     # 清除测试用户专属 provider Key
 ```
 
 ### 故障恢复脚本

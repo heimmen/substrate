@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Set (or overwrite) the per-user DeepSeek API key for an mf-pi user by
+# Set (or overwrite) the per-user provider API key for an mf-pi user by
 # calling the mfpi-admin REST API (svc/mfpi-admin:8080) over a temporary
 # kubectl port-forward.
 #
+# The provider defaults to DeepSeek; pass a third argument to store a key for
+# another OpenAI-compatible provider (openai, openrouter, moonshotai, zai,
+# groq, ...). One provider is kept per user: storing a different one switches,
+# logging the previous provider out of the actor first. A configured
+# provider's models then show up in that user's pi-web model picker.
+#
 # The admin server first persists the key to the mfpi-user-provider-keys
 # Secret, resumes the user's actor if it is suspended, then drives the key
-# into the actor's pi-web auth store (so it outranks DEEPSEEK_API_KEY). See
-# docs/injectDeepsseekKey.md for the full design.
+# into the actor's pi-web auth store (so it outranks the provider's env var,
+# e.g. DEEPSEEK_API_KEY). See docs/injectDeepsseekKey.md for the full design.
 #
 # The response is printed as JSON; a non-2xx status exits non-zero. Honors the
 # MFPI_NAMESPACE env var (default ate-demo-mf-pi; the mfpi-admin in the
@@ -21,14 +27,17 @@ NAMESPACE="${MFPI_NAMESPACE:-ate-demo-mf-pi}"
 DNS1123='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 
 usage() {
-  echo "Usage: $0 <username> <api-key>" >&2
+  echo "Usage: $0 <username> <api-key> [provider-id]" >&2
   echo "  <username> must match DNS-1123: ${DNS1123}" >&2
+  echo "  [provider-id] defaults to deepseek; GET /api/providers on the admin" >&2
+  echo "                lists the provider ids this deployment accepts." >&2
   exit 2
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -ge 2 && $# -le 3 ]] || usage
 username="$1"
 api_key="$2"
+provider_id="${3:-deepseek}"
 
 if ! [[ "$username" =~ $DNS1123 ]]; then
   echo "Invalid username '$username': must match ${DNS1123}" >&2
@@ -36,6 +45,12 @@ if ! [[ "$username" =~ $DNS1123 ]]; then
 fi
 if [[ -z "$api_key" || "$api_key" == *'"'* || "$api_key" == *'\'* ]]; then
   echo "Invalid API key: must be non-empty and contain no double quotes or backslashes" >&2
+  exit 2
+fi
+# Provider ids are pi-web's own ids; keep them to a conservative charset so the
+# JSON payload needs no escaping.
+if [[ ! "$provider_id" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+  echo "Invalid provider id '$provider_id': expected a lowercase id like deepseek or openai" >&2
   exit 2
 fi
 
@@ -72,7 +87,7 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
-payload="{\"apiKey\":\"${api_key}\"}"
+payload="{\"apiKey\":\"${api_key}\",\"providerId\":\"${provider_id}\"}"
 http_code="$(
   curl -sS -o "$BODY_FILE" -w '%{http_code}' \
     -X POST "http://127.0.0.1:${PORT}/api/users/${username}/apikey" \

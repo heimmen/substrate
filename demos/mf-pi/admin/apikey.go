@@ -1,14 +1,24 @@
-// Per-user DeepSeek API-key plumbing for the mf-pi admin server.
+// Per-user provider API-key plumbing for the mf-pi admin server.
 //
 // The platform cannot inject a per-actor env var or Secret: container env is
 // frozen into a Full snapshot at suspend and restored verbatim on resume, and
 // there is no external path into an actor's filesystem. Instead pi-web re-reads
 // its credential file (<agentDir>/auth.json) on every model call, and a stored
-// credential outranks the DEEPSEEK_API_KEY env. So a per-user key is set by
-// driving pi-web's own api-key login flow over the atenet router, which writes
-// auth.json inside the actor. Since each mf-pi user is one actor, this is
-// exactly per-user. Keys are also persisted to a pre-created Secret so the UI
-// can show set/unset and keys survive actor delete+recreate.
+// credential outranks the provider's env var (e.g. DEEPSEEK_API_KEY). So a
+// per-user key is set by driving pi-web's own api-key login flow over the
+// atenet router, which writes auth.json inside the actor. Since each mf-pi user
+// is one actor, this is exactly per-user. Keys are also persisted to a
+// pre-created Secret so the UI can show set/unset and keys survive actor
+// delete+recreate.
+//
+// The flow is provider-generic. pi-web ships a built-in registry of
+// OpenAI-compatible providers (openai, openrouter, moonshotai, zai, qwen,
+// minimax, groq, ...) that each carry their own base URL, model catalog and
+// interactive api-key login, so all this plumbing needs is the provider id: once
+// the credential is stored, that provider's models show up in the user's model
+// picker on their own. One provider is kept per user — setting a different one
+// switches, logging the previous provider out first. The curated list of
+// selectable providers lives in providers.go.
 package main
 
 import (
@@ -27,28 +37,51 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// providerKey is one user's stored provider credential: which provider the key
+// belongs to, and the key itself.
+type providerKey struct {
+	ProviderID string `json:"providerId"`
+	APIKey     string `json:"apiKey"`
+}
+
+// parseStoredKey decodes one Secret value into a providerKey. Entries written
+// before multi-provider support hold a bare API key rather than JSON; those are
+// read back as the default provider so existing users keep working across the
+// upgrade.
+func parseStoredKey(raw string) providerKey {
+	var pk providerKey
+	if err := json.Unmarshal([]byte(raw), &pk); err == nil && pk.APIKey != "" {
+		if pk.ProviderID == "" {
+			pk.ProviderID = defaultProviderID
+		}
+		return pk
+	}
+	return providerKey{ProviderID: defaultProviderID, APIKey: raw}
+}
+
 // keyStore persists per-user provider API keys. Implemented by secretKeyStore
 // in production and by a fake in tests.
 type keyStore interface {
-	// Get returns the stored key for the user, and whether one exists.
-	Get(name string) (key string, ok bool)
-	// Set stores (overwrites) the key for the user.
-	Set(name, key string) error
-	// Delete removes any stored key for the user (idempotent).
+	// Get returns the stored credential for the user, and whether one exists.
+	Get(name string) (key providerKey, ok bool)
+	// Set stores (overwrites) the credential for the user.
+	Set(name string, key providerKey) error
+	// Delete removes any stored credential for the user (idempotent).
 	Delete(name string) error
 }
 
-// secretKeyStore stores per-user keys in a Kubernetes Secret (username -> key),
-// mirroring them into an in-memory map. It mirrors configMapPasswordStore but
-// is backed by a Secret and only ever Get→Updates (never Creates): the admin
-// SA's RBAC grants get/update on the pre-created Secret and cannot create it.
+// secretKeyStore stores per-user keys in a Kubernetes Secret (username -> JSON
+// credential), mirroring them into an in-memory map. It mirrors
+// configMapPasswordStore but is backed by a Secret and only ever Get→Updates
+// (never Creates): the admin SA's RBAC grants get/update on the pre-created
+// Secret and cannot create it.
 type secretKeyStore struct {
 	clientset kubernetes.Interface
 	namespace string
 	name      string
 
 	mu   sync.RWMutex
-	data map[string]string // username -> key
+	data map[string]providerKey // username -> credential
 }
 
 func newSecretKeyStore(clientset kubernetes.Interface, namespace, name string) *secretKeyStore {
@@ -56,7 +89,7 @@ func newSecretKeyStore(clientset kubernetes.Interface, namespace, name string) *
 		clientset: clientset,
 		namespace: namespace,
 		name:      name,
-		data:      map[string]string{},
+		data:      map[string]providerKey{},
 	}
 }
 
@@ -73,24 +106,24 @@ func (s *secretKeyStore) load(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data = make(map[string]string, len(sec.Data))
+	s.data = make(map[string]providerKey, len(sec.Data))
 	for k, v := range sec.Data {
-		s.data[k] = string(v)
+		s.data[k] = parseStoredKey(string(v))
 	}
 	return nil
 }
 
-func (s *secretKeyStore) Get(name string) (string, bool) {
+func (s *secretKeyStore) Get(name string) (providerKey, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	k, ok := s.data[name]
 	return k, ok
 }
 
-func (s *secretKeyStore) Set(name, key string) error {
+func (s *secretKeyStore) Set(name string, key providerKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := make(map[string]string, len(s.data)+1)
+	next := make(map[string]providerKey, len(s.data)+1)
 	for k, v := range s.data {
 		next[k] = v
 	}
@@ -108,7 +141,7 @@ func (s *secretKeyStore) Delete(name string) error {
 	if _, ok := s.data[name]; !ok {
 		return nil
 	}
-	next := make(map[string]string, len(s.data)-1)
+	next := make(map[string]providerKey, len(s.data)-1)
 	for k, v := range s.data {
 		if k != name {
 			next[k] = v
@@ -125,7 +158,7 @@ func (s *secretKeyStore) Delete(name string) error {
 // SA is not granted create, and the Secret is pre-created in the manifests.
 // On NotFound it returns a clear error telling the operator to apply the
 // manifests.
-func (s *secretKeyStore) persist(data map[string]string) error {
+func (s *secretKeyStore) persist(data map[string]providerKey) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -138,7 +171,11 @@ func (s *secretKeyStore) persist(data map[string]string) error {
 	}
 	dataBytes := make(map[string][]byte, len(data))
 	for k, v := range data {
-		dataBytes[k] = []byte(v)
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("encoding stored key for %q: %w", k, err)
+		}
+		dataBytes[k] = raw
 	}
 	sec.Data = dataBytes
 	_, err = s.clientset.CoreV1().Secrets(s.namespace).Update(ctx, sec, metav1.UpdateOptions{})
@@ -148,12 +185,13 @@ func (s *secretKeyStore) persist(data map[string]string) error {
 // actorAuthClient drives a per-user key into an actor's pi-web auth store.
 // host is the actor's router hostname (see actorHostname).
 type actorAuthClient interface {
-	setPersonalKey(ctx context.Context, host, apiKey string) error
-	clearPersonalKey(ctx context.Context, host string) error
-	// isKeyStored reports whether the actor currently has a stored deepseek
-	// provider credential (source=="stored"). Used by the reconciler to avoid
-	// re-driving the login flow on actors that already hold the key.
-	isKeyStored(ctx context.Context, host string) (bool, error)
+	setPersonalKey(ctx context.Context, host, providerID, apiKey string) error
+	clearPersonalKey(ctx context.Context, host, providerID string) error
+	// isKeyStored reports whether the actor currently has a stored credential
+	// for providerID (source=="stored"), as opposed to one inherited from the
+	// provider's environment variable or models.json. Used by the reconciler to
+	// avoid re-driving the login flow on actors that already hold the key.
+	isKeyStored(ctx context.Context, host, providerID string) (bool, error)
 }
 
 // httpActorAuthClient implements actorAuthClient over the atenet router. Each
@@ -193,69 +231,69 @@ func actorHostname(name, atespace string) string {
 	return name + "." + atespace + actorHostSuffix
 }
 
-// setPersonalKey drives pi-web's api-key login flow for the deepseek provider
-// and verifies the key is stored.
-func (c *httpActorAuthClient) setPersonalKey(ctx context.Context, host, apiKey string) error {
+// setPersonalKey drives pi-web's api-key login flow for providerID and verifies
+// the key is stored.
+func (c *httpActorAuthClient) setPersonalKey(ctx context.Context, host, providerID, apiKey string) error {
 	if err := c.waitForWeb(ctx, host); err != nil {
 		return err
 	}
 
 	var state authFlowState
-	if err := c.doJSON(ctx, host, http.MethodPost, "/api/machines/local/auth/api-key/interactive", map[string]string{"providerId": "deepseek"}, &state); err != nil {
-		return fmt.Errorf("start api-key login: %w", err)
+	if err := c.doJSON(ctx, host, http.MethodPost, "/api/machines/local/auth/api-key/interactive", map[string]string{"providerId": providerID}, &state); err != nil {
+		return fmt.Errorf("start %s api-key login: %w", providerID, err)
 	}
 	if state.FlowID == "" {
 		return fmt.Errorf("api-key login flow missing flowId")
 	}
 
 	if state.Prompt != nil {
-		return c.respondAndVerify(ctx, host, state.FlowID, state.Prompt.RequestID, apiKey)
+		return c.respondAndVerify(ctx, host, providerID, state.FlowID, state.Prompt.RequestID, apiKey)
 	}
 	prompt, err := c.pollForRequestID(ctx, host, state.FlowID)
 	if err != nil {
 		return err
 	}
-	return c.respondAndVerify(ctx, host, state.FlowID, prompt.RequestID, apiKey)
+	return c.respondAndVerify(ctx, host, providerID, state.FlowID, prompt.RequestID, apiKey)
 }
 
-// isKeyStored reports whether the actor's deepseek provider currently holds a
-// stored credential (source=="stored"), as opposed to one inherited from the
-// environment (DEEPSEEK_API_KEY). A Pi-web that is not yet reachable returns an
+// isKeyStored reports whether the actor's providerID currently holds a stored
+// credential (source=="stored"), as opposed to one inherited from the
+// environment or models.json. A pi-web that is not yet reachable returns an
 // error so callers can treat it as "unknown" and retry.
-func (c *httpActorAuthClient) isKeyStored(ctx context.Context, host string) (bool, error) {
+func (c *httpActorAuthClient) isKeyStored(ctx context.Context, host, providerID string) (bool, error) {
 	providers, err := c.getProviders(ctx, host)
 	if err != nil {
 		return false, err
 	}
 	for i := range providers {
-		if providers[i].ID == "deepseek" && providers[i].Status.Source == "stored" {
-			return true, nil
+		if providers[i].ID == providerID {
+			return providers[i].Status.Source == "stored", nil
 		}
 	}
 	return false, nil
 }
 
-func (c *httpActorAuthClient) clearPersonalKey(ctx context.Context, host string) error {
+func (c *httpActorAuthClient) clearPersonalKey(ctx context.Context, host, providerID string) error {
 	if err := c.waitForWeb(ctx, host); err != nil {
 		return err
 	}
 	var resp struct {
 		Accepted bool `json:"accepted"`
 	}
-	if err := c.doJSON(ctx, host, http.MethodPost, "/api/machines/local/auth/logout", map[string]string{"providerId": "deepseek"}, &resp); err != nil {
-		return fmt.Errorf("logout deepseek: %w", err)
+	if err := c.doJSON(ctx, host, http.MethodPost, "/api/machines/local/auth/logout", map[string]string{"providerId": providerID}, &resp); err != nil {
+		return fmt.Errorf("logout %s: %w", providerID, err)
 	}
 	if !resp.Accepted {
-		return fmt.Errorf("deepseek logout not accepted")
+		return fmt.Errorf("%s logout not accepted", providerID)
 	}
-	return c.verifyProvider(ctx, host, "")
+	return c.verifyProvider(ctx, host, providerID, "")
 }
 
 // respondAndVerify submits the api key to the flow and checks the resulting
 // provider state is "stored". pi-web's respond resolves the prompt and returns
 // the flow in state "running"; the login promise then persists the credential
 // and only afterwards marks the flow "complete", so we poll for completion.
-func (c *httpActorAuthClient) respondAndVerify(ctx context.Context, host, flowID, requestID, apiKey string) error {
+func (c *httpActorAuthClient) respondAndVerify(ctx context.Context, host, providerID, flowID, requestID, apiKey string) error {
 	var state authFlowState
 	if err := c.doJSON(ctx, host, http.MethodPost, "/api/machines/local/auth/oauth/"+flowID+"/respond", map[string]string{
 		"requestId": requestID,
@@ -274,7 +312,7 @@ func (c *httpActorAuthClient) respondAndVerify(ctx context.Context, host, flowID
 			return err
 		}
 	}
-	if err := c.verifyProvider(ctx, host, "stored"); err != nil {
+	if err := c.verifyProvider(ctx, host, providerID, "stored"); err != nil {
 		return fmt.Errorf("verify stored key: %w", err)
 	}
 	return nil
@@ -355,28 +393,28 @@ func (c *httpActorAuthClient) pollForRequestID(ctx context.Context, host, flowID
 	}
 }
 
-// verifyProvider fetches the providers list and checks the deepseek entry's
+// verifyProvider fetches the providers list and checks providerID's
 // status.source. want=="" asserts it is no longer "stored".
-func (c *httpActorAuthClient) verifyProvider(ctx context.Context, host, want string) error {
+func (c *httpActorAuthClient) verifyProvider(ctx context.Context, host, providerID, want string) error {
 	providers, err := c.getProviders(ctx, host)
 	if err != nil {
 		return err
 	}
 	var found *authProvider
 	for i := range providers {
-		if providers[i].ID == "deepseek" {
+		if providers[i].ID == providerID {
 			found = &providers[i]
 			break
 		}
 	}
 	if found == nil {
-		return fmt.Errorf("deepseek provider not present in auth providers list")
+		return fmt.Errorf("%s provider not present in auth providers list", providerID)
 	}
 	if want != "" && found.Status.Source != want {
-		return fmt.Errorf("expected deepseek status.source=%q, got %q (configured=%v)", want, found.Status.Source, found.Status.Configured)
+		return fmt.Errorf("expected %s status.source=%q, got %q (configured=%v)", providerID, want, found.Status.Source, found.Status.Configured)
 	}
 	if want == "" && found.Status.Source == "stored" {
-		return fmt.Errorf("deepseek still shows status.source=stored after clear")
+		return fmt.Errorf("%s still shows status.source=stored after clear", providerID)
 	}
 	return nil
 }

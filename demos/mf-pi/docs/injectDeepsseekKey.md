@@ -1,5 +1,10 @@
 # 为指定用户动态设置 DeepSeek API key
 
+> **更新**：per-user Key 管道已泛化为一份**精选的 OpenAI 兼容 provider 列表**，每个用户
+> 同时只保留一个 provider（存入不同 provider 即为切换）；DeepSeek 仍是默认 provider。
+> 详见 `user_agent_api.md` §4.6–4.7 与 `demos/mf-pi/admin/providers.go`；下文仍描述最初
+> DeepSeek-only 的设计，就注入流程本身而言依然准确。
+
 > 本文档是 mf-pi 新功能的实施计划与进度跟踪（TODO 见文末）。目标：让管理员能
 > **针对某个 mf-pi 用户（一个用户 == 一个运行 pi-web 的 Actor）动态设置 / 清除其
 > 专属 DeepSeek API key**，并提供 mfpi-admin Web UI + REST、以及 CLI 脚本两套入口，

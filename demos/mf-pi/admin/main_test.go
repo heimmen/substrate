@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // fakeControlClient is an in-memory ateapipb.ControlClient implementation.
@@ -186,20 +190,20 @@ func (s *fakePasswordStore) Delete(name string) error {
 
 // fakeKeyStore is an in-memory keyStore for tests.
 type fakeKeyStore struct {
-	keys map[string]string
+	keys map[string]providerKey
 	err  error
 }
 
 func newFakeKeyStore() *fakeKeyStore {
-	return &fakeKeyStore{keys: map[string]string{}}
+	return &fakeKeyStore{keys: map[string]providerKey{}}
 }
 
-func (s *fakeKeyStore) Get(name string) (string, bool) {
+func (s *fakeKeyStore) Get(name string) (providerKey, bool) {
 	k, ok := s.keys[name]
 	return k, ok
 }
 
-func (s *fakeKeyStore) Set(name, key string) error {
+func (s *fakeKeyStore) Set(name string, key providerKey) error {
 	if s.err != nil {
 		return s.err
 	}
@@ -278,9 +282,10 @@ func (s *fakeTierStore) Delete(name string) error {
 }
 
 // fakeActorAuth is an in-memory actorAuthClient for tests. It records the
-// set/clear calls per host and can be configured to fail.
+// set/clear calls per host and can be configured to fail. Stored credentials
+// are tracked per (host, provider) because one provider is kept per user.
 type fakeActorAuth struct {
-	storedByHost map[string]string // host -> key
+	storedByHost map[string]map[string]string // host -> provider -> key
 	setCalls     []string
 	clearCalls   []string
 	setErr       error
@@ -288,32 +293,44 @@ type fakeActorAuth struct {
 }
 
 func newFakeActorAuth() *fakeActorAuth {
-	return &fakeActorAuth{storedByHost: map[string]string{}}
+	return &fakeActorAuth{storedByHost: map[string]map[string]string{}}
 }
 
-func (f *fakeActorAuth) setPersonalKey(_ context.Context, host, apiKey string) error {
+// storeKey records a credential for host+providerID, creating the per-host map
+// on first write so reads (isKeyStored, the assertions) never mutate the
+// fixture and len(storedByHost) stays meaningful.
+func (f *fakeActorAuth) storeKey(host, providerID, key string) {
+	if f.storedByHost[host] == nil {
+		f.storedByHost[host] = map[string]string{}
+	}
+	f.storedByHost[host][providerID] = key
+}
+
+func (f *fakeActorAuth) setPersonalKey(_ context.Context, host, providerID, apiKey string) error {
 	if f.setErr != nil {
 		return f.setErr
 	}
-	f.setCalls = append(f.setCalls, host)
-	f.storedByHost[host] = apiKey
+	f.setCalls = append(f.setCalls, host+"|"+providerID)
+	f.storeKey(host, providerID, apiKey)
 	return nil
 }
 
-func (f *fakeActorAuth) clearPersonalKey(_ context.Context, host string) error {
+func (f *fakeActorAuth) clearPersonalKey(_ context.Context, host, providerID string) error {
 	if f.clearErr != nil {
 		return f.clearErr
 	}
-	f.clearCalls = append(f.clearCalls, host)
-	delete(f.storedByHost, host)
+	f.clearCalls = append(f.clearCalls, host+"|"+providerID)
+	if m := f.storedByHost[host]; m != nil {
+		delete(m, providerID)
+	}
 	return nil
 }
 
-// isKeyStored reports whether the host holds a key in the in-memory map, which
-// setPersonalKey populates and clearPersonalKey empties — mirroring pi-web's
-// source=="stored" vs "environment" distinction.
-func (f *fakeActorAuth) isKeyStored(_ context.Context, host string) (bool, error) {
-	_, ok := f.storedByHost[host]
+// isKeyStored reports whether the host holds a credential for providerID in the
+// in-memory map, which setPersonalKey populates and clearPersonalKey empties —
+// mirroring pi-web's source=="stored" vs "environment" distinction.
+func (f *fakeActorAuth) isKeyStored(_ context.Context, host, providerID string) (bool, error) {
+	_, ok := f.storedByHost[host][providerID]
 	return ok, nil
 }
 
@@ -330,6 +347,7 @@ func newTestServer(f *fakeControlClient) *server {
 		tierTemplates:     buildTierTemplates("mf-pi"),
 		defaultTier:       "small",
 		actors:            newFakeActorAuth(),
+		providers:         defaultProviderOptions,
 		idleTimeout:       defaultIdleTimeout,
 		idleTiers:         parseIdleTiers("small,mid"),
 		idle:              newIdleTracker(),
@@ -363,6 +381,8 @@ func doRequest(s *server, method, path, body string) *httptest.ResponseRecorder 
 		s.handleCreateUser(rec, req)
 	case strings.HasPrefix(path, "/api/users/"):
 		s.handleUserSubresource(rec, req)
+	case path == "/api/providers":
+		s.handleListProviders(rec, req)
 	default:
 		http.NotFound(rec, req)
 	}
@@ -782,16 +802,16 @@ func TestHandleSetAPIKeySuspendedResumesThenInjects(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if got, ok := store.Get("alice"); !ok || got != "sk-test123" {
-		t.Errorf("stored key = %q, ok=%v; want sk-test123", got, ok)
+	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-test123" || got.ProviderID != defaultProviderID {
+		t.Errorf("stored key = %+v, ok=%v; want apiKey=sk-test123 provider=%s", got, ok, defaultProviderID)
 	}
 	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
 		t.Errorf("resumed = %v, want [alice]", f.resumed)
 	}
-	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost+"|"+defaultProviderID {
 		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
 	}
-	if got := auth.storedByHost[aliceHost]; got != "sk-test123" {
+	if got := auth.storedByHost[aliceHost][defaultProviderID]; got != "sk-test123" {
 		t.Errorf("injected key = %q, want sk-test123", got)
 	}
 }
@@ -889,7 +909,7 @@ func TestHandleSetAPIKeyInjectFailureKeepsStoredKey(t *testing.T) {
 		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
 	// Store-first policy: the key is retained even though injection failed.
-	if got, ok := store.Get("alice"); !ok || got != "sk-x" {
+	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-x" {
 		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
 	}
 }
@@ -906,7 +926,7 @@ func TestHandleSetAPIKeyResumeFailureKeepsStoredKey(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
-	if got, ok := store.Get("alice"); !ok || got != "sk-x" {
+	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-x" {
 		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
 	}
 	if len(auth.setCalls) != 0 {
@@ -920,13 +940,13 @@ func TestHandleClearAPIKeyHappyPath(t *testing.T) {
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
 	auth := s.actors.(*fakeActorAuth)
-	store.Set("alice", "sk-x")
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 
 	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost {
+	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|"+defaultProviderID {
 		t.Errorf("clearCalls = %v, want [%s]", auth.clearCalls, aliceHost)
 	}
 	if _, ok := store.Get("alice"); ok {
@@ -939,7 +959,7 @@ func TestHandleClearAPIKeyMissingActorPurgesStore(t *testing.T) {
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
 	auth := s.actors.(*fakeActorAuth)
-	store.Set("alice", "sk-x")
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 
 	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
 	if rec.Code != http.StatusOK {
@@ -959,7 +979,7 @@ func TestHandleClearAPIKeyLogoutFailureKeepsStoredKey(t *testing.T) {
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
 	auth := s.actors.(*fakeActorAuth)
-	store.Set("alice", "sk-x")
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 	auth.clearErr = errors.New("logout rejected")
 
 	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
@@ -967,7 +987,7 @@ func TestHandleClearAPIKeyLogoutFailureKeepsStoredKey(t *testing.T) {
 		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
 	// Clear-first policy: a failed logout keeps the Secret entry for a retry.
-	if got, ok := store.Get("alice"); !ok || got != "sk-x" {
+	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-x" {
 		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
 	}
 }
@@ -977,7 +997,7 @@ func TestHandleDeleteUserPurgesStoredKey(t *testing.T) {
 	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
-	store.Set("alice", "sk-x")
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 
 	rec := doRequest(s, http.MethodDelete, "/api/users/alice", "")
 	if rec.Code != http.StatusOK {
@@ -1031,7 +1051,7 @@ func TestHandleListUsersReportsHasPersonalKey(t *testing.T) {
 	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
 	addActor(f, "mfpi", "bob", "STATUS_SUSPENDED", fixedNow.Add(-2*time.Hour))
 	s := newTestServer(f)
-	s.keys.(*fakeKeyStore).Set("bob", "sk-bob")
+	s.keys.(*fakeKeyStore).Set("bob", providerKey{ProviderID: defaultProviderID, APIKey: "sk-bob"})
 
 	rec := doRequest(s, http.MethodGet, "/api/users", "")
 	if rec.Code != http.StatusOK {
@@ -1057,7 +1077,7 @@ func TestHandleCreateUserDuplicateReplaysStoredKey(t *testing.T) {
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
 	auth := s.actors.(*fakeActorAuth)
-	store.Set("alice", "sk-x")
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 
 	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
 	if rec.Code != http.StatusOK {
@@ -1071,7 +1091,7 @@ func TestHandleCreateUserDuplicateReplaysStoredKey(t *testing.T) {
 	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
 		t.Errorf("resumed = %v, want [alice]", f.resumed)
 	}
-	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost+"|"+defaultProviderID {
 		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
 	}
 }
@@ -1083,7 +1103,7 @@ func TestHandleCreateUserFreshReplaysStoredKey(t *testing.T) {
 	store := s.keys.(*fakeKeyStore)
 	auth := s.actors.(*fakeActorAuth)
 	// Actor deleted earlier (key purge failed); re-creating should replay.
-	store.Set("alice", "sk-x")
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 
 	rec := doRequest(s, http.MethodPost, "/api/users", `{"name":"alice"}`)
 	if rec.Code != http.StatusOK {
@@ -1097,10 +1117,10 @@ func TestHandleCreateUserFreshReplaysStoredKey(t *testing.T) {
 	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
 		t.Errorf("resumed = %v, want [alice]", f.resumed)
 	}
-	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost+"|"+defaultProviderID {
 		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
 	}
-	if got := auth.storedByHost[aliceHost]; got != "sk-x" {
+	if got := auth.storedByHost[aliceHost][defaultProviderID]; got != "sk-x" {
 		t.Errorf("injected key = %q, want sk-x", got)
 	}
 }
@@ -1123,14 +1143,14 @@ func TestReconcileInjectsKeyIntoRunningActor(t *testing.T) {
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
 	auth := s.actors.(*fakeActorAuth)
-	store.Set("alice", "sk-x")
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 
 	s.reconcileKeys(context.Background())
 
-	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost {
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost+"|"+defaultProviderID {
 		t.Fatalf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
 	}
-	if got := auth.storedByHost[aliceHost]; got != "sk-x" {
+	if got := auth.storedByHost[aliceHost][defaultProviderID]; got != "sk-x" {
 		t.Errorf("injected key = %q, want sk-x", got)
 	}
 }
@@ -1141,7 +1161,7 @@ func TestReconcileSkipsNonRunningActor(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
 	s := newTestServer(f)
-	s.keys.(*fakeKeyStore).Set("alice", "sk-x")
+	s.keys.(*fakeKeyStore).Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
 
 	s.reconcileKeys(context.Background())
 
@@ -1159,8 +1179,8 @@ func TestReconcileSkipsAlreadyStored(t *testing.T) {
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
 	auth := s.actors.(*fakeActorAuth)
-	store.Set("alice", "sk-x")
-	auth.storedByHost[aliceHost] = "sk-x" // simulate already applied
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-x"})
+	auth.storeKey(aliceHost, defaultProviderID, "sk-x") // simulate already applied
 
 	s.reconcileKeys(context.Background())
 
@@ -1192,7 +1212,7 @@ func TestReconcileIgnoresOtherAtespace(t *testing.T) {
 	addActor(f, "other", "zoe", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
 	s := newTestServer(f)
 	store := s.keys.(*fakeKeyStore)
-	store.Set("zoe", "sk-z") // key for the wrong atespace's actor name
+	store.Set("zoe", providerKey{ProviderID: defaultProviderID, APIKey: "sk-z"}) // key for the wrong atespace's actor name
 
 	s.reconcileKeys(context.Background())
 
@@ -1212,10 +1232,26 @@ type piWebRecorder struct {
 	interactiveHasPrompt bool // false => POST .../interactive returns no prompt (forces flow poll)
 	lastRequestID        string
 	lastValue            string
+	// providerID is the provider the fake reports and drives. It starts at the
+	// default and is updated from the request bodies, so tests can exercise any
+	// provider exactly as pi-web would.
+	providerID string
+	// loggedOutProvider is the providerId of the last logout POST.
+	loggedOutProvider string
 }
 
 func newPiWebRecorder() *piWebRecorder {
-	return &piWebRecorder{interactiveHasPrompt: true}
+	return &piWebRecorder{interactiveHasPrompt: true, providerID: defaultProviderID}
+}
+
+// provider returns the provider the fake currently reports.
+func (rec *piWebRecorder) provider() string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.providerID == "" {
+		return defaultProviderID
+	}
+	return rec.providerID
 }
 
 // newPiWebServer stands in for an actor's pi-web auth endpoints. Providers
@@ -1228,6 +1264,7 @@ func newPiWebServer(rec *piWebRecorder) *httptest.Server {
 		responded := rec.responded
 		hasPrompt := rec.interactiveHasPrompt
 		rec.mu.Unlock()
+		providerID := rec.provider()
 
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -1236,12 +1273,24 @@ func newPiWebServer(rec *piWebRecorder) *httptest.Server {
 			if responded {
 				src = "stored"
 			}
-			fmt.Fprintf(w, `{"providers":[{"id":"deepseek","name":"DeepSeek","authType":"api_key","status":{"configured":true,"source":%q}}]}`, src)
+			fmt.Fprintf(w, `{"providers":[{"id":%q,"name":"Test Provider","authType":"api_key","status":{"configured":true,"source":%q}}]}`, providerID, src)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/api-key/interactive":
-			if hasPrompt {
-				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`)
+			var body struct {
+				ProviderID string `json:"providerId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			rec.mu.Lock()
+			rec.providerID = body.ProviderID
+			rec.mu.Unlock()
+			if body.ProviderID == "" {
+				providerID = defaultProviderID
 			} else {
-				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running"}`)
+				providerID = body.ProviderID
+			}
+			if hasPrompt {
+				fmt.Fprintf(w, `{"flowId":"f1","providerId":%q,"status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`, providerID)
+			} else {
+				fmt.Fprintf(w, `{"flowId":"f1","providerId":%q,"status":"running"}`, providerID)
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/machines/local/auth/oauth/f1":
 			// Before the respond the flow exposes its prompt; afterwards the
@@ -1249,9 +1298,9 @@ func newPiWebServer(rec *piWebRecorder) *httptest.Server {
 			// mirrors pi-web's OAuthLoginFlowService: respond resolves the
 			// prompt and returns "running"; completion lands on a later poll).
 			if responded {
-				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"complete"}`)
+				fmt.Fprintf(w, `{"flowId":"f1","providerId":%q,"status":"complete"}`, providerID)
 			} else {
-				fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`)
+				fmt.Fprintf(w, `{"flowId":"f1","providerId":%q,"status":"running","prompt":{"requestId":"r1","message":"enter key","promptType":"secret"}}`, providerID)
 			}
 		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/oauth/f1/respond":
 			var body struct {
@@ -1264,10 +1313,15 @@ func newPiWebServer(rec *piWebRecorder) *httptest.Server {
 			rec.lastValue = body.Value
 			rec.responded = true
 			rec.mu.Unlock()
-			fmt.Fprint(w, `{"flowId":"f1","providerId":"deepseek","status":"running"}`)
+			fmt.Fprintf(w, `{"flowId":"f1","providerId":%q,"status":"running"}`, providerID)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/machines/local/auth/logout":
+			var body struct {
+				ProviderID string `json:"providerId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			rec.mu.Lock()
 			rec.responded = false
+			rec.loggedOutProvider = body.ProviderID
 			rec.mu.Unlock()
 			fmt.Fprint(w, `{"accepted":true}`)
 		default:
@@ -1289,7 +1343,7 @@ func TestHTTPActorAuthClientSetWithoutPromptPollsFlow(t *testing.T) {
 	defer srv.Close()
 
 	c := newHTTPActorAuthClient(srv.URL)
-	if err := c.setPersonalKey(context.Background(), aliceHost, "sk-abc"); err != nil {
+	if err := c.setPersonalKey(context.Background(), aliceHost, defaultProviderID, "sk-abc"); err != nil {
 		t.Fatalf("setPersonalKey: %v", err)
 	}
 
@@ -1327,7 +1381,7 @@ func TestHTTPActorAuthClientSetWithImmediatePromptSkipsPoll(t *testing.T) {
 	defer srv.Close()
 
 	c := newHTTPActorAuthClient(srv.URL)
-	if err := c.setPersonalKey(context.Background(), aliceHost, "sk-abc"); err != nil {
+	if err := c.setPersonalKey(context.Background(), aliceHost, defaultProviderID, "sk-abc"); err != nil {
 		t.Fatalf("setPersonalKey: %v", err)
 	}
 
@@ -1356,7 +1410,7 @@ func TestHTTPActorAuthClientClearDrivesLogout(t *testing.T) {
 	defer srv.Close()
 
 	c := newHTTPActorAuthClient(srv.URL)
-	if err := c.clearPersonalKey(context.Background(), aliceHost); err != nil {
+	if err := c.clearPersonalKey(context.Background(), aliceHost, defaultProviderID); err != nil {
 		t.Fatalf("clearPersonalKey: %v", err)
 	}
 
@@ -1745,5 +1799,477 @@ func TestHandleDeleteUserCleansExpiryAndTier(t *testing.T) {
 	}
 	if _, ok := s.tiers.(*fakeTierStore).Get("alice"); ok {
 		t.Errorf("tier not cleaned up after delete")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Multi-provider support: provider selection, switching, and storage.
+// ---------------------------------------------------------------------------
+
+func TestHandleSetAPIKeyExplicitProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-or","providerId":"openai"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[map[string]string](t, rec)
+	if resp["providerId"] != "openai" {
+		t.Errorf("response providerId = %q, want openai", resp["providerId"])
+	}
+	if resp["message"] != "OpenAI Key 已设置" {
+		t.Errorf("message = %q, want OpenAI Key 已设置", resp["message"])
+	}
+	if got, ok := store.Get("alice"); !ok || got.ProviderID != "openai" || got.APIKey != "sk-or" {
+		t.Errorf("stored = %+v (ok=%v), want provider=openai key=sk-or", got, ok)
+	}
+	want := aliceHost + "|openai"
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != want {
+		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, want)
+	}
+	if len(auth.clearCalls) != 0 {
+		t.Errorf("clearCalls = %v, want none", auth.clearCalls)
+	}
+}
+
+func TestHandleSetAPIKeyDefaultsToDeepSeek(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-ds"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got, _ := store.Get("alice"); got.ProviderID != defaultProviderID {
+		t.Errorf("stored provider = %q, want %q", got.ProviderID, defaultProviderID)
+	}
+}
+
+func TestHandleSetAPIKeyUnsupportedProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-x","providerId":"not-a-provider"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.keys) != 0 || len(auth.setCalls) != 0 || len(auth.clearCalls) != 0 {
+		t.Errorf("rejected provider must touch nothing: store=%v set=%v clear=%v", store.keys, auth.setCalls, auth.clearCalls)
+	}
+}
+
+// Setting a different provider switches: the previously stored provider is
+// logged out of the actor before the new key is committed, so the old provider
+// does not stay "configured" (and its models selectable) for the user.
+func TestHandleSetAPIKeySwitchesProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	store.Set("alice", providerKey{ProviderID: "deepseek", APIKey: "sk-old"})
+	auth.storeKey(aliceHost, "deepseek", "sk-old")
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-new","providerId":"openai"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|deepseek" {
+		t.Errorf("clearCalls = %v, want [%s|deepseek]", auth.clearCalls, aliceHost)
+	}
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost+"|openai" {
+		t.Errorf("setCalls = %v, want [%s|openai]", auth.setCalls, aliceHost)
+	}
+	if got, _ := store.Get("alice"); got.ProviderID != "openai" || got.APIKey != "sk-new" {
+		t.Errorf("stored = %+v, want provider=openai key=sk-new", got)
+	}
+	if _, ok := auth.storedByHost[aliceHost]["deepseek"]; ok {
+		t.Errorf("old provider credential still stored on actor: %v", auth.storedByHost[aliceHost])
+	}
+}
+
+// A failed logout of the previous provider must not commit the new key: the
+// stored record stays on the old provider so the operator can retry.
+func TestHandleSetAPIKeySwitchClearFailureKeepsOldKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", providerKey{ProviderID: "deepseek", APIKey: "sk-old"})
+	auth.storeKey(aliceHost, "deepseek", "sk-old")
+	auth.clearErr = errors.New("logout boom")
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-new","providerId":"openai"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if got, _ := store.Get("alice"); got.ProviderID != "deepseek" || got.APIKey != "sk-old" {
+		t.Errorf("stored = %+v, want unchanged deepseek/sk-old", got)
+	}
+	if len(auth.setCalls) != 0 {
+		t.Errorf("setCalls = %v, want none after a failed switch", auth.setCalls)
+	}
+}
+
+// Re-setting the same provider must not log it out first.
+func TestHandleSetAPIKeySameProviderDoesNotClear(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", providerKey{ProviderID: "openai", APIKey: "sk-old"})
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey", `{"apiKey":"sk-new","providerId":"openai"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.clearCalls) != 0 {
+		t.Errorf("clearCalls = %v, want none when the provider is unchanged", auth.clearCalls)
+	}
+}
+
+// Clear must log out the provider that is actually stored, not deepseek.
+func TestHandleClearAPIKeyUsesStoredProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", providerKey{ProviderID: "openai", APIKey: "sk-or"})
+	auth.storeKey(aliceHost, "openai", "sk-or")
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|openai" {
+		t.Errorf("clearCalls = %v, want [%s|openai]", auth.clearCalls, aliceHost)
+	}
+	if _, ok := store.Get("alice"); ok {
+		t.Errorf("stored key not purged")
+	}
+	resp := decode[map[string]string](t, rec)
+	if resp["providerId"] != "openai" {
+		t.Errorf("response providerId = %q, want openai", resp["providerId"])
+	}
+}
+
+// Clearing a user with no stored key is an idempotent success and must not
+// resume or touch the actor.
+func TestHandleClearAPIKeyNoStoredKeyIsIdempotent(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodDelete, "/api/users/alice/apikey", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.clearCalls) != 0 || len(f.resumed) != 0 {
+		t.Errorf("actor touched with nothing stored: clear=%v resumed=%v", auth.clearCalls, f.resumed)
+	}
+}
+
+func TestHandleListUsersReportsPersonalKeyProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	addActor(f, "mfpi", "bob", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	s.keys.Set("alice", providerKey{ProviderID: "openai", APIKey: "sk-or"})
+
+	rec := doRequest(s, http.MethodGet, "/api/users", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Users []userSummary `json:"users"`
+	}](t, rec)
+	byName := map[string]userSummary{}
+	for _, u := range resp.Users {
+		byName[u.Name] = u
+	}
+	if got := byName["alice"]; !got.HasPersonalKey || got.PersonalKeyProvider != "openai" {
+		t.Errorf("alice = %+v, want hasPersonalKey with provider openai", got)
+	}
+	if got := byName["bob"]; got.HasPersonalKey || got.PersonalKeyProvider != "" {
+		t.Errorf("bob = %+v, want no personal key", got)
+	}
+}
+
+func TestHandleListProviders(t *testing.T) {
+	s := newTestServer(newFake())
+	rec := doRequest(s, http.MethodGet, "/api/providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Providers []providerOption `json:"providers"`
+	}](t, rec)
+	if len(resp.Providers) != len(defaultProviderOptions) {
+		t.Fatalf("providers = %d, want %d", len(resp.Providers), len(defaultProviderOptions))
+	}
+	if resp.Providers[0].ID != defaultProviderID || resp.Providers[0].Name == "" {
+		t.Errorf("first provider = %+v, want %s with a display name", resp.Providers[0], defaultProviderID)
+	}
+	if rec := doRequest(s, http.MethodPost, "/api/providers", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("POST /api/providers status = %d, want 404", rec.Code)
+	}
+}
+
+func TestReconcileUsesStoredProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	s.keys.Set("alice", providerKey{ProviderID: "openai", APIKey: "sk-or"})
+	auth := s.actors.(*fakeActorAuth)
+
+	s.reconcileKeys(context.Background())
+
+	want := aliceHost + "|openai"
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != want {
+		t.Fatalf("setCalls = %v, want [%s]", auth.setCalls, want)
+	}
+	if got := auth.storedByHost[aliceHost]["openai"]; got != "sk-or" {
+		t.Errorf("injected key = %q, want sk-or", got)
+	}
+}
+
+func TestParseStoredKey(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want providerKey
+	}{
+		{"json", `{"providerId":"openai","apiKey":"sk-or"}`, providerKey{ProviderID: "openai", APIKey: "sk-or"}},
+		{"json without provider", `{"apiKey":"sk-or"}`, providerKey{ProviderID: defaultProviderID, APIKey: "sk-or"}},
+		{"legacy raw key", "sk-legacy", providerKey{ProviderID: defaultProviderID, APIKey: "sk-legacy"}},
+		{"legacy raw key that looks like a number", "12345", providerKey{ProviderID: defaultProviderID, APIKey: "12345"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseStoredKey(tc.raw); got != tc.want {
+				t.Errorf("parseStoredKey(%q) = %+v, want %+v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseProviderOptions(t *testing.T) {
+	fallback := []providerOption{{ID: "fallback", Name: "Fallback"}}
+	cases := []struct {
+		name string
+		spec string
+		want []providerOption
+	}{
+		{"blank falls back", "", fallback},
+		{"only separators falls back", " , , ", fallback},
+		{"id only uses id as name", "openai", []providerOption{{ID: "openai", Name: "openai"}}},
+		{"id and name", "zai=Z.AI (GLM)", []providerOption{{ID: "zai", Name: "Z.AI (GLM)"}}},
+		{"mixed with blanks", " openai , groq=Groq ,", []providerOption{
+			{ID: "openai", Name: "openai"},
+			{ID: "groq", Name: "Groq"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseProviderOptions(tc.spec, fallback)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("[%d] = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+	// The default spec must round-trip to the default list.
+	if got := parseProviderOptions(defaultProviderSpec(), nil); len(got) != len(defaultProviderOptions) {
+		t.Errorf("defaultProviderSpec round-trip = %d entries, want %d", len(got), len(defaultProviderOptions))
+	}
+}
+
+func TestProviderLabelFallsBackToID(t *testing.T) {
+	if got := providerLabel(defaultProviderOptions, "openai"); got != "OpenAI" {
+		t.Errorf("providerLabel(openai) = %q, want OpenAI", got)
+	}
+	if got := providerLabel(defaultProviderOptions, "unknown-provider"); got != "unknown-provider" {
+		t.Errorf("providerLabel(unknown) = %q, want the id itself", got)
+	}
+}
+
+// secretKeyStore must round-trip the {providerId, apiKey} record through the
+// Secret, and must still read keys written by the pre-multi-provider version
+// (a bare key string).
+func TestSecretKeyStoreRoundTrip(t *testing.T) {
+	const ns, name = "ate-demo-mf-pi", "mfpi-user-provider-keys"
+	mkSecret := func(data map[string][]byte) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Data:       data,
+		}
+	}
+
+	t.Run("write then reload", func(t *testing.T) {
+		cs := fake.NewSimpleClientset(mkSecret(map[string][]byte{}))
+		store := newSecretKeyStore(cs, ns, name)
+		if err := store.load(context.Background()); err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if err := store.Set("alice", providerKey{ProviderID: "openai", APIKey: "sk-or"}); err != nil {
+			t.Fatalf("set: %v", err)
+		}
+		// A fresh store reading the same Secret must observe the same record.
+		reloaded := newSecretKeyStore(cs, ns, name)
+		if err := reloaded.load(context.Background()); err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		got, ok := reloaded.Get("alice")
+		if !ok || got.ProviderID != "openai" || got.APIKey != "sk-or" {
+			t.Fatalf("reloaded = %+v (ok=%v), want openai/sk-or", got, ok)
+		}
+		if err := reloaded.Delete("alice"); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		if _, ok := reloaded.Get("alice"); ok {
+			t.Errorf("entry survived delete")
+		}
+	})
+
+	t.Run("legacy raw key", func(t *testing.T) {
+		cs := fake.NewSimpleClientset(mkSecret(map[string][]byte{"alice": []byte("sk-legacy")}))
+		store := newSecretKeyStore(cs, ns, name)
+		if err := store.load(context.Background()); err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		got, ok := store.Get("alice")
+		if !ok || got.ProviderID != defaultProviderID || got.APIKey != "sk-legacy" {
+			t.Errorf("legacy entry = %+v (ok=%v), want %s/sk-legacy", got, ok, defaultProviderID)
+		}
+	})
+
+	t.Run("missing secret is an empty store", func(t *testing.T) {
+		cs := fake.NewSimpleClientset()
+		store := newSecretKeyStore(cs, ns, name)
+		if err := store.load(context.Background()); err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if _, ok := store.Get("alice"); ok {
+			t.Errorf("unexpected entry in an empty store")
+		}
+		// Writes need the pre-created Secret and must fail with a clear error.
+		if err := store.Set("alice", providerKey{ProviderID: "openai", APIKey: "sk-or"}); err == nil {
+			t.Errorf("Set on a missing Secret = nil, want an error")
+		}
+	})
+}
+
+// The HTTP client must drive whichever provider it is asked for and assert that
+// provider's stored state, for both set and clear.
+func TestHTTPActorAuthClientDrivesArbitraryProvider(t *testing.T) {
+	rec := newPiWebRecorder()
+	srv := newPiWebServer(rec)
+	defer srv.Close()
+	c := newHTTPActorAuthClient(srv.URL)
+
+	if err := c.setPersonalKey(context.Background(), aliceHost, "openai", "sk-or"); err != nil {
+		t.Fatalf("setPersonalKey: %v", err)
+	}
+	if got := rec.provider(); got != "openai" {
+		t.Errorf("fake provider = %q, want openai", got)
+	}
+	if stored, err := c.isKeyStored(context.Background(), aliceHost, "openai"); err != nil || !stored {
+		t.Errorf("isKeyStored(openai) = %v, %v; want true", stored, err)
+	}
+
+	if err := c.clearPersonalKey(context.Background(), aliceHost, "openai"); err != nil {
+		t.Fatalf("clearPersonalKey: %v", err)
+	}
+	rec.mu.Lock()
+	loggedOut := rec.loggedOutProvider
+	rec.mu.Unlock()
+	if loggedOut != "openai" {
+		t.Errorf("logged out provider = %q, want openai", loggedOut)
+	}
+	if stored, err := c.isKeyStored(context.Background(), aliceHost, "openai"); err != nil || stored {
+		t.Errorf("isKeyStored(openai) after clear = %v, %v; want false", stored, err)
+	}
+}
+
+// TestLivePiWebProviderKey is an OPT-IN integration test that drives a real
+// pi-web instance through the same httpActorAuthClient the admin uses: it stores
+// a provider credential via pi-web's interactive api-key flow, verifies the
+// provider then reads back as source=="stored", and clears it again. It is
+// skipped unless the environment points it at a live instance, so the normal
+// `go test` run stays hermetic.
+//
+//	MFPI_LIVE_PIWEB_URL   base URL of a reachable pi-web, e.g. http://127.0.0.1:8599
+//	MFPI_LIVE_PROVIDER_KEY the API key to store (never logged)
+//	MFPI_LIVE_PROVIDER_ID  provider id to exercise (default "siliconflow")
+//	MFPI_LIVE_HOST         Host header to send (default: the URL's host[:port])
+//	MFPI_LIVE_KEEP         if non-empty, leave the credential stored for a
+//	                       follow-up real-inference check instead of clearing it
+//
+// A provider defined only in the agent dir's models.json (custom OpenAI-compatible
+// endpoint) has no env-var credential, so a successful run also proves the
+// admin can drive providers that exist purely as models.json entries.
+func TestLivePiWebProviderKey(t *testing.T) {
+	base := os.Getenv("MFPI_LIVE_PIWEB_URL")
+	key := os.Getenv("MFPI_LIVE_PROVIDER_KEY")
+	if base == "" || key == "" {
+		t.Skip("set MFPI_LIVE_PIWEB_URL and MFPI_LIVE_PROVIDER_KEY to run against a live pi-web")
+	}
+	providerID := os.Getenv("MFPI_LIVE_PROVIDER_ID")
+	if providerID == "" {
+		providerID = "siliconflow"
+	}
+	host := os.Getenv("MFPI_LIVE_HOST")
+	if host == "" {
+		host = strings.TrimPrefix(strings.TrimPrefix(base, "http://"), "https://")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	c := newHTTPActorAuthClient(base)
+
+	// Start from a clean slate: a credential left by an earlier run must not be
+	// able to mask a failure here.
+	if err := c.clearPersonalKey(ctx, host, providerID); err != nil {
+		t.Fatalf("pre-clean clearPersonalKey(%s): %v", providerID, err)
+	}
+	if stored, err := c.isKeyStored(ctx, host, providerID); err != nil || stored {
+		t.Fatalf("after pre-clean: stored=%v err=%v; want false/nil", stored, err)
+	}
+
+	if err := c.setPersonalKey(ctx, host, providerID, key); err != nil {
+		t.Fatalf("setPersonalKey(%s): %v", providerID, err)
+	}
+	if stored, err := c.isKeyStored(ctx, host, providerID); err != nil || !stored {
+		t.Fatalf("after setPersonalKey: stored=%v err=%v; want true/nil", stored, err)
+	}
+	t.Logf("pi-web stored the %s credential and reports source=stored", providerID)
+
+	if os.Getenv("MFPI_LIVE_KEEP") != "" {
+		t.Logf("MFPI_LIVE_KEEP set: leaving the credential in place for a real-inference check")
+		return
+	}
+	if err := c.clearPersonalKey(ctx, host, providerID); err != nil {
+		t.Fatalf("clearPersonalKey(%s): %v", providerID, err)
+	}
+	if stored, err := c.isKeyStored(ctx, host, providerID); err != nil || stored {
+		t.Errorf("after clearPersonalKey: stored=%v err=%v; want false/nil", stored, err)
 	}
 }

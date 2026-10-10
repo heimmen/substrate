@@ -31,7 +31,7 @@ mf-pi 把「平台」和「用户 Agent」拆成两个独立的 HTTP 服务，�
 
 | 平面 | 服务 | 职责 | 经网关的路径前缀（生产 / 测试） |
 |---|---|---|---|
-| **平台管理面** | `mfpi-admin`（单副本 Deployment，ClusterIP `mfpi-admin:8080`） | 用户（Actor）生命周期、访问密码、专属 DeepSeek Key、有效期、资源档位、共享 Skill 分发 | `/usermanagement/` |
+| **平台管理面** | `mfpi-admin`（单副本 Deployment，ClusterIP `mfpi-admin:8080`） | 用户（Actor）生命周期、访问密码、专属 provider Key、有效期、资源档位、共享 Skill 分发 | `/usermanagement/` |
 | **用户 Agent 面** | `pi-web`（每个用户 = 一个 Actor，跑在 gVisor 沙箱里，容器内监听 80） | 项目、会话、消息、文件、终端、插件、包管理、认证等 Agent 能力 | `/<username>/` |
 
 一个用户 == 一个 Actor（`mfpi` / `mfpi-test` atespace 下的独立实体），因此**每个用户的 Agent API 是同一个应用、不同的数据与生命周期**。外部组件通常先用管理面创建用户、拿到密码，再以该用户的身份调用 Agent 面。
@@ -104,17 +104,17 @@ USER_PASSWORD='<创建用户时返回的密码>'
 
 - **没有** Bearer Token、OAuth、API Key 形式的网关鉴权；外部组件请使用 HTTP Basic。
 - 用户密码在**创建用户时一次性返回**，之后只能通过 `POST /usermanagement/api/users/<name>/password` 重置。
-- 用户在 admin 里没有密码记录前，Agent 面一律 `401`（`main.go:1203-1208`）。
-- 每次成功的 Agent 面鉴权都会 `touch` 该用户的空闲计时器，从而**重置自动挂起倒计时**（默认 90 分钟，仅 `small`/`mid` 档；`main.go:1213-1219`）。外部组件长时间轮询即视为「活跃」。
+- 用户在 admin 里没有密码记录前，Agent 面一律 `401`（`main.go:1293-1304`）。
+- 每次成功的 Agent 面鉴权都会 `touch` 该用户的空闲计时器，从而**重置自动挂起倒计时**（默认 90 分钟，仅 `small`/`mid` 档；`main.go:1311`）。外部组件长时间轮询即视为「活跃」。
 
 ### 1.5 通用约定
 
 | 项 | 约定 |
 |---|---|
 | 编码 | 请求/响应体 UTF-8；JSON 请求带 `Content-Type: application/json` |
-| 缓存 | 管理面 JSON 响应带 `Cache-Control: no-store`（`main.go:1260-1265`） |
+| 缓存 | 管理面 JSON 响应带 `Cache-Control: no-store`（`main.go:1355`） |
 | 请求体上限 | nginx 层 `client_max_body_size 512m`；管理面 Skill 包 ≤ **64 MiB**（`skills.go:52`）；pi-web 默认 ≤ **64 MiB**（`DEFAULT_MAX_UPLOAD_BYTES`，可用 `PI_WEB_MAX_UPLOAD_BYTES` 或配置文件覆盖） |
-| 命名规则 | 用户名/Skill 名必须匹配 DNS-1123：`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`（`main.go:112`） |
+| 命名规则 | 用户名/Skill 名必须匹配 DNS-1123：`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`（`main.go:113`） |
 | WebSocket | 网关透传 `Upgrade`/`Connection` 头；与 HTTP 使用同一端口与 Basic Auth |
 | 幂等性 | 管理面的创建用户、清除 Key/有效期均可重复调用；详见各端点说明 |
 
@@ -261,7 +261,7 @@ if ($http_accept !~* "text/html") { return 503; }
 **鉴权**：HTTP Basic（nginx 层，见 §1.4）
 **响应**：JSON，`Cache-Control: no-store`
 
-> 路由注册见 `demos/mf-pi/admin/main.go:1421-1440`。
+> 路由注册见 `demos/mf-pi/admin/main.go:1520-1531`。
 > 直连 `mfpi-admin:8080`（集群内或 port-forward）时 URL **去掉** `/usermanagement` 前缀，且**没有任何鉴权**——仅供集群内组件使用。
 
 ### 4.1 端点总览
@@ -272,8 +272,9 @@ if ($http_accept !~* "text/html") { return 503; }
 | POST | `/usermanagement/api/users` | 创建用户（幂等） |
 | DELETE | `/usermanagement/api/users/{name}` | 删除用户并回收其持久卷 |
 | POST | `/usermanagement/api/users/{name}/password` | 重置访问密码 |
-| POST | `/usermanagement/api/users/{name}/apikey` | 设置用户专属 DeepSeek Key |
-| DELETE | `/usermanagement/api/users/{name}/apikey` | 清除专属 DeepSeek Key |
+| GET | `/usermanagement/api/providers` | 列出可选 provider（OpenAI 兼容） |
+| POST | `/usermanagement/api/users/{name}/apikey` | 设置用户专属 provider Key |
+| DELETE | `/usermanagement/api/users/{name}/apikey` | 清除用户专属 provider Key |
 | POST / PUT | `/usermanagement/api/users/{name}/expiry` | 设置账号有效期 |
 | DELETE | `/usermanagement/api/users/{name}/expiry` | 清除有效期 |
 | POST / PUT | `/usermanagement/api/users/{name}/tier` | 设置资源档位 |
@@ -313,6 +314,7 @@ if ($http_accept !~* "text/html") { return 503; }
       "version": 3,
       "age": "2h10m",
       "hasPersonalKey": true,
+      "personalKeyProvider": "deepseek",
       "hasExpiry": true,
       "expiry": "2026-01-01T00:00:00Z",
       "tier": "small"
@@ -321,7 +323,7 @@ if ($http_accept !~* "text/html") { return 503; }
 }
 ```
 
-**字段说明**（`userSummary`，`main.go:372-389`）：
+**字段说明**（`userSummary`，`main.go:376-397`）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -332,7 +334,8 @@ if ($http_accept !~* "text/html") { return 503; }
 | `ip` | string | Pod IP，可能为空 |
 | `version` | int64 | Actor 资源版本号 |
 | `age` | string | 人类可读的创建时长 |
-| `hasPersonalKey` | bool | 是否已存储该用户的专属 DeepSeek Key |
+| `hasPersonalKey` | bool | 是否已存储该用户的专属 provider Key（管理员写入的一条 per-user Key 记录） |
+| `personalKeyProvider` | string | 已存储 Key 所属的 provider id（如 `deepseek`、`openai`）；`hasPersonalKey` 为 false 时为空串 |
 | `hasExpiry` | bool | 是否设置了有效期 |
 | `expiry` | string | RFC3339 到期时间，未设置时为空串 |
 | `tier` | string | 资源档位（未设置时返回服务端默认 `small`） |
@@ -380,7 +383,7 @@ curl -sS -u admin:'mf@pass2026' "${BASE}/usermanagement/api/users"
 | 用户已存在 | `{"message":"用户已存在，复用现有会话","name":"alice"}`（若有存储 Key，message 追加提示） |
 | 创建成功但立即 resume 失败（如无空闲 worker） | `{"message":"创建成功，但立即恢复失败（可稍后打开页面触发恢复）：...","user":{...},"password":"..."}` |
 
-> 创建流程（`main.go:517-618`）：确保 atespace 存在 → 按用户档位选择 ActorTemplate 创建 Actor → 生成并保存密码 → 立即 Resume。
+> 创建流程（`main.go:545-649`）：确保 atespace 存在 → 按用户档位选择 ActorTemplate 创建 Actor → 生成并保存密码 → 立即 Resume。
 > **`password` 只在此响应中返回**，请妥善保存。
 
 **错误**：
@@ -402,7 +405,7 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users" \
 
 ### 4.4 `DELETE /api/users/{name}` — 删除用户
 
-流程：`Suspend`（幂等）→ `DeleteActor` → 删除密码/Key/有效期/档位记录 → **purge 该用户的 sticky 持久卷**（`main.go:1113-1176`）。
+流程：`Suspend`（幂等）→ `DeleteActor` → 删除密码/Key/有效期/档位记录 → **purge 该用户的 sticky 持久卷**（`main.go:1206-1276`）。
 
 > 注意：`DeleteActor` 本身**不会**删除持久卷（这是「删+建」刷新能保留数据的原因）；本端点会额外 purge，因此数据不可恢复。
 
@@ -457,9 +460,48 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
 
 ---
 
-### 4.6 `POST /api/users/{name}/apikey` — 设置专属 DeepSeek Key
+### `GET /api/providers` — 列出可选 provider（新增，暂不占用编号）
 
-先持久化到 Secret（`mfpi-user-provider-keys`），再唤醒该用户并把 Key 注入其 pi-web 认证存储（优先级高于环境变量 `DEEPSEEK_API_KEY`）。**存储优先**：注入失败时 Key 仍保留，可重试，且会在下次 resume 时自动补注。
+返回本管理面**精选**的 OpenAI 兼容 provider 列表，供管理 UI 渲染 provider 选择器。列表为服务端内置默认值（`demos/mf-pi/admin/providers.go`），可用环境变量 `KEY_PROVIDERS` 按环境覆盖。
+
+**请求参数**：无。
+
+**成功响应** `200`：
+
+```json
+{
+  "providers": [
+    { "id": "deepseek", "name": "DeepSeek" },
+    { "id": "openai", "name": "OpenAI" },
+    { "id": "openrouter", "name": "OpenRouter" },
+    { "id": "moonshotai", "name": "Moonshot AI (Kimi)" },
+    { "id": "zai", "name": "Z.AI (GLM)" },
+    { "id": "qwen-token-plan", "name": "Qwen (通义千问)" },
+    { "id": "minimax", "name": "MiniMax" },
+    { "id": "groq", "name": "Groq" },
+    { "id": "mistral", "name": "Mistral" },
+    { "id": "xai", "name": "xAI (Grok)" }
+  ]
+}
+```
+
+**覆盖默认列表**：`KEY_PROVIDERS` 为逗号分隔的列表，每项为 `id` 或 `id=显示名`（留空或无法解析时回退到内置默认值），例如：
+
+```bash
+KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
+```
+
+**方法限制**：仅接受 `GET`；其它方法返回 `404`。
+
+> 本小节为新增端点，为保持后续小节的既有编号稳定，未占用 `4.x` 编号；`providerId` 的合法取值即本端点返回的 `id`，用于 §4.6 的 `POST /api/users/{name}/apikey`。
+
+---
+
+### 4.6 `POST /api/users/{name}/apikey` — 设置用户专属 provider Key
+
+为指定用户存储**一个** provider 的 API Key（每个用户同一时间只保留一个 provider，存入不同 provider 即为**切换**）。流程：先持久化到 Secret（`mfpi-user-provider-keys`），再唤醒该用户并把 Key 注入其 pi-web 认证存储（优先级高于该 provider 的环境变量，如 `DEEPSEEK_API_KEY`）。**存储优先**：注入失败时 Key 仍保留，可重试，且会在下次 resume 时自动补注。
+
+若该用户已存有**另一个** provider 的 Key，服务端会**先**让该 Actor 退出旧 provider 登录、**再**提交新 Key；退出失败则返回 `502`，且存储记录仍留在旧 provider（因此可重试）。Key 落库后，该 provider 的模型会自动出现在该用户的 pi-web 模型选择器中，**无需**修改 `models.json`。
 
 **路径参数**：`name`（string，必填，DNS-1123）。
 
@@ -468,15 +510,16 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `apiKey` | string | 是 | 非空；前后空白会被去掉 |
+| `providerId` | string | 否 | provider id；缺省为 `deepseek`（因此旧请求体 `{"apiKey":"..."}` 仍然兼容）。取值须在精选列表中（见 `GET /api/providers`，可用 `KEY_PROVIDERS` 覆盖）：`deepseek`、`openai`、`openrouter`、`moonshotai`、`zai`、`qwen-token-plan`、`minimax`、`groq`、`mistral`、`xai` |
 
 ```json
 { "apiKey": "sk-xxxxxxxx" }
 ```
 
-**成功响应** `200`：
+**成功响应** `200`（`message` 中的 provider 名称取自列表的显示名）：
 
 ```json
-{ "message": "DeepSeek Key 已设置", "name": "alice" }
+{ "message": "OpenAI Key 已设置", "name": "alice", "providerId": "openai" }
 ```
 
 **错误**：
@@ -484,28 +527,46 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
 | 状态码 | 响应 | 场景 |
 |---|---|---|
 | `400` | `{"error":"请求体不是合法 JSON"}` / `{"error":"apiKey 不能为空"}` / `{"error":"非法用户名"}` | 参数问题 |
+| `400` | `{"error":"不支持的 provider: xxx（可选: deepseek, openai, ...）"}` | `providerId` 不在精选列表中 |
 | `404` | `{"error":"用户不存在"}` | Actor 不存在（此时不会写 Secret） |
-| `500` | `{"error":"查询用户失败: ..."}` / `{"error":"保存 DeepSeek Key 失败: ..."}` | ateapi / Secret 写入失败 |
-| `502` | `{"error":"DeepSeek Key 已存储，但无法恢复用户以注入（可重试，恢复后会自动应用）: ...","name":"alice"}` | resume 失败 |
-| `502` | `{"error":"DeepSeek Key 已存储，但注入失败（可重试，恢复后会自动应用）: ...","name":"alice"}` | 注入 pi-web 失败 |
+| `500` | `{"error":"查询用户失败: ..."}` / `{"error":"保存 <Provider> Key 失败: ..."}` | ateapi / Secret 写入失败 |
+| `502` | `{"error":"切换 provider 失败（无法恢复用户以退出旧 provider <old>）: ...","name":"alice"}` | 切换时无法恢复用户以退出旧 provider |
+| `502` | `{"error":"切换 provider 失败：无法退出旧 provider <old>（可重试）: ...","name":"alice"}` | 切换时退出旧 provider 失败（记录仍保留在旧 provider，可重试） |
+| `502` | `{"error":"<Provider> Key 已存储，但无法恢复用户以注入（可重试，恢复后会自动应用）: ...","name":"alice"}` | resume 失败 |
+| `502` | `{"error":"<Provider> Key 已存储，但注入失败（可重试，恢复后会自动应用）: ...","name":"alice"}` | 注入 pi-web 失败 |
 
 ```bash
+# 默认 provider（DeepSeek）
 curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/apikey" \
   -H 'Content-Type: application/json' -d '{"apiKey":"sk-xxxxxxxx"}'
 ```
 
+```bash
+# 指定 provider（切换时先退出旧 provider）
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/apikey" \
+  -H 'Content-Type: application/json' -d '{"apiKey":"sk-xxxxxxxx","providerId":"openai"}'
+```
+
+> 存储格式：Secret `mfpi-user-provider-keys` 中每个用户名为一个 JSON 值 `{"providerId":"...","apiKey":"..."}`；旧版本写入的裸 Key 字符串仍按 `deepseek` 读回，升级向后兼容。本次未新增 Kubernetes 资源或 RBAC。
+
 ---
 
-### 4.7 `DELETE /api/users/{name}/apikey` — 清除专属 DeepSeek Key
+### 4.7 `DELETE /api/users/{name}/apikey` — 清除用户专属 provider Key
 
-先让该用户的 Actor 登出该 provider，再从 Secret 删除记录（**清除优先**，登出失败则保留记录以便重试）。幂等：Actor 已不存在时会直接清理存储条目。
+清除该用户**已记录**的那个 provider 的 Key：先让该用户的 Actor 登出该 provider，再从 Secret 删除记录（**清除优先**，登出失败则保留记录以便重试）。幂等：若该用户没有存储任何 Key，则直接返回成功，且**不会触碰** Actor。
 
 **路径参数**：`name`（string，必填，DNS-1123）。
 
-**成功响应** `200`：
+**成功响应** `200`（`message`/`providerId` 反映被清除的那个 provider）：
 
 ```json
-{ "message": "DeepSeek Key 已清除", "name": "alice" }
+{ "message": "OpenAI Key 已清除", "name": "alice", "providerId": "openai" }
+```
+
+无存储记录时（未设置过、或 Actor 已不存在）：
+
+```json
+{ "message": "Key 已清除", "name": "alice" }
 ```
 
 **错误**：
@@ -513,7 +574,7 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
 | 状态码 | 响应 | 场景 |
 |---|---|---|
 | `400` | `{"error":"非法用户名"}` | name 不合法 |
-| `500` | `{"error":"清除存储的 DeepSeek Key 失败: ..."}` / `{"error":"已退出登录，但清除存储条目失败: ..."}` | Secret 操作失败 |
+| `500` | `{"error":"清除存储的 Key 失败: ..."}` / `{"error":"已退出登录，但清除存储条目失败: ..."}` | Secret 操作失败 |
 | `502` | `{"error":"清除失败（无法恢复用户）: ..."}` | resume 失败 |
 | `502` | `{"error":"清除失败，已保留存储的 Key（可重试）: ..."}` | agent 登出失败 |
 
@@ -588,7 +649,7 @@ curl -sS -u admin:'mf@pass2026' -X DELETE "${BASE}/usermanagement/api/users/alic
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `tier` | string | 是 | 允许值：`small`、`mid`、`large`（`tier.go` / `main.go:832`） |
+| `tier` | string | 是 | 允许值：`small`、`mid`、`large`（`tier.go` / `main.go:908`） |
 
 ```json
 { "tier": "mid" }
@@ -765,7 +826,7 @@ curl -sS -u admin:'mf@pass2026' "${BASE}/usermanagement/healthz"
 
 | 端点 | 行为 | 备注 |
 |---|---|---|
-| `GET /_mfpi_auth` | 纯鉴权。成功 `200` 空响应；失败 `401` + `WWW-Authenticate: Basic realm="mfpi agent"`，body `{"error":"missing user"\|"no password assigned"\|"invalid credentials"}` | 目标用户取自 `X-Original-URI` 或 `X-Mfpi-User`（`main.go:1184-1240`） |
+| `GET /_mfpi_auth` | 纯鉴权。成功 `200` 空响应；失败 `401` + `WWW-Authenticate: Basic realm="mfpi agent"`，body `{"error":"missing user"\|"no password assigned"\|"invalid credentials"}` | 目标用户取自 `X-Original-URI` 或 `X-Mfpi-User`（`main.go:1277-1334`） |
 | `GET /_mfpi_gate` | 鉴权 + 就绪门。`200` Actor 为 `RUNNING`；`401` 鉴权失败；`403` Actor 非 `RUNNING` 或不存在（并在后台触发 resume）；ateapi 异常时放行 `200` | `gate.go:41-70` |
 | `GET /_mfpi_loading` | 渲染 HTML 加载页，`200` + `Cache-Control: no-store`，可自动刷新时带 `Retry-After: 3`；用户不存在时页面显示「用户不存在」且不再刷新 | `loading.go:52-107` |
 
@@ -2317,19 +2378,19 @@ curl -u alice:secret -X POST "$BASE/api/auth/oauth/c2f0e6d1-3a4b-4c5d-8e9f-0a1b2
 
 #### 完整交互式 API-key 流程（mf-pi admin 实际使用的序列）
 
-pi-web 把「OAuth 流」和「交互式 API-key 流」放在同一套 `AuthInteraction` 传输上：`OAuthLoginFlowService` 的类名与 wire 名是历史遗留，`authType` 决定 `runtime.login(providerId, authType, interaction)`（`oauthLoginFlowService.ts:45-49,98`）。因此 API-key 流程**也**使用 `/auth/oauth/:flowId*` 端点。mf-pi 的多用户 admin 就是按这个序列把每个用户的 DeepSeek key 写进各自 actor 的 `auth.json`。
+pi-web 把「OAuth 流」和「交互式 API-key 流」放在同一套 `AuthInteraction` 传输上：`OAuthLoginFlowService` 的类名与 wire 名是历史遗留，`authType` 决定 `runtime.login(providerId, authType, interaction)`（`oauthLoginFlowService.ts:45-49,98`）。因此 API-key 流程**也**使用 `/auth/oauth/:flowId*` 端点。mf-pi 的多用户 admin 就是按这个序列把每个用户的 provider key 写进各自 actor 的 `auth.json`（usermanagement 的「设置 Key」可选择 provider，见 §4.6）。
 
 下述步骤与行号均来自 `demos/mf-pi/admin/apikey.go`：
 
-1. **探测 web 就绪**：轮询 `GET /api/machines/local/auth/providers?mode=login&authType=api_key` 直到返回 200（`apikey.go:313-329,384-392`）。
-2. **启动流程**：`POST /api/machines/local/auth/api-key/interactive`，body `{"providerId":"deepseek"}`，解析响应为含 `flowId`/`status`/`prompt`/`error` 的结构；缺 `flowId` 视为失败（`apikey.go:203-209,457-463`）。
-3. **拿 `requestId`**：若启动响应里已带 `prompt`，直接用 `prompt.requestId`；否则每秒轮询 `GET /api/machines/local/auth/oauth/<flowId>`，直到出现 `prompt`（最多 2 分钟），期间 `status` 变成 `error`/`cancelled` 则中止（`apikey.go:211-218,331-356`）。
-4. **提交 key**：`POST /api/machines/local/auth/oauth/<flowId>/respond`，body `{"requestId":"<prompt.requestId>","value":"<apiKey>"}`。注释明确指出：`respond` 只解析 prompt，返回的流通常仍是 `running`（`apikey.go:254-265`）。
-5. **等完成**：若 respond 已返回 `complete` 则直接继续；`error`/`cancelled` 直接失败；否则每秒轮询 `GET /api/machines/local/auth/oauth/<flowId>`，直到 `status == "complete"`（最多 2 分钟）（`apikey.go:266-308`）。
-6. **验证落盘**：`GET /api/machines/local/auth/providers?mode=login&authType=api_key`，确认目标 provider 的 `status.source == "stored"`（`apikey.go:277-280,358-382,384-392`）。
-7. **清除 key**（登出）：`POST /api/machines/local/auth/logout`，body `{"providerId":"deepseek"}`，要求响应 `{"accepted":true}`，随后再次列表确认 `status.source != "stored"`（`apikey.go:238-252`）。
+1. **探测 web 就绪**：轮询 `GET /api/machines/local/auth/providers?mode=login&authType=api_key` 直到返回 200（`apikey.go:351-369` 的 `waitForWeb`、`apikey.go:422-433` 的 `getProviders`）。
+2. **启动流程**：`POST /api/machines/local/auth/api-key/interactive`，body `{"providerId":"<providerId>"}`（mf-pi admin 默认 `deepseek`，可由 usermanagement 选择其他 OpenAI 兼容 provider，见 §4.6），解析响应为含 `flowId`/`status`/`prompt`/`error` 的结构；缺 `flowId` 视为失败（`apikey.go:236-262` 的 `setPersonalKey`、`apikey.go:496-502`）。
+3. **拿 `requestId`**：若启动响应里已带 `prompt`，直接用 `prompt.requestId`；否则每秒轮询 `GET /api/machines/local/auth/oauth/<flowId>`，直到出现 `prompt`（最多 2 分钟），期间 `status` 变成 `error`/`cancelled` 则中止（`apikey.go:370-397`）。
+4. **提交 key**：`POST /api/machines/local/auth/oauth/<flowId>/respond`，body `{"requestId":"<prompt.requestId>","value":"<apiKey>"}`。注释明确指出：`respond` 只解析 prompt，返回的流通常仍是 `running`（`apikey.go:296-321`）。
+5. **等完成**：若 respond 已返回 `complete` 则直接继续；`error`/`cancelled` 直接失败；否则每秒轮询 `GET /api/machines/local/auth/oauth/<flowId>`，直到 `status == "complete"`（最多 2 分钟）（`apikey.go:322-350`）。
+6. **验证落盘**：`GET /api/machines/local/auth/providers?mode=login&authType=api_key`，确认目标 provider 的 `status.source == "stored"`（`apikey.go:398-421`、`apikey.go:422-433`）。
+7. **清除 key**（登出）：`POST /api/machines/local/auth/logout`，body `{"providerId":"<providerId>"}`（登出存储记录里的那个 provider），要求响应 `{"accepted":true}`，随后再次列表确认 `status.source != "stored"`（`apikey.go:276-295`）。
 
-admin 侧解码的字段子集（与 `OAuthFlowState` 一致）：`flowId`、`status`、`prompt.requestId`、`error`（`apikey.go:452-463`），以及 provider 的 `id`/`name`/`status.configured`/`status.source`（`apikey.go:440-450`）。`promptType` 由 pi-ai 的 prompt 类型决定（API-key 场景通常是 `"secret"`）；`allowEmpty` 只在 `promptType === "text"` 时出现，因此 secret 类 prompt 提交空值会得到 `400 "A value is required"`（`oauthLoginFlowService.ts:208-226`）。
+admin 侧解码的字段子集（与 `OAuthFlowState` 一致）：`flowId`、`status`、`prompt.requestId`、`error`（`apikey.go:496-502`），以及 provider 的 `id`/`name`/`status.configured`/`status.source`（`apikey.go:479-490`）。`promptType` 由 pi-ai 的 prompt 类型决定（API-key 场景通常是 `"secret"`）；`allowEmpty` 只在 `promptType === "text"` 时出现，因此 secret 类 prompt 提交空值会得到 `400 "A value is required"`（`oauthLoginFlowService.ts:208-226`）。
 
 ```bash
 # 1) 探测（同时拿到 provider 列表）
@@ -4457,7 +4518,7 @@ websocat -H="Authorization: Basic $(printf 'alice:%s' "$USER_PASSWORD" | base64)
 | **就绪门（gate）** | nginx 的 `auth_request /_mfpi_gate`：鉴权 + 判断 Actor 是否 `RUNNING`，未就绪时返回 403 并后台触发 resume |
 | **加载页（loading page）** | Actor 未就绪时给浏览器（`Accept: text/html`）的 HTML 过渡页；API 客户端收到原始 503 |
 | **共享 Skill（managed skill）** | 管理员在 `mfpi-admin` 统一上传、由所有 Actor 的拉取循环同步到 `${PI_CODING_AGENT_DIR}/skills` 的 Skill 包 |
-| **专属 Key** | 管理员为单个用户设置的 DeepSeek API Key，持久化在 Secret `mfpi-user-provider-keys`，注入 Agent 后优先于环境变量 |
+| **专属 Key** | 管理员为单个用户设置的**一个** OpenAI 兼容 provider 的 API Key（provider 可选，缺省 `deepseek`），持久化在 Secret `mfpi-user-provider-keys`，注入 Agent 后优先于该 provider 的环境变量 |
 
 ### 8.2 端点总览
 
@@ -4468,6 +4529,7 @@ GET    /api/users
 POST   /api/users
 DELETE /api/users/{name}
 POST   /api/users/{name}/password
+GET    /api/providers
 POST   /api/users/{name}/apikey
 DELETE /api/users/{name}/apikey
 POST   /api/users/{name}/expiry        (也接受 PUT)
@@ -4613,14 +4675,14 @@ WS     /api/machines/local/events
 | 内容 | 位置 |
 |---|---|
 | 网关路由与鉴权 | `demos/mf-pi/nginx.conf`（生产）、`nginx-test.conf`（测试） |
-| 管理面实现 | `demos/mf-pi/admin/main.go`、`apikey.go`、`expiry.go`、`idle.go`、`tier.go`、`skills.go`、`gate.go`、`loading.go` |
-| 管理面路由注册 | `demos/mf-pi/admin/main.go:1421-1440` |
+| 管理面实现 | `demos/mf-pi/admin/main.go`、`apikey.go`、`providers.go`、`expiry.go`、`idle.go`、`tier.go`、`skills.go`、`gate.go`、`loading.go` |
+| 管理面路由注册 | `demos/mf-pi/admin/main.go:1520-1531` |
 | 管理面单测（含响应结构断言） | `demos/mf-pi/admin/main_test.go`、`skills_test.go` |
 | 用户 Agent 服务（pi-web） | 独立仓库 `cliu-pi-web`：`src/server/app.ts`（路由注册）、`src/server/sessions/*`、`src/server/sessiond.ts` |
 | 部署清单 | `demos/mf-pi/mf-pi.yaml.tmpl`、`mf-pi-test.yaml.tmpl` |
 | 演示总览 | `demos/mf-pi/README.md`、`demos/mf-pi/docs/mfpi.md`、`demos/mf-pi/docs/actor_inside.md` |
 | Skill 分发设计 | `demos/mf-pi/docs/deploy_skill_to_actor.md` |
-| 专属 Key 设计 | `demos/mf-pi/docs/injectDeepsseekKey.md` |
+| 专属 Key（provider 通用）设计 | `demos/mf-pi/docs/injectDeepsseekKey.md`、`demos/mf-pi/admin/providers.go` |
 | 每用户持久卷设计 | `demos/mf-pi/docs/save_userdata_pv.md`、`demos/mf-pi/docs/perUserDataVolume.md` |
 | 资源档位 / 有效期设计 | `demos/mf-pi/docs/resource_quota_plan.md` |
 | CLI 包装脚本 | `create-user.sh`、`delete-user.sh`、`list-users.sh`、`set-user-apikey.sh`、`clear-user-apikey.sh`、`install-skill.sh`、`list-skills.sh`、`remove-skill.sh`、`apply-skills.sh`（均含 `-test` 变体） |

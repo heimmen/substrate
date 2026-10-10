@@ -77,7 +77,8 @@ const (
 	defaultPasswordsConfigMap = "mfpi-user-passwords"
 	defaultPasswordsNamespace = "ate-demo-mf-pi"
 
-	// Secret holding per-user DeepSeek provider keys (username -> key).
+	// Secret holding per-user provider credentials (username -> JSON
+	// {providerId, apiKey}). See apikey.go.
 	// Pre-created empty in the manifests so the admin SA needs only
 	// get/update (RBAC cannot name-restrict create).
 	defaultKeysSecret    = "mfpi-user-provider-keys"
@@ -331,6 +332,9 @@ type server struct {
 	// defaultTier is applied when a user has no tier set.
 	defaultTier string
 	actors      actorAuthClient
+	// providers is the curated list of providers the UI may store a key for
+	// (see providers.go), overridable per environment via KEY_PROVIDERS.
+	providers []providerOption
 	// skills is the managed shared-skill store (PVC-backed). Nil when the
 	// SKILLS_DIR is unavailable; the /api/skills and /internal/skills routes
 	// are only registered when non-nil.
@@ -377,9 +381,12 @@ type userSummary struct {
 	IP       string `json:"ip"`
 	Version  int64  `json:"version"`
 	Age      string `json:"age"`
-	// HasPersonalKey reports whether the admin has stored a per-user
-	// DeepSeek API key for this user (shown as a badge in the UI).
+	// HasPersonalKey reports whether the admin has stored a per-user provider
+	// API key for this user (shown as a badge in the UI).
 	HasPersonalKey bool `json:"hasPersonalKey"`
+	// PersonalKeyProvider is the provider id the stored key belongs to (empty
+	// when HasPersonalKey is false).
+	PersonalKeyProvider string `json:"personalKeyProvider"`
 	// HasExpiry reports whether the user has an activation expiry set.
 	HasExpiry bool `json:"hasExpiry"`
 	// Expiry is the RFC3339 expiry timestamp (empty when HasExpiry is false).
@@ -397,16 +404,22 @@ func (s *server) summarize(a *ateapipb.Actor) userSummary {
 	if ts := a.GetMetadata().GetCreateTime(); ts != nil {
 		age = duration.HumanDuration(s.now().Sub(ts.AsTime()))
 	}
-	return userSummary{
-		Name:     a.GetMetadata().GetName(),
+	name := a.GetMetadata().GetName()
+	u := userSummary{
+		Name:     name,
 		Template: a.GetActorTemplateNamespace() + "/" + a.GetActorTemplateName(),
 		Status:   a.GetStatus().String(),
 		AteomPod: pod,
 		IP:       a.GetAteomPodIp(),
 		Version:  a.GetMetadata().GetVersion(),
 		Age:      age,
-		Tier:     s.userTier(a.GetMetadata().GetName()),
+		Tier:     s.userTier(name),
 	}
+	if key, ok := s.keys.Get(name); ok {
+		u.HasPersonalKey = true
+		u.PersonalKeyProvider = key.ProviderID
+	}
+	return u
 }
 
 // userTier returns the user's configured resource tier, falling back to the
@@ -473,6 +486,18 @@ func (s *server) handleUserSubresource(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleListProviders returns the curated provider list the usermanagement UI
+// renders in its provider selector. The list is static (see providers.go); the
+// per-user question of which provider is configured is answered by
+// userSummary.personalKeyProvider.
+func (s *server) handleListProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"providers": s.providers})
+}
+
 // handleListUsers mirrors list-users.sh: ListActors in the configured atespace.
 func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -501,7 +526,10 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	for _, a := range all {
 		name := a.GetMetadata().GetName()
 		u := s.summarize(a)
-		_, u.HasPersonalKey = s.keys.Get(name)
+		if key, ok := s.keys.Get(name); ok {
+			u.HasPersonalKey = true
+			u.PersonalKeyProvider = key.ProviderID
+		}
 		if exp, ok := s.expiries.Get(name); ok {
 			u.HasExpiry = true
 			u.Expiry = exp
@@ -595,7 +623,7 @@ func (s *server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		msg := "创建成功，但立即恢复失败（可稍后打开页面触发恢复）：" + err.Error()
 		if _, ok := s.keys.Get(name); ok {
-			msg += "；该用户存有 DeepSeek Key，恢复后可重新执行创建以应用"
+			msg += "；该用户存有 provider Key，恢复后可重新执行创建以应用"
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message":  msg,
@@ -653,17 +681,23 @@ func (s *server) handleResetPassword(w http.ResponseWriter, r *http.Request, nam
 	})
 }
 
-// handleSetAPIKey stores a per-user DeepSeek API key and applies it to the
+// handleSetAPIKey stores a per-user provider API key and applies it to the
 // user's actor by driving pi-web's in-actor api-key login flow. Ordering is
 // store-first: the Secret is the committed record, so if the later actor step
 // fails the key is retained (502) and applied on a retry or the next resume.
+//
+// One provider is kept per user. When a different provider is already stored,
+// the previous provider is logged out of the actor before the new key is
+// committed — a leftover stored credential would keep the old provider
+// "configured", and therefore its models selectable, for that user.
 func (s *server) handleSetAPIKey(w http.ResponseWriter, r *http.Request, name string) {
 	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
 		return
 	}
 	var req struct {
-		APIKey string `json:"apiKey"`
+		APIKey     string `json:"apiKey"`
+		ProviderID string `json:"providerId"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
@@ -672,6 +706,17 @@ func (s *server) handleSetAPIKey(w http.ResponseWriter, r *http.Request, name st
 	key := strings.TrimSpace(req.APIKey)
 	if key == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "apiKey 不能为空"})
+		return
+	}
+	providerID := strings.TrimSpace(req.ProviderID)
+	if providerID == "" {
+		providerID = defaultProviderID
+	}
+	provider, ok := lookupProvider(s.providers, providerID)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "不支持的 provider: " + providerID + "（可选: " + s.providerIDList() + "）",
+		})
 		return
 	}
 
@@ -688,33 +733,68 @@ func (s *server) handleSetAPIKey(w http.ResponseWriter, r *http.Request, name st
 		return
 	}
 
+	previous, hadPrevious := s.keys.Get(name)
+	if hadPrevious && previous.ProviderID != providerID {
+		// Switching providers: log the old one out first, leaving the stored
+		// record untouched until the new key is committed so a failure here is
+		// retryable.
+		if err := s.ensureRunningActor(ctx, name); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "切换 provider 失败（无法恢复用户以退出旧 provider " + previous.ProviderID + "）: " + err.Error(),
+				"name":  name,
+			})
+			return
+		}
+		if err := s.actors.clearPersonalKey(ctx, actorHostname(name, s.atespace), previous.ProviderID); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "切换 provider 失败：无法退出旧 provider " + previous.ProviderID + "（可重试）: " + err.Error(),
+				"name":  name,
+			})
+			return
+		}
+	}
+
 	// Commit the record first (persist to the Secret), then apply it to the
 	// actor's auth store.
-	if err := s.keys.Set(name, key); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 DeepSeek Key 失败: " + err.Error()})
+	if err := s.keys.Set(name, providerKey{ProviderID: providerID, APIKey: key}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 " + provider.Name + " Key 失败: " + err.Error()})
 		return
 	}
 	if err := s.ensureRunningActor(ctx, name); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "DeepSeek Key 已存储，但无法恢复用户以注入（可重试，恢复后会自动应用）: " + err.Error(),
+			"error": provider.Name + " Key 已存储，但无法恢复用户以注入（可重试，恢复后会自动应用）: " + err.Error(),
 			"name":  name,
 		})
 		return
 	}
-	if err := s.actors.setPersonalKey(ctx, actorHostname(name, s.atespace), key); err != nil {
+	if err := s.actors.setPersonalKey(ctx, actorHostname(name, s.atespace), providerID, key); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "DeepSeek Key 已存储，但注入失败（可重试，恢复后会自动应用）: " + err.Error(),
+			"error": provider.Name + " Key 已存储，但注入失败（可重试，恢复后会自动应用）: " + err.Error(),
 			"name":  name,
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "DeepSeek Key 已设置", "name": name})
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message":    provider.Name + " Key 已设置",
+		"name":       name,
+		"providerId": providerID,
+	})
 }
 
-// handleClearAPIKey removes a user's stored DeepSeek API key. Ordering is
-// clear-first: the actor's stored credential is logged out (falling back to
-// the DEEPSEEK_API_KEY env) before the Secret entry is purged, so a failed
-// logout leaves the Secret entry intact for a retry.
+// providerIDList renders the selectable provider ids for error messages.
+func (s *server) providerIDList() string {
+	ids := make([]string, 0, len(s.providers))
+	for _, p := range s.providers {
+		ids = append(ids, p.ID)
+	}
+	return strings.Join(ids, ", ")
+}
+
+// handleClearAPIKey removes a user's stored provider API key. Ordering is
+// clear-first: the actor's stored credential is logged out (falling back to the
+// provider's environment variable, if any) before the Secret entry is purged,
+// so a failed logout leaves the Secret entry intact for a retry. Clearing a user
+// with no stored key is an idempotent success and never touches the actor.
 func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name string) {
 	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
@@ -723,27 +803,36 @@ func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 
+	stored, ok := s.keys.Get(name)
+
 	ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
 	if _, err := s.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref}); err != nil {
 		if status.Code(err) == codes.NotFound {
 			// The actor is gone; there is nothing to log out of. Purge the
 			// stored key so the record matches (idempotent clear).
 			if err := s.keys.Delete(name); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除存储的 DeepSeek Key 失败: " + err.Error()})
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除存储的 Key 失败: " + err.Error()})
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]string{"message": "DeepSeek Key 已清除", "name": name})
+			writeJSON(w, http.StatusOK, map[string]string{"message": "Key 已清除", "name": name})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询用户失败: " + err.Error()})
 		return
 	}
 
+	if !ok {
+		// Nothing stored for this user: nothing to log out. Idempotent success.
+		writeJSON(w, http.StatusOK, map[string]string{"message": "Key 已清除", "name": name})
+		return
+	}
+	label := providerLabel(s.providers, stored.ProviderID)
+
 	if err := s.ensureRunningActor(ctx, name); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "清除失败（无法恢复用户）: " + err.Error()})
 		return
 	}
-	if err := s.actors.clearPersonalKey(ctx, actorHostname(name, s.atespace)); err != nil {
+	if err := s.actors.clearPersonalKey(ctx, actorHostname(name, s.atespace), stored.ProviderID); err != nil {
 		// Keep the Secret entry: a retry resumes the actor and tries again.
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "清除失败，已保留存储的 Key（可重试）: " + err.Error()})
 		return
@@ -752,7 +841,7 @@ func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "已退出登录，但清除存储条目失败: " + err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "DeepSeek Key 已清除", "name": name})
+	writeJSON(w, http.StatusOK, map[string]string{"message": label + " Key 已清除", "name": name, "providerId": stored.ProviderID})
 }
 
 // handleSetExpiry stores an activation expiry for a user. The body carries a
@@ -906,16 +995,17 @@ func (s *server) injectStoredKey(ctx context.Context, name string, alreadyResume
 	if !ok {
 		return ""
 	}
+	label := providerLabel(s.providers, key.ProviderID)
 	host := actorHostname(name, s.atespace)
 	if alreadyResumed {
 		if err := s.waitForRunning(ctx, name); err != nil {
-			return "DeepSeek Key 已存储但未注入（用户仍在恢复中）: " + err.Error()
+			return label + " Key 已存储但未注入（用户仍在恢复中）: " + err.Error()
 		}
 	} else if err := s.ensureRunningActor(ctx, name); err != nil {
-		return "DeepSeek Key 已存储但未注入（无法恢复用户）: " + err.Error()
+		return label + " Key 已存储但未注入（无法恢复用户）: " + err.Error()
 	}
-	if err := s.actors.setPersonalKey(ctx, host, key); err != nil {
-		return "DeepSeek Key 已存储但注入失败（可重试）: " + err.Error()
+	if err := s.actors.setPersonalKey(ctx, host, key.ProviderID, key.APIKey); err != nil {
+		return label + " Key 已存储但注入失败（可重试）: " + err.Error()
 	}
 	return ""
 }
@@ -929,7 +1019,7 @@ const reconcileInterval = 30 * time.Second
 const reconcileCooldown = 60 * time.Second
 
 // startReconciler runs the key reconciler until ctx is cancelled. It periodically
-// re-applies any stored per-user DeepSeek key onto RUNNING actors that do not
+// re-applies any stored per-user provider key onto RUNNING actors that do not
 // currently hold it. This recovers keys after an actor is resumed by any path
 // that skips the admin's create-user flow — in particular demos/mf-pi/
 // refresh-actor.sh, which does a raw kubectl-ate create+resume. Without this, a
@@ -974,8 +1064,11 @@ func (s *server) reconcileKeys(ctx context.Context) {
 		if a.GetStatus() != ateapipb.Actor_STATUS_RUNNING {
 			continue
 		}
+		// Backoff is keyed per (user, provider): switching providers changes
+		// the work to do while the user name stays the same.
+		attemptKey := name + "|" + key.ProviderID
 		host := actorHostname(name, s.atespace)
-		stored, err := s.actors.isKeyStored(ctx, host)
+		stored, err := s.actors.isKeyStored(ctx, host, key.ProviderID)
 		if err != nil {
 			// pi-web not reachable yet (actor still booting). Skip this tick;
 			// a later tick retries. No cooldown here so we don't mask a
@@ -983,19 +1076,19 @@ func (s *server) reconcileKeys(ctx context.Context) {
 			continue
 		}
 		if stored {
-			s.clearReconcileAttempt(name)
+			s.clearReconcileAttempt(attemptKey)
 			continue
 		}
-		if !s.shouldReconcileAttempt(name) {
+		if !s.shouldReconcileAttempt(attemptKey) {
 			continue
 		}
-		if err := s.actors.setPersonalKey(ctx, host, key); err != nil {
-			s.noteReconcileAttempt(name)
-			log.Printf("reconcile: failed to re-inject stored key for %q: %v", name, err)
+		if err := s.actors.setPersonalKey(ctx, host, key.ProviderID, key.APIKey); err != nil {
+			s.noteReconcileAttempt(attemptKey)
+			log.Printf("reconcile: failed to re-inject stored %s key for %q: %v", key.ProviderID, name, err)
 			continue
 		}
-		s.clearReconcileAttempt(name)
-		log.Printf("reconcile: re-injected stored key for %q", name)
+		s.clearReconcileAttempt(attemptKey)
+		log.Printf("reconcile: re-injected stored %s key for %q", key.ProviderID, name)
 	}
 }
 
@@ -1146,7 +1239,7 @@ func (s *server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.keys.Delete(name); err != nil {
 		// Best-effort: a stale key is harmless and replayed only if the same
 		// user is re-created with a stored key. Log rather than fail.
-		log.Printf("deleting stored DeepSeek key for %q failed: %v", name, err)
+		log.Printf("deleting stored provider key for %q failed: %v", name, err)
 	}
 	if err := s.expiries.Delete(name); err != nil {
 		// Best-effort: a stale expiry is harmless; a re-created user simply
@@ -1285,6 +1378,9 @@ type serverConfig struct {
 	idleTiers          []string
 	routerAddr         string
 	skillsDir          string
+	// providerOptions is the curated list of providers the UI may store a key
+	// for, overridable via KEY_PROVIDERS (see providers.go).
+	providerOptions []providerOption
 }
 
 func serverConfigFromEnv() serverConfig {
@@ -1320,6 +1416,7 @@ func serverConfigFromEnv() serverConfig {
 	} else {
 		cfg.idleTiers = idleTiersDefault
 	}
+	cfg.providerOptions = parseProviderOptions(os.Getenv("KEY_PROVIDERS"), defaultProviderOptions)
 	return cfg
 }
 
@@ -1402,6 +1499,7 @@ func main() {
 		tierTemplates:     buildTierTemplates(cfg.templateName),
 		defaultTier:       cfg.defaultTier,
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
+		providers:         cfg.providerOptions,
 		skills:            newSkillStore(cfg.skillsDir),
 		applier:           newHTTPApplyReloader(cfg.routerAddr),
 		idleTimeout:       cfg.idleTimeout,
@@ -1421,6 +1519,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleIndex)
 	mux.HandleFunc("/api/users", srv.handleUsers)
+	mux.HandleFunc("/api/providers", srv.handleListProviders)
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
 	// Readiness gate: like /_mfpi_auth but also rejects (403) a request whose

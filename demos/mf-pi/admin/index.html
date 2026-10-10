@@ -162,6 +162,41 @@
   .badge.red { background: var(--red-bg); color: var(--red); }
   .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
   #empty { color: var(--muted); text-align: center; padding: 24px 0; }
+  /* 设置 API Key 对话框：遮罩 + 居中面板，关闭时整体从 DOM 移除。 */
+  .modal-overlay {
+    position: fixed;
+    top: 0; right: 0; bottom: 0; left: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .modal {
+    background: var(--card);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.2);
+    padding: 16px;
+    width: 100%;
+    max-width: 420px;
+  }
+  .modal-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+  .modal-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .modal select, .modal input[type="text"] {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    background: #fff;
+    color: var(--text);
+    margin-bottom: 12px;
+  }
+  .modal select:disabled { color: var(--muted); }
+  .modal-note, .modal-hint { font-size: 12px; color: var(--muted); margin: -4px 0 12px; }
+  .modal-error { font-size: 13px; color: var(--danger); margin: -4px 0 8px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
 </head>
 <body>
@@ -232,7 +267,7 @@
         <tr>
           <th>名称</th>
           <th>状态</th>
-          <th>DeepSeek Key</th>
+          <th>API Key</th>
           <th>模板</th>
           <th>ATEOM Pod</th>
           <th>IP</th>
@@ -295,6 +330,61 @@
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // providersCache 缓存 GET api/providers 的结果（首次成功后复用，自动刷新不会
+  // 覆盖它）；providersPromise 去重并发请求，避免对话框与页面加载各拉一次。
+  var providersCache = null;
+  var providersPromise = null;
+  // 拉取失败时的兜底 provider：至少让管理员仍能完成设置 Key 的操作。
+  var fallbackProviders = [{ id: "deepseek", name: "DeepSeek" }];
+
+  // fetchProviders 返回 provider 列表（{id,name} 数组）的 Promise；成功后缓存，
+  // 失败则回退到 fallbackProviders 并允许下次重试。
+  function fetchProviders() {
+    if (providersCache) {
+      return Promise.resolve(providersCache);
+    }
+    if (providersPromise) {
+      return providersPromise;
+    }
+    providersPromise = fetch("api/providers")
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (data) {
+        var list = (data && data.providers) || [];
+        providersCache = list.length ? list : fallbackProviders;
+        return providersCache;
+      })
+      .catch(function () {
+        // 失败不缓存，下次调用可重试；本次用兜底列表继续。
+        providersPromise = null;
+        return fallbackProviders;
+      });
+    return providersPromise;
+  }
+
+  // providerDisplayName 把 provider id 解析为展示名；未加载或未知 id 时原样返回 id。
+  function providerDisplayName(id) {
+    if (!id) return "";
+    if (providersCache) {
+      for (var i = 0; i < providersCache.length; i++) {
+        if (providersCache[i].id === id) return providersCache[i].name;
+      }
+    }
+    return id;
+  }
+
+  // listProviders 页面加载时预取一次 provider 列表；就绪后重绘用户表，使 Key 徽标
+  // 立即可显示展示名（而不是 provider id）。
+  function listProviders() {
+    fetchProviders().then(function () {
+      if (atespace !== null) listUsers();
     });
   }
 
@@ -366,9 +456,22 @@
       var tr = document.createElement("tr");
       // 用户名链接到对应的 agent 页面：http://<hostname>:58681/<username>/
       var agentUrl = window.location.origin + "/" + encodeURIComponent(u.name) + "/";
+      // Key 徽标：显示该用户已存储 Key 的 provider 展示名，未设置则显示灰色未设置。
+      var keyProviderId = u.personalKeyProvider || "";
+      var keyProviderName = providerDisplayName(keyProviderId);
       var keyBadge = u.hasPersonalKey ?
-        '<span class="badge green" title="已为该用户存储专属 DeepSeek API Key">已设置</span>' :
-        '<span class="badge gray" title="未设置专属 Key，将使用 DEEPSEEK_API_KEY 环境变量">未设置</span>';
+        '<span class="badge green" title="' + esc(keyProviderName ?
+          "已为该用户存储 " + keyProviderName + " 的专属 API Key" :
+          "已为该用户存储专属 API Key") + '">' +
+        esc(keyProviderName || "已设置") + "</span>" :
+        '<span class="badge gray" title="未存储专属 Key，agent 将使用内置/环境变量凭据">未设置</span>';
+      // 操作菜单提示同样按该用户实际的 provider 命名，避免写死 DeepSeek。
+      var setKeyTitle = keyProviderName ?
+        "为运行中的 agent 写入专属 " + keyProviderName + " API Key（保存后退出旧 provider）" :
+        "为该用户设置专属 API Key（可选择 provider）";
+      var clearKeyTitle = keyProviderName ?
+        "退出登录并清除专属 " + keyProviderName + " API Key" :
+        "清除该用户的专属 API Key（当前未设置）";
       var expiryCell = expiryDisplayHtml(u);
       var tierBadge = u.tier ?
         '<span class="badge blue" title="该用户的资源档位（作用于新建/重建，存量用户不变）">' + esc(u.tier) + "</span>" :
@@ -389,8 +492,8 @@
         '<div class="dropdown-menu">' +
         '<button class="copy-pwd">复制密码</button>' +
         '<button class="reset-pwd">重置密码</button>' +
-        '<button class="set-key" title="为运行中的 agent 写入专属 DeepSeek API Key">设置 Key</button>' +
-        '<button class="clear-key" title="退出登录并清除专属 DeepSeek API Key">清除 Key</button>' +
+        '<button class="set-key" title="' + esc(setKeyTitle) + '">设置 Key</button>' +
+        '<button class="clear-key" title="' + esc(clearKeyTitle) + '">清除 Key</button>' +
         '<button class="set-expiry" title="设置激活有效期，到期后自动挂起释放资源">设置有效期</button>' +
         '<button class="clear-expiry" title="撤销激活有效期，停止到期自动挂起">清除有效期</button>' +
         '<button class="set-tier" title="设置用户资源档位（新建/重建后生效）">设置资源档位</button>' +
@@ -417,10 +520,10 @@
         resetPassword(u.name);
       });
       tr.querySelector(".set-key").addEventListener("click", function () {
-        setUserAPIKey(u.name);
+        setUserAPIKey(u.name, keyProviderId);
       });
       tr.querySelector(".clear-key").addEventListener("click", function () {
-        clearUserAPIKey(u.name);
+        clearUserAPIKey(u.name, keyProviderId);
       });
       tr.querySelector(".set-expiry").addEventListener("click", function () {
         setUserExpiry(u.name);
@@ -486,23 +589,34 @@
       });
   }
 
-  function setUserAPIKey(name) {
-    var key = window.prompt(
-      "为 \"" + name + "\" 设置专属 DeepSeek API Key（sk-...）。\n" +
-      "Key 会写入 Secret 持久化并注入到该用户运行中的 agent；若 agent 尚未恢复将自动恢复。", "");
-    if (key === null) {
-      return; // 用户取消
+  // keyDialogEl 记录当前打开的"设置 API Key"对话框根节点（含遮罩）。对话框每次打开
+  // 时新建、关闭时整体从 DOM 移除：既不会残留遮罩层，也不受 5 秒自动刷新重建用户表
+  // 的影响（用户表刷新只重建 <tbody>，与对话框互不干扰）。
+  var keyDialogEl = null;
+
+  // closeKeyDialog 关闭对话框（若已打开）并注销 Esc 监听。
+  function closeKeyDialog() {
+    if (keyDialogEl && keyDialogEl.parentNode) {
+      keyDialogEl.parentNode.removeChild(keyDialogEl);
     }
-    key = key.trim();
-    if (key === "") {
-      showMsg("未输入 API Key，已取消", true);
-      return;
+    keyDialogEl = null;
+    document.removeEventListener("keydown", onKeyDialogKeydown, true);
+  }
+
+  // onKeyDialogKeydown 支持 Esc 关闭对话框。
+  function onKeyDialogKeydown(e) {
+    if (e.key === "Escape" || e.keyCode === 27) {
+      closeKeyDialog();
     }
+  }
+
+  // submitUserAPIKey 提交 {apiKey, providerId}，沿用原有的成功/失败提示。
+  function submitUserAPIKey(name, key, providerId) {
     clearMsg();
     fetch("api/users/" + encodeURIComponent(name) + "/apikey", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: key })
+      body: JSON.stringify({ apiKey: key, providerId: providerId })
     })
       .then(function (res) {
         return res.json().then(function (j) {
@@ -511,7 +625,7 @@
         });
       })
       .then(function (j) {
-        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "DeepSeek Key 已设置"));
+        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "API Key 已设置"));
         listUsers();
       })
       .catch(function (err) {
@@ -519,9 +633,125 @@
       });
   }
 
-  function clearUserAPIKey(name) {
-    if (!window.confirm("确认清除 \"" + name + "\" 的专属 DeepSeek API Key？\n" +
-        "其 agent 将退出 DeepSeek 登录并回退到 DEEPSEEK_API_KEY 环境变量。")) {
+  // setUserAPIKey 为指定用户打开 provider + API Key 对话框：provider 下拉来自
+  // api/providers（首次成功后缓存，失败回退 DeepSeek），默认预选该用户已配置的
+  // provider；校验非空后 POST {apiKey, providerId}。
+  function setUserAPIKey(name, currentProvider) {
+    closeKeyDialog(); // 同一时间只保留一个对话框
+    var currentName = providerDisplayName(currentProvider) || currentProvider;
+    var root = document.createElement("div");
+    root.className = "modal-overlay";
+    root.innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true" aria-label="设置 API Key">' +
+      '<div class="modal-title">为 "' + esc(name) + '" 设置专属 API Key</div>' +
+      '<label class="modal-label" for="key-provider-select">Provider</label>' +
+      '<select id="key-provider-select" disabled><option value="">加载中…</option></select>' +
+      '<div class="modal-note" id="key-provider-note"></div>' +
+      '<label class="modal-label" for="key-input">API Key</label>' +
+      '<input type="text" id="key-input" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
+      '<div class="modal-hint">Key 会写入 Secret 持久化并注入到该用户运行中的 agent；' +
+      "若 agent 尚未恢复将自动恢复。</div>" +
+      '<div class="modal-error" id="key-error"></div>' +
+      '<div class="modal-actions">' +
+      '<button class="secondary" id="key-cancel">取消</button>' +
+      '<button id="key-ok">确定</button>' +
+      "</div></div>";
+
+    var select = root.querySelector("#key-provider-select");
+    var note = root.querySelector("#key-provider-note");
+    var input = root.querySelector("#key-input");
+    var error = root.querySelector("#key-error");
+
+    // updateNote 提示已配置的 provider：与所选一致时说明会覆盖，否则说明会切换。
+    function updateNote() {
+      if (!currentProvider) {
+        note.textContent = "";
+        return;
+      }
+      if (select.value === currentProvider) {
+        note.textContent = "当前已设置：" + currentName + "（保存后将覆盖现有 Key）";
+      } else {
+        note.textContent = "当前已设置：" + currentName + "（保存后将切换并退出旧 provider）";
+      }
+    }
+
+    // submit 做非空校验（内联提示），通过后关闭对话框并提交。
+    function submit() {
+      if (select.disabled) {
+        // provider 列表尚未就绪，避免把占位项当作 providerId 提交。
+        error.textContent = "Provider 列表加载中，请稍候…";
+        return;
+      }
+      var key = input.value.trim();
+      if (key === "") {
+        error.textContent = "API Key 不能为空";
+        input.focus();
+        return;
+      }
+      closeKeyDialog();
+      submitUserAPIKey(name, key, select.value);
+    }
+
+    root.querySelector("#key-cancel").addEventListener("click", closeKeyDialog);
+    root.querySelector("#key-ok").addEventListener("click", submit);
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.keyCode === 13) {
+        e.preventDefault();
+        submit();
+      }
+    });
+    select.addEventListener("change", updateNote);
+    // 仅在遮罩上按下并松开时才关闭，避免在输入框内选中文字后拖到遮罩上误关闭。
+    var overlayPressed = false;
+    root.addEventListener("mousedown", function (e) {
+      overlayPressed = e.target === root;
+    });
+    root.addEventListener("click", function (e) {
+      if (e.target === root && overlayPressed) closeKeyDialog();
+    });
+    document.addEventListener("keydown", onKeyDialogKeydown, true);
+
+    document.body.appendChild(root);
+    keyDialogEl = root;
+    input.focus();
+
+    // 异步填充 provider 列表；失败时 fetchProviders 已回退为 DeepSeek，仍可继续。
+    fetchProviders().then(function (list) {
+      if (keyDialogEl !== root) return; // 对话框已关闭，丢弃本次结果
+      select.innerHTML = "";
+      list.forEach(function (p) {
+        var opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.name;
+        select.appendChild(opt);
+      });
+      // 预选该用户已配置的 provider；列表里没有该 id 时补一项，保证能选中。
+      select.value = currentProvider || "";
+      if (currentProvider && !select.value) {
+        var extra = document.createElement("option");
+        extra.value = currentProvider;
+        extra.textContent = currentName;
+        select.insertBefore(extra, select.firstChild);
+        select.value = currentProvider;
+      }
+      if (!select.value && list.length) {
+        select.value = list[0].id;
+      }
+      select.disabled = false;
+      updateNote();
+    });
+  }
+
+  // clearUserAPIKey 清除该用户的专属 Key；确认文案按用户实际配置的 provider 命名，
+  // 未配置时使用通用文案。
+  function clearUserAPIKey(name, providerId) {
+    var providerName = providerDisplayName(providerId) || providerId;
+    var confirmText = providerName ?
+      "确认清除 \"" + name + "\" 的 " + providerName + " 专属 API Key？\n" +
+      "其 agent 将退出 " + providerName + " 登录并回退到内置/环境变量凭据。" :
+      "确认清除 \"" + name + "\" 的专属 API Key？\n" +
+      "该用户当前未存储专属 Key，清除操作不会改变其凭据来源。";
+    if (!window.confirm(confirmText)) {
       return;
     }
     clearMsg();
@@ -533,7 +763,7 @@
         });
       })
       .then(function (j) {
-        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "DeepSeek Key 已清除"));
+        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "Key 已清除"));
         listUsers();
       })
       .catch(function (err) {
@@ -926,6 +1156,7 @@
     openMenuUser = null;
   }, true);
 
+  listProviders();
   listUsers();
   listSkills();
   setInterval(listUsers, 5000);
