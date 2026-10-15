@@ -281,9 +281,12 @@ Actor 内 pi-web 自身的 api-key 登录流程，把凭据写进该 Actor 的 `
 （`/data/pi-agent/auth.json`）。一个用户 == 一个 Actor，正好构成 per-user 的 key
 面。完整设计见 `docs/injectDeepsseekKey.md`。
 
-provider 从管理面的**精选 OpenAI 兼容列表**中选择（`deepseek`、`openai`、
-`openrouter`、`moonshotai`、`zai`、`qwen-token-plan`、`minimax`、`groq`、
-`mistral`、`xai`；可用 `KEY_PROVIDERS` 覆盖，见 `GET /usermanagement/api/providers`）。
+provider 从管理面的可选列表中选择（`deepseek`、`openai`、`openrouter`、
+`moonshotai`、`zai`、`qwen-token-plan`、`minimax`、`groq`、`mistral`、`xai` 等
+pi-web 内置 registry provider，可用 `KEY_PROVIDERS` 覆盖内置列表；见
+`GET /usermanagement/api/providers`）。除内置 provider 外，管理员还可在管理面或用 API
+添加**任意 OpenAI 兼容端点**（如 SiliconFlow / 硅基流动），它对**所有**用户可选，详见
+下文「自定义 OpenAI 兼容端点（管理面注册表）」。
 **每个用户同一时间只保留一个 provider**：存入不同 provider 即为切换，服务端会先让
 该 Actor 退出旧 provider 登录。Key 落库后，该 provider 的模型会自动出现在该用户的
 pi-web 模型选择器中，**无需**修改 `models.json`。
@@ -300,6 +303,7 @@ pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优�
 ```bash
 ./set-user-apikey.sh alice sk-...         # 默认 DeepSeek；actor 挂起时自动先恢复
 ./set-user-apikey.sh alice sk-... openai  # 指定 provider（切换时先退出旧 provider）
+./set-user-apikey.sh alice sk-... siliconflow  # 自定义端点示例（seed 的 SiliconFlow）
 ./clear-user-apikey.sh alice              # 清除（幂等）；agent 回退到 env key
 # 测试环境（atespace mfpi-test）：
 ./set-user-apikey-test.sh alice sk-...
@@ -325,6 +329,58 @@ key（重试退避按 user+provider 计），因此任何 resume 路径（包括
   不触碰 actor（幂等）。
 - 设置 / 清除都会在需要时自动恢复 `SUSPENDED` 的 actor。挂起 / 恢复（Full 快照）
   保留 `auth.json`，因此已设的 key 在挂起 / 恢复后依然生效。
+
+### 自定义 OpenAI 兼容端点（管理面注册表）
+
+除 pi-web 内置 registry 中的 provider 外，管理员还可以新增**任意 OpenAI 兼容端点**
+（显示名 + `baseUrl` + 模型名列表），它对**所有**用户的 pi-web 模型选择器立即可选。管理
+UI 的 provider 选择器用的是「内置列表 + 注册表」合并后的结果；当前清单的 seed 里预置了
+**SiliconFlow（硅基流动）** 作为示例（id `siliconflow`，`baseUrl`
+`https://api.siliconflow.cn/v1`）。
+
+**注册表位置与写入方**：ConfigMap `mfpi-provider-models` 的 `provider-models.json` 键，内容
+是一份 `models.json` 文档（生产模板 `mf-pi.yaml.tmpl` 与测试模板 `mf-pi-test.yaml.tmpl` 各
+一份）。`mfpi-admin` 经 Kubernetes API server 读写它（RBAC `mfpi-admin-providers` 授予
+`get` / `update`）。管理面操作：`/usermanagement/` 顶部的「**模型端点**」按钮打开模态框，
+列出注册表中的自定义端点（`custom:true`），每行可**删除**，也可用「**添加端点**」表单
+（显示名 / Base URL / 模型名，逗号或换行分隔 / API 类型 / 可选 id）新增；增删后会重新拉取
+provider 列表，「**设置 Key**」下拉立即能选到新端点（自定义项标注 `…（自定义）`）。也可直接
+用 API——**无需重建镜像、无需重启 Actor**：
+
+```bash
+# 新增 / 覆盖一个端点（id 缺省由 name 推导；api 缺省 openai-completions）
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/providers" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Internal Gateway","baseUrl":"https://llm.internal.example/v1","models":["qwen3-32b"]}'
+# 移除
+curl -sS -u admin:'mf@pass2026' -X DELETE \
+  "${BASE}/usermanagement/api/providers/internal-gateway"
+```
+
+> [!NOTE]
+> 清单会**预创建**该 ConfigMap 并以 SiliconFlow 为 seed；重新 apply 部署清单（redeploy）会
+> 把注册表**重置回 seed**，通过 API 添加的端点随之丢失。要长期保留，请把端点写回清单的
+> ConfigMap。
+
+**下发机制（Actor 自拉）**：平台无法把 ConfigMap 挂进 Actor——ActorTemplate 的 `volumes`
+只支持 `durableDir` / `externalVolumeTemplate`
+（`pkg/api/v1alpha1/actortemplate_types.go:53-65`），且 `VolumeMount` 只有 `name` /
+`mountPath`、**没有 `subPath`**（`pkg/api/v1alpha1/actortemplate_types.go:80-95`），因此单个
+文件无法挂到 `<agentDir>/models.json`。实际做法是 `mfpi-admin` 通过
+`GET /internal/providers/models.json`（集群内、无鉴权）把注册表以 `models.json` 文档返回；
+每个 Actor 的 supervisor 每 60s 拉取一次并**合并**进 `$PI_CODING_AGENT_DIR/models.json`
+（默认 `/data/pi-agent/models.json`）：只覆盖 `providers` 中同名的托管项，文件里原有的其它
+provider、其它顶层键一律保留；拉取失败、非 2xx 或响应体无法解析时**保持现有文件不变**，
+只有内容确实变化时才写盘。pi-web 每次请求都会重读 `models.json`，因此改动**无需重启
+sessiond/web**，约 60s 内即出现在各用户的模型列表中。
+
+**KEY_PROVIDERS 只管内置列表**：`KEY_PROVIDERS` 只覆盖内置精选 provider；自定义端点不需要
+写进它，`GET /api/providers` 会自动把注册表里的端点（带 `"custom":true`）并到内置列表之后。
+
+> 移除是**只增不删**的：从注册表删除某个端点只会让管理面不再提供它，**不会**清除已经合并
+> 进各 Actor `models.json` 的条目（该文件位于用户的持久卷 `/data/pi-agent`，跨 Actor 重建
+> 保留）。要真正下架，需在 Actor 内手动删除对应条目（可用 `exec-actor.sh`）。完整设计与运维
+> 说明见 `docs/provider_endpoints.md`。
 
 ### 统一安装 Skill（管理员分发到所有用户）
 

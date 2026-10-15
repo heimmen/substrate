@@ -74,7 +74,7 @@ mf-pi 把「平台」和「用户 Agent」拆成两个独立的 HTTP 服务，�
 | `/<username>/<path>` | 以 `Host: <username>.<atespace>.actors.resources.substrate.ate.dev` 转发给 atenet-router，最终到达该用户 Actor 的 `pi-web`；经**就绪门**鉴权 |
 | 其它（如 `/favicon.ico`） | 按 `mfpi_user` cookie 路由到对应用户，经 `/_mfpi_auth` 鉴权 |
 
-**仅集群内可达、不属于外部 API** 的端点（下面会标注）：admin 的 `/internal/skills/*`，以及 nginx 声明为 `internal` 的 `/_mfpi_auth`、`/_mfpi_gate`、`/_mfpi_loading`。
+**仅集群内可达、不属于外部 API** 的端点（下面会标注）：admin 的 `/internal/skills/*`、`/internal/providers/models.json`，以及 nginx 声明为 `internal` 的 `/_mfpi_auth`、`/_mfpi_gate`、`/_mfpi_loading`。
 
 > 开发期可使用 `kubectl port-forward`（`58680`→router、`58682`→admin，`run-nginx.sh:83-84`），但它们只绑定 `127.0.0.1`，且 **admin 端口没有任何鉴权**——不要把 `mfpi-admin:8080` 直接暴露给不可信网络。
 
@@ -261,7 +261,7 @@ if ($http_accept !~* "text/html") { return 503; }
 **鉴权**：HTTP Basic（nginx 层，见 §1.4）
 **响应**：JSON，`Cache-Control: no-store`
 
-> 路由注册见 `demos/mf-pi/admin/main.go:1520-1531`。
+> 路由注册见 `demos/mf-pi/admin/main.go:1656-1677`。
 > 直连 `mfpi-admin:8080`（集群内或 port-forward）时 URL **去掉** `/usermanagement` 前缀，且**没有任何鉴权**——仅供集群内组件使用。
 
 ### 4.1 端点总览
@@ -272,7 +272,9 @@ if ($http_accept !~* "text/html") { return 503; }
 | POST | `/usermanagement/api/users` | 创建用户（幂等） |
 | DELETE | `/usermanagement/api/users/{name}` | 删除用户并回收其持久卷 |
 | POST | `/usermanagement/api/users/{name}/password` | 重置访问密码 |
-| GET | `/usermanagement/api/providers` | 列出可选 provider（OpenAI 兼容） |
+| GET | `/usermanagement/api/providers` | 列出可选 provider（内置 + 自定义端点） |
+| POST | `/usermanagement/api/providers` | 新增 / 覆盖自定义 OpenAI 兼容端点 |
+| DELETE | `/usermanagement/api/providers/{id}` | 移除自定义端点 |
 | POST | `/usermanagement/api/users/{name}/apikey` | 设置用户专属 provider Key |
 | DELETE | `/usermanagement/api/users/{name}/apikey` | 清除用户专属 provider Key |
 | POST / PUT | `/usermanagement/api/users/{name}/expiry` | 设置账号有效期 |
@@ -288,8 +290,9 @@ if ($http_accept !~* "text/html") { return 503; }
 | GET | `/usermanagement/_mfpi_loading` | 加载页（内部） |
 | GET | `/usermanagement/internal/skills/manifest` | Actor 拉取清单（**集群内**） |
 | GET | `/usermanagement/internal/skills/{name}.tgz` | Actor 拉取 Skill 包（**集群内**） |
+| GET | `/usermanagement/internal/providers/models.json` | Actor 拉取 provider 注册表（**集群内**） |
 
-> 说明：`/internal/skills/*` 虽然能被 `/usermanagement/` 前缀转发到，但该前缀需要管理面 Basic Auth；**Actor 的拉取循环走的是集群内 Service DNS**（`http://mfpi-admin.ate-demo-mf-pi.svc.cluster.local:8080/internal/skills`，见 `mf-pi.yaml.tmpl:399`），不经过 nginx。
+> 说明：`/internal/skills/*` 与 `/internal/providers/models.json` 虽然能被 `/usermanagement/` 前缀转发到，但该前缀需要管理面 Basic Auth；**Actor 的拉取循环走的是集群内 Service DNS**（`http://mfpi-admin.ate-demo-mf-pi.svc.cluster.local:8080/internal/skills`，见 `mf-pi.yaml.tmpl:399`），不经过 nginx。
 
 ---
 
@@ -462,11 +465,19 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
 
 ### `GET /api/providers` — 列出可选 provider（新增，暂不占用编号）
 
-返回本管理面**精选**的 OpenAI 兼容 provider 列表，供管理 UI 渲染 provider 选择器。列表为服务端内置默认值（`demos/mf-pi/admin/providers.go`），可用环境变量 `KEY_PROVIDERS` 按环境覆盖。
+返回本管理面**可选**的 OpenAI 兼容 provider 列表，供管理 UI 渲染 provider 选择器。列表 =
+服务端内置（默认值见 `demos/mf-pi/admin/providers.go`，可用 `KEY_PROVIDERS` 覆盖）的**内置
+列表**，**后接**注册表中的**自定义端点**（带 `"custom":true`，见 `mfpi-provider-models`
+与 `docs/provider_endpoints.md`）。`KEY_PROVIDERS` 只覆盖内置列表，自定义端点不需要写进它。
+
+管理面 `/usermanagement/` 顶部的「**模型端点**」按钮即通过本端点与下面的 `POST` / `DELETE`
+管理注册表：模态框列出 `custom:true` 的端点，可逐行**删除**，并可用「**添加端点**」表单
+（显示名 / Base URL / 模型名（逗号或换行分隔）/ API 类型 / 可选 id）新增；增删后前端会重新
+拉取本列表，因此「**设置 Key**」下拉立即能选到新端点（自定义项标注 `…（自定义）`）。
 
 **请求参数**：无。
 
-**成功响应** `200`：
+**成功响应** `200`（内置项在前且不带 `custom`，自定义端点按 id 排序在后）：
 
 ```json
 {
@@ -480,20 +491,120 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
     { "id": "minimax", "name": "MiniMax" },
     { "id": "groq", "name": "Groq" },
     { "id": "mistral", "name": "Mistral" },
-    { "id": "xai", "name": "xAI (Grok)" }
+    { "id": "xai", "name": "xAI (Grok)" },
+    { "id": "siliconflow", "name": "SiliconFlow (硅基流动)", "custom": true,
+      "baseUrl": "https://api.siliconflow.cn/v1", "api": "openai-completions",
+      "models": ["deepseek-ai/DeepSeek-V3.2", "Qwen/Qwen3-32B", "moonshotai/Kimi-K2.7-Code"] }
   ]
 }
 ```
 
-**覆盖默认列表**：`KEY_PROVIDERS` 为逗号分隔的列表，每项为 `id` 或 `id=显示名`（留空或无法解析时回退到内置默认值），例如：
+provider 对象字段（`custom:true` 的项额外带 `baseUrl` / `api` / `models`，供「模型端点」管理页直接逐行渲染，无需再发一次请求）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | provider id |
+| `name` | string | 显示名 |
+| `custom` | bool | `true` 表示注册表中的自定义端点；内置项省略该字段 |
+| `baseUrl` | string | 端点地址；**仅**自定义端点带，内置项省略 |
+| `api` | string | pi-ai 的 API 实现（如 `openai-completions`）；**仅**自定义端点带，内置项省略 |
+| `models` | string[] | 模型 id 列表；**仅**自定义端点带，内置项省略 |
+
+**覆盖内置列表**：`KEY_PROVIDERS` 为逗号分隔的列表，每项为 `id` 或 `id=显示名`（留空或无法解析时回退到内置默认值），例如：
 
 ```bash
 KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 ```
 
-**方法限制**：仅接受 `GET`；其它方法返回 `404`。
+**方法限制**：`GET` 列出（本小节）；`POST` 新增（见下）；其它方法返回 `404`。
 
 > 本小节为新增端点，为保持后续小节的既有编号稳定，未占用 `4.x` 编号；`providerId` 的合法取值即本端点返回的 `id`，用于 §4.6 的 `POST /api/users/{name}/apikey`。
+
+---
+
+### `POST /api/providers` — 新增 / 覆盖自定义端点（新增，暂不占用编号）
+
+在注册表中新增（或按 id 覆盖）一个自定义 OpenAI 兼容端点，成功后它对**所有**用户可选。
+端点**不带凭据**：Key 仍按用户存储（见 §4.6）。注册表持久化在 ConfigMap
+`mfpi-provider-models`；各 Actor 约 60s 内拉取合并进自己的 `models.json`，**无需重启**。
+
+**请求体**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string | 否 | 显示名；缺省即最终 id |
+| `baseUrl` | string | 是 | 须为 `http://` 或 `https://` 开头的完整地址 |
+| `api` | string | 否 | pi-ai API 实现；缺省 `openai-completions` |
+| `models` | string[] | 是 | 模型名列表，至少一个非空项；重名去重，每个模型的显示名缺省即其 id |
+| `id` | string | 否 | provider id；缺省由 `name` 推导：转小写，`-` / `_` / `.` / 空格折叠为 `-` 并去首尾，**其它非字母数字字符直接丢弃**（如 `Z.AI  GLM` → `z-ai-glm`），推不出字符时回退 `custom`。须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不得与内置 provider 同名 |
+
+```json
+{ "name": "Internal Gateway", "baseUrl": "https://llm.internal.example/v1", "models": ["qwen3-32b"] }
+```
+
+**成功响应** `200`：
+
+```json
+{
+  "provider": {
+    "id": "internal-gateway", "name": "Internal Gateway", "custom": true,
+    "baseUrl": "https://llm.internal.example/v1", "models": ["qwen3-32b"]
+  },
+  "message": "Internal Gateway 已保存；该端点会在 60s 内出现在各用户的模型列表中"
+}
+```
+
+`provider` 与 §`GET /api/providers` 中的条目同形（含 `baseUrl` / `models`）。
+
+**错误**：
+
+| 状态码 | 响应 | 场景 |
+|---|---|---|
+| `400` | `{"error":"请求体不是合法 JSON"}` | body 无法解析 |
+| `400` | `{"error":"provider id \"X\" 非法：需匹配 ^[a-z0-9][a-z0-9._-]*$"}` | 显式 `id` 字符集非法 |
+| `400` | `{"error":"provider id \"openai\" 与内置 provider 冲突，请换一个"}` | `id` 与内置 provider 同名 |
+| `400` | `{"error":"baseUrl 不能为空"}` | 缺 `baseUrl` |
+| `400` | `{"error":"baseUrl \"x\" 非法：需要 http:// 或 https:// 开头的完整地址"}` | `baseUrl` 非法 |
+| `400` | `{"error":"至少要指定一个模型名"}` | `models` 为空或全为空白 |
+| `500` | `{"error":"保存 provider 失败: ..."}` | 写 ConfigMap 失败 |
+
+```bash
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/providers" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Internal Gateway","baseUrl":"https://llm.internal.example/v1","models":["qwen3-32b"]}'
+```
+
+---
+
+### `DELETE /api/providers/{id}` — 移除自定义端点（新增，暂不占用编号）
+
+从注册表移除一个自定义端点；管理面与 `GET /api/providers` 立即不再提供它。**已经拉取过它的
+Actor 仍保留**本地 `models.json` 中的定义（合并只增不删）；要彻底下架需在 Actor 内手动删除
+对应条目（见 `docs/provider_endpoints.md`）。
+
+**路径参数**：`id`（string，必填，注册表中的 provider id）。
+
+**成功响应** `200`：
+
+```json
+{
+  "message": "internal-gateway 已从注册表移除；已拉取该端点的 actor 仍保留本地 models.json 中的定义",
+  "provider": "internal-gateway"
+}
+```
+
+**错误**：
+
+| 状态码 | 响应 | 场景 |
+|---|---|---|
+| `400` | `{"error":"缺少 provider id"}` | 路径未带 id（如 `/api/providers/`） |
+| `404` | `{"error":"provider 不存在: <id>"}` | `id` 不在注册表中 |
+| `500` | `{"error":"删除 provider 失败: ..."}` | 写 ConfigMap 失败 |
+
+```bash
+curl -sS -u admin:'mf@pass2026' -X DELETE \
+  "${BASE}/usermanagement/api/providers/internal-gateway"
+```
 
 ---
 
@@ -510,7 +621,7 @@ KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `apiKey` | string | 是 | 非空；前后空白会被去掉 |
-| `providerId` | string | 否 | provider id；缺省为 `deepseek`（因此旧请求体 `{"apiKey":"..."}` 仍然兼容）。取值须在精选列表中（见 `GET /api/providers`，可用 `KEY_PROVIDERS` 覆盖）：`deepseek`、`openai`、`openrouter`、`moonshotai`、`zai`、`qwen-token-plan`、`minimax`、`groq`、`mistral`、`xai` |
+| `providerId` | string | 否 | provider id；缺省为 `deepseek`（因此旧请求体 `{"apiKey":"..."}` 仍然兼容）。取值须在 `GET /api/providers` 返回的列表中：内置（`deepseek`、`openai`、`openrouter`、`moonshotai`、`zai`、`qwen-token-plan`、`minimax`、`groq`、`mistral`、`xai`，可用 `KEY_PROVIDERS` 覆盖）**或**注册表中的自定义端点 id（如 seed 的 `siliconflow`，见 §4 的 `POST /api/providers`） |
 
 ```json
 { "apiKey": "sk-xxxxxxxx" }
@@ -527,7 +638,7 @@ KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 | 状态码 | 响应 | 场景 |
 |---|---|---|
 | `400` | `{"error":"请求体不是合法 JSON"}` / `{"error":"apiKey 不能为空"}` / `{"error":"非法用户名"}` | 参数问题 |
-| `400` | `{"error":"不支持的 provider: xxx（可选: deepseek, openai, ...）"}` | `providerId` 不在精选列表中 |
+| `400` | `{"error":"不支持的 provider: xxx（可选: deepseek, openai, ...）"}` | `providerId` 不在 `GET /api/providers` 返回的列表中（内置或自定义端点） |
 | `404` | `{"error":"用户不存在"}` | Actor 不存在（此时不会写 Secret） |
 | `500` | `{"error":"查询用户失败: ..."}` / `{"error":"保存 <Provider> Key 失败: ..."}` | ateapi / Secret 写入失败 |
 | `502` | `{"error":"切换 provider 失败（无法恢复用户以退出旧 provider <old>）: ...","name":"alice"}` | 切换时无法恢复用户以退出旧 provider |
@@ -547,7 +658,7 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
   -H 'Content-Type: application/json' -d '{"apiKey":"sk-xxxxxxxx","providerId":"openai"}'
 ```
 
-> 存储格式：Secret `mfpi-user-provider-keys` 中每个用户名为一个 JSON 值 `{"providerId":"...","apiKey":"..."}`；旧版本写入的裸 Key 字符串仍按 `deepseek` 读回，升级向后兼容。本次未新增 Kubernetes 资源或 RBAC。
+> 存储格式：Secret `mfpi-user-provider-keys` 中每个用户名为一个 JSON 值 `{"providerId":"...","apiKey":"..."}`；旧版本写入的裸 Key 字符串仍按 `deepseek` 读回，升级向后兼容。本端点自身不新增 Kubernetes 资源或 RBAC（provider 注册表另见 §4 的 `mfpi-provider-models` ConfigMap 与 `mfpi-admin-providers` Role/RoleBinding）。
 
 ---
 
@@ -836,8 +947,35 @@ curl -sS -u admin:'mf@pass2026' "${BASE}/usermanagement/healthz"
 |---|---|
 | `GET /internal/skills/manifest` | 返回 §4.11 的 manifest JSON，带 `ETag`；请求头 `If-None-Match` 命中时返回 `304`（`skills.go:563-576`） |
 | `GET /internal/skills/{name}.tgz` | 返回 `application/gzip` 的 Skill 包，`Content-Disposition: attachment`；名称非法或不存在返回 `404`（`skills.go:579-597`） |
+| `GET /internal/providers/models.json` | 返回管理员维护的 provider 注册表（渲染成 pi-web 的 `models.json` 文档），供 Actor 合并进 `<agentDir>/models.json`（`providermodels.go:285-297`） |
 
-Actor 的拉取循环每 10s 访问一次这些端点（`mf-pi.yaml.tmpl` 注入的脚本），**无鉴权**，因此这两个端点绝不可暴露到集群外。
+Actor 的拉取循环每 10s 访问一次两个 skills 端点、每 60s 访问一次 provider 注册表端点（均为 `mf-pi.yaml.tmpl` 注入的脚本），**无鉴权**，因此这些端点绝不可暴露到集群外。
+
+#### `GET /internal/providers/models.json` — provider 注册表（新增，暂不占用编号）
+
+本端点把**管理员维护的**注册表（`admin/providermodels.go`）渲染成 pi-web 的 `models.json` 文档
+返回。注册表存放在 ConfigMap `mfpi-provider-models` 的 `provider-models.json` 键（两个部署
+清单各预创建一份，以 SiliconFlow 为 seed）；admin 经 Kubernetes API server 读取，ConfigMap 名
+与 namespace 由 `PROVIDER_MODELS_CONFIGMAP`（默认 `mfpi-provider-models`）与
+`PROVIDER_MODELS_NAMESPACE` 指定，`mfpi-admin-providers` Role/RoleBinding 授予 `get` / `update`。
+admin **不再**使用 `PROVIDER_MODELS_FILE`，也没有把 ConfigMap 挂进 admin Pod。管理员经 §4 的
+`POST` / `DELETE /api/providers` 增删端点；每 30s 的 reconcile 也会重读 ConfigMap，因此直接
+`kubectl edit` 的改动同样生效。
+
+**请求**：`GET /internal/providers/models.json`，无参数、无请求体、**无鉴权**。
+
+**响应** `200`：`Content-Type: application/json`、`Cache-Control: no-store`；body 形如
+`{"providers":{"<id>":{"name":...,"baseUrl":...,"api":...,"models":[...]}}}`。
+
+**空注册表**：ConfigMap 不存在或没有任何端点时返回 `200` + `{"providers":{}}`，**不是**错误
+响应——空注册表让 Actor 能把它与拉取失败区分开，也避免缺失的 ConfigMap 卡死 Actor 的拉取
+循环。注册表 JSON 在 admin 启动时若无法解析会直接 fatal（运维 typo 立即暴露）。
+
+**方法限制**：仅接受 `GET`，其它方法返回 `404`（`providermodels.go:285-289`）。
+
+> ⚠️ 与 `/internal/skills/*` 一样，本端点**仅供集群内 Actor 经 Service DNS**（如
+> `http://mfpi-admin.ate-demo-mf-pi.svc.cluster.local:8080/internal/providers/models.json`）
+> 访问；nginx 只对外暴露 `/usermanagement/` 与 `/<user>/`，因此**绝不可**把本端点发布到集群外。
 
 ---
 
@@ -4518,7 +4656,8 @@ websocat -H="Authorization: Basic $(printf 'alice:%s' "$USER_PASSWORD" | base64)
 | **就绪门（gate）** | nginx 的 `auth_request /_mfpi_gate`：鉴权 + 判断 Actor 是否 `RUNNING`，未就绪时返回 403 并后台触发 resume |
 | **加载页（loading page）** | Actor 未就绪时给浏览器（`Accept: text/html`）的 HTML 过渡页；API 客户端收到原始 503 |
 | **共享 Skill（managed skill）** | 管理员在 `mfpi-admin` 统一上传、由所有 Actor 的拉取循环同步到 `${PI_CODING_AGENT_DIR}/skills` 的 Skill 包 |
-| **专属 Key** | 管理员为单个用户设置的**一个** OpenAI 兼容 provider 的 API Key（provider 可选，缺省 `deepseek`），持久化在 Secret `mfpi-user-provider-keys`，注入 Agent 后优先于该 provider 的环境变量 |
+| **专属 Key** | 管理员为单个用户设置的**一个** OpenAI 兼容 provider 的 API Key（provider 可选，取自内置列表或注册表中的自定义端点，缺省 `deepseek`），持久化在 Secret `mfpi-user-provider-keys`，注入 Agent 后优先于该 provider 的环境变量 |
+| **自定义端点（provider 注册表）** | 管理员经 `/api/providers` 增删的任意 OpenAI 兼容端点（显示名 + `baseUrl` + 模型名）；**部署级、对所有用户可选、不带凭据**，存放于 ConfigMap `mfpi-provider-models`，各 Actor 每 60s 拉取并合并进自己的 `models.json` |
 
 ### 8.2 端点总览
 
@@ -4530,6 +4669,8 @@ POST   /api/users
 DELETE /api/users/{name}
 POST   /api/users/{name}/password
 GET    /api/providers
+POST   /api/providers
+DELETE /api/providers/{id}
 POST   /api/users/{name}/apikey
 DELETE /api/users/{name}/apikey
 POST   /api/users/{name}/expiry        (也接受 PUT)
@@ -4675,14 +4816,15 @@ WS     /api/machines/local/events
 | 内容 | 位置 |
 |---|---|
 | 网关路由与鉴权 | `demos/mf-pi/nginx.conf`（生产）、`nginx-test.conf`（测试） |
-| 管理面实现 | `demos/mf-pi/admin/main.go`、`apikey.go`、`providers.go`、`expiry.go`、`idle.go`、`tier.go`、`skills.go`、`gate.go`、`loading.go` |
-| 管理面路由注册 | `demos/mf-pi/admin/main.go:1520-1531` |
+| 管理面实现 | `demos/mf-pi/admin/main.go`、`apikey.go`、`providers.go`、`providermodels.go`、`expiry.go`、`idle.go`、`tier.go`、`skills.go`、`gate.go`、`loading.go` |
+| 管理面路由注册 | `demos/mf-pi/admin/main.go:1656-1677` |
 | 管理面单测（含响应结构断言） | `demos/mf-pi/admin/main_test.go`、`skills_test.go` |
 | 用户 Agent 服务（pi-web） | 独立仓库 `cliu-pi-web`：`src/server/app.ts`（路由注册）、`src/server/sessions/*`、`src/server/sessiond.ts` |
 | 部署清单 | `demos/mf-pi/mf-pi.yaml.tmpl`、`mf-pi-test.yaml.tmpl` |
 | 演示总览 | `demos/mf-pi/README.md`、`demos/mf-pi/docs/mfpi.md`、`demos/mf-pi/docs/actor_inside.md` |
 | Skill 分发设计 | `demos/mf-pi/docs/deploy_skill_to_actor.md` |
 | 专属 Key（provider 通用）设计 | `demos/mf-pi/docs/injectDeepsseekKey.md`、`demos/mf-pi/admin/providers.go` |
+| 自定义 OpenAI 兼容端点设计 | `demos/mf-pi/docs/provider_endpoints.md`、`demos/mf-pi/admin/providermodels.go` |
 | 每用户持久卷设计 | `demos/mf-pi/docs/save_userdata_pv.md`、`demos/mf-pi/docs/perUserDataVolume.md` |
 | 资源档位 / 有效期设计 | `demos/mf-pi/docs/resource_quota_plan.md` |
 | CLI 包装脚本 | `create-user.sh`、`delete-user.sh`、`list-users.sh`、`set-user-apikey.sh`、`clear-user-apikey.sh`、`install-skill.sh`、`list-skills.sh`、`remove-skill.sh`、`apply-skills.sh`（均含 `-test` 变体） |
@@ -4691,7 +4833,7 @@ WS     /api/machines/local/events
 
 1. **管理面必须置于 Basic Auth 之后**。`mfpi-admin` 应用自身不做鉴权；只有经 nginx `/usermanagement/` 才有鉴权。**不要**把 `svc/mfpi-admin:8080` 通过 NodePort/LoadBalancer/Ingress 裸露，也不要长期保留 `kubectl port-forward` 通道。
 2. **默认管理凭据是公开的**（`admin` / `mf@pass2026`，见 `run-nginx.sh:88-89`）。生产部署务必用 `ADMIN_USER` / `ADMIN_PASSWORD` 覆盖，并考虑在网关前再加一层 TLS 与访问控制。
-3. **仅集群内端点**（`/internal/skills/*`、`/_mfpi_auth`、`/_mfpi_gate`、`/_mfpi_loading`）无鉴权或依赖内部头，禁止直接对外暴露。
+3. **仅集群内端点**（`/internal/skills/*`、`/internal/providers/models.json`、`/_mfpi_auth`、`/_mfpi_gate`、`/_mfpi_loading`）无鉴权或依赖内部头，禁止直接对外暴露。
 4. **凭据传输**：网关默认是明文 HTTP。跨不可信网络请自行在入口加 TLS 终结，或改用 VPN/内网。HTTP Basic 的凭据等同明文。
 5. **`/api/machines/local/config` 等配置写接口**可能改变 Agent 行为，外部组件应遵循最小权限；不要把用户密码复用于其它系统。
 6. **上传**：Skill 包与文件上传会落盘；对公网入口建议额外限制请求体大小与频率。

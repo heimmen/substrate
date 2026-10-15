@@ -197,6 +197,46 @@
   .modal-note, .modal-hint { font-size: 12px; color: var(--muted); margin: -4px 0 12px; }
   .modal-error { font-size: 13px; color: var(--danger); margin: -4px 0 8px; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  /* 自定义模型端点管理器：比 Key 对话框宽，内容超高时整体滚动。 */
+  .modal.endpoint-modal { max-width: 560px; max-height: 90vh; overflow-y: auto; }
+  .modal textarea {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: inherit;
+    background: #fff;
+    color: var(--text);
+    margin-bottom: 12px;
+    resize: vertical;
+    min-height: 64px;
+  }
+  .endpoint-list { max-height: 200px; overflow-y: auto; margin-bottom: 12px; }
+  .endpoint-item {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .endpoint-item .endpoint-name { font-size: 14px; font-weight: 600; }
+  .endpoint-item .endpoint-meta {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+    word-break: break-all;
+  }
+  .endpoint-item .endpoint-meta code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--gray-bg);
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  .endpoint-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
 </style>
 </head>
 <body>
@@ -206,6 +246,8 @@
     <div class="sub" id="atespace-info">正在加载 atespace 信息…</div>
   </div>
   <div class="toolbar" style="margin-bottom: 0">
+    <button class="secondary" id="providers-btn"
+            title="定义部署级的 OpenAI 兼容端点（Base URL + 模型名），所有用户都可在设置 Key 时选择">模型端点</button>
     <button class="secondary" id="refresh-btn">刷新</button>
   </div>
 </header>
@@ -367,6 +409,14 @@
         return fallbackProviders;
       });
     return providersPromise;
+  }
+
+  // refreshProviders 主动失效 provider 缓存并重新拉取：新增/删除自定义端点后调用，
+  // 使端点管理器列表与"设置 Key"对话框的 provider 下拉立即看到变更。
+  function refreshProviders() {
+    providersCache = null;
+    providersPromise = null;
+    return fetchProviders();
   }
 
   // providerDisplayName 把 provider id 解析为展示名；未加载或未知 id 时原样返回 id。
@@ -722,7 +772,8 @@
       list.forEach(function (p) {
         var opt = document.createElement("option");
         opt.value = p.id;
-        opt.textContent = p.name;
+        // 管理员定义的自定义端点加"（自定义）"后缀，与内置 provider 区分。
+        opt.textContent = p.name + (p.custom ? "（自定义）" : "");
         select.appendChild(opt);
       });
       // 预选该用户已配置的 provider；列表里没有该 id 时补一项，保证能选中。
@@ -740,6 +791,279 @@
       select.disabled = false;
       updateNote();
     });
+  }
+
+  // ---- 自定义模型端点（部署级，管理员维护） ----
+
+  // providerManagerEl 记录当前打开的"自定义模型端点"对话框根节点（含遮罩）。
+  // 与 keyDialogEl 同样的策略：每次打开新建、关闭时整体从 DOM 移除，因此 5 秒
+  // 自动刷新（只重建用户表 <tbody>）既不会干扰它，也不会把它重新"复活"。
+  var providerManagerEl = null;
+
+  // customEndpointDetails 记录本次会话内新增端点的 baseUrl/api/models 明细。
+  // GET api/providers 对 custom 端点已返回 baseUrl/api/models；本地记录仅作为
+  // 兜底（后端未返回时），让刚添加的端点在列表里立即显示完整信息。
+  var customEndpointDetails = {};
+
+  // closeProviderManager 关闭对话框（若已打开）并注销 Esc 监听。
+  function closeProviderManager() {
+    if (providerManagerEl && providerManagerEl.parentNode) {
+      providerManagerEl.parentNode.removeChild(providerManagerEl);
+    }
+    providerManagerEl = null;
+    document.removeEventListener("keydown", onProviderManagerKeydown, true);
+  }
+
+  // onProviderManagerKeydown 支持 Esc 关闭端点管理器。
+  function onProviderManagerKeydown(e) {
+    if (e.key === "Escape" || e.keyCode === 27) {
+      closeProviderManager();
+    }
+  }
+
+  // endpointDetail 汇总某个端点的展示明细：优先用列表返回的字段，其次用本地记录；
+  // 都缺失时 baseUrl/api 为空串、models 为空数组（渲染为"—"）。
+  function endpointDetail(p) {
+    var local = customEndpointDetails[p.id] || {};
+    var models = (p.models && p.models.length) ? p.models : (local.models || []);
+    var modelIds = models.map(function (m) {
+      return typeof m === "string" ? m : ((m && m.id) || "");
+    }).filter(function (m) {
+      return m !== "";
+    });
+    return {
+      baseUrl: p.baseUrl || local.baseUrl || "",
+      api: p.api || local.api || "",
+      models: modelIds
+    };
+  }
+
+  // unknownDetailHtml 在列表未返回明细时渲染占位符，并说明为何看不到明细。
+  function unknownDetailHtml() {
+    return '<span title="api/providers 列表未返回该字段；本次会话内新增的端点会显示完整明细">—</span>';
+  }
+
+  // renderEndpointList 渲染自定义端点列表：只在对话框仍打开时写 DOM。
+  function renderEndpointList(list) {
+    if (!providerManagerEl) return;
+    var box = providerManagerEl.querySelector("#endpoint-list");
+    if (!box) return;
+    var customs = (list || []).filter(function (p) {
+      return p && p.custom;
+    });
+    if (customs.length === 0) {
+      box.innerHTML = '<div class="endpoint-empty">尚未定义自定义端点</div>';
+      return;
+    }
+    box.innerHTML = "";
+    customs.forEach(function (p) {
+      var d = endpointDetail(p);
+      var item = document.createElement("div");
+      item.className = "endpoint-item";
+      item.innerHTML =
+        '<div style="min-width:0">' +
+        '<div class="endpoint-name">' + esc(p.name || p.id) + "</div>" +
+        '<div class="endpoint-meta">id：<code>' + esc(p.id) + "</code></div>" +
+        '<div class="endpoint-meta">Base URL：' +
+          (d.baseUrl ? "<code>" + esc(d.baseUrl) + "</code>" : unknownDetailHtml()) + "</div>" +
+        '<div class="endpoint-meta">模型：' +
+          (d.models.length ? esc(d.models.join(", ")) : unknownDetailHtml()) + "</div>" +
+        (d.api ? '<div class="endpoint-meta">API 类型：<code>' + esc(d.api) + "</code></div>" : "") +
+        "</div>" +
+        '<button class="danger mini endpoint-del" title="从注册表移除该端点">删除</button>';
+      item.querySelector(".endpoint-del").addEventListener("click", function () {
+        deleteEndpoint(p.id, p.name || p.id);
+      });
+      box.appendChild(item);
+    });
+  }
+
+  // loadEndpoints 拉取 provider 列表并渲染自定义端点行；refresh 为真时先失效缓存。
+  function loadEndpoints(refresh) {
+    return (refresh ? refreshProviders() : fetchProviders()).then(function (list) {
+      renderEndpointList(list);
+      return list;
+    });
+  }
+
+  // deleteEndpoint 删除一个自定义端点：确认后 DELETE api/providers/{id}，成功后
+  // 失效 provider 缓存、重绘端点列表与用户表（Key 徽标与下拉即时生效）。
+  function deleteEndpoint(id, name) {
+    if (!window.confirm("确认删除自定义端点 \"" + name + "\"（id：" + id + "）？\n" +
+        "删除后该端点不再出现在任何用户的 provider 列表中；已拉取该端点的 actor " +
+        "仍保留本地 models.json 中的定义。")) {
+      return;
+    }
+    clearMsg();
+    fetch("api/providers/" + encodeURIComponent(id), { method: "DELETE" })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        delete customEndpointDetails[id];
+        showMsg("已删除自定义端点：" + (j.message || id));
+        loadEndpoints(true).then(function () {
+          listUsers();
+        });
+      })
+      .catch(function (err) {
+        var error = providerManagerEl && providerManagerEl.querySelector("#endpoint-error");
+        if (error) error.textContent = "删除失败：" + err.message;
+        showMsg("删除模型端点失败：" + err.message, true);
+      });
+  }
+
+  // submitEndpoint 校验并 POST 新端点：显示名/Base URL/模型名必填，Base URL 必须是
+  // http(s):// 开头的完整地址（与服务端校验一致）；通过后刷新缓存与列表。
+  function submitEndpoint(root) {
+    var nameInput = root.querySelector("#endpoint-name");
+    var idInput = root.querySelector("#endpoint-id");
+    var urlInput = root.querySelector("#endpoint-baseurl");
+    var modelsInput = root.querySelector("#endpoint-models");
+    var apiSelect = root.querySelector("#endpoint-api");
+    var error = root.querySelector("#endpoint-error");
+    var okBtn = root.querySelector("#endpoint-ok");
+
+    var name = nameInput.value.trim();
+    var baseUrl = urlInput.value.trim();
+    // 模型名支持逗号（中英文）或换行分隔，去掉空项后作为 models 数组提交。
+    var models = modelsInput.value.split(/[,，\n\r]+/).map(function (m) {
+      return m.trim();
+    }).filter(function (m) {
+      return m !== "";
+    });
+
+    error.textContent = "";
+    if (name === "") {
+      error.textContent = "显示名不能为空";
+      nameInput.focus();
+      return;
+    }
+    if (baseUrl === "") {
+      error.textContent = "Base URL 不能为空";
+      urlInput.focus();
+      return;
+    }
+    if (baseUrl.indexOf("http://") !== 0 && baseUrl.indexOf("https://") !== 0) {
+      error.textContent = "Base URL 需要以 http:// 或 https:// 开头";
+      urlInput.focus();
+      return;
+    }
+    if (models.length === 0) {
+      error.textContent = "至少要指定一个模型名";
+      modelsInput.focus();
+      return;
+    }
+
+    var payload = {
+      name: name,
+      baseUrl: baseUrl,
+      api: apiSelect.value,
+      models: models
+    };
+    var id = idInput.value.trim();
+    if (id !== "") payload.id = id; // 留空则由服务端根据显示名生成
+
+    okBtn.disabled = true;
+    okBtn.textContent = "保存中…";
+    clearMsg();
+    fetch("api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        var saved = j.provider || {};
+        if (saved.id) {
+          customEndpointDetails[saved.id] = { baseUrl: baseUrl, api: payload.api, models: models };
+        }
+        // 清空表单便于连续添加；对话框保持打开，便于确认列表与用户表已更新。
+        nameInput.value = "";
+        idInput.value = "";
+        urlInput.value = "";
+        modelsInput.value = "";
+        showMsg("自定义模型端点：" + (j.message || "已保存"));
+        // 失效并重取 provider 缓存：管理器列表与"设置 Key"下拉立即出现新端点。
+        loadEndpoints(true).then(function () {
+          listUsers();
+        });
+      })
+      .catch(function (err) {
+        // 服务端错误同时给出对话框内联提示与页面级提示。
+        error.textContent = err.message;
+        showMsg("添加模型端点失败：" + err.message, true);
+      })
+      .finally(function () {
+        okBtn.disabled = false;
+        okBtn.textContent = "添加端点";
+      });
+  }
+
+  // openProviderManager 打开自定义模型端点管理器：上方列出当前自定义端点（可删除），
+  // 下方为添加表单；取消 / Esc / 点击遮罩关闭，关闭时整体从 DOM 移除。
+  function openProviderManager() {
+    closeKeyDialog(); // 同一时间只保留一个对话框
+    closeProviderManager();
+    var root = document.createElement("div");
+    root.className = "modal-overlay";
+    root.innerHTML =
+      '<div class="modal endpoint-modal" role="dialog" aria-modal="true" aria-label="自定义模型端点">' +
+      '<div class="modal-title">自定义模型端点（OpenAI 兼容）</div>' +
+      '<div class="modal-note">端点对部署内所有用户可见、可在"设置 Key"中选择；' +
+      "凭据（API Key）仍按用户各自存储。</div>" +
+      '<div class="endpoint-list" id="endpoint-list">' +
+      '<div class="endpoint-empty">正在加载…</div>' +
+      "</div>" +
+      '<label class="modal-label" for="endpoint-name">显示名 *</label>' +
+      '<input type="text" id="endpoint-name" placeholder="Internal Gateway" autocomplete="off" spellcheck="false" />' +
+      '<label class="modal-label" for="endpoint-id">id（可选）</label>' +
+      '<input type="text" id="endpoint-id" placeholder="留空则由显示名自动生成" autocomplete="off" spellcheck="false" />' +
+      '<div class="modal-hint">留空时服务端会依据显示名生成 id（如 internal-gateway）；' +
+      "自定义 id 需匹配 ^[a-z0-9][a-z0-9._-]*$，且不能与内置 provider 重名。</div>" +
+      '<label class="modal-label" for="endpoint-baseurl">Base URL *</label>' +
+      '<input type="text" id="endpoint-baseurl" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false" />' +
+      '<label class="modal-label" for="endpoint-models">模型名 *</label>' +
+      '<textarea id="endpoint-models" placeholder="qwen3-32b, llama-3.3-70b（逗号或换行分隔）" spellcheck="false"></textarea>' +
+      '<label class="modal-label" for="endpoint-api">API 类型</label>' +
+      '<select id="endpoint-api">' +
+      '<option value="openai-completions">openai-completions（Chat Completions）</option>' +
+      '<option value="openai-responses">openai-responses（Responses API）</option>' +
+      "</select>" +
+      '<div class="modal-error" id="endpoint-error"></div>' +
+      '<div class="modal-actions">' +
+      '<button class="secondary" id="endpoint-cancel">取消</button>' +
+      '<button id="endpoint-ok">添加端点</button>' +
+      "</div></div>";
+
+    root.querySelector("#endpoint-cancel").addEventListener("click", closeProviderManager);
+    root.querySelector("#endpoint-ok").addEventListener("click", function () {
+      submitEndpoint(root);
+    });
+    // 仅在遮罩上按下并松开时才关闭，避免在输入框内选中文字后拖到遮罩上误关闭。
+    var overlayPressed = false;
+    root.addEventListener("mousedown", function (e) {
+      overlayPressed = e.target === root;
+    });
+    root.addEventListener("click", function (e) {
+      if (e.target === root && overlayPressed) closeProviderManager();
+    });
+    document.addEventListener("keydown", onProviderManagerKeydown, true);
+
+    document.body.appendChild(root);
+    providerManagerEl = root;
+    root.querySelector("#endpoint-name").focus();
+
+    // 填充已有自定义端点；fetchProviders 失败时回退列表不含 custom 项，显示空态。
+    loadEndpoints(false);
   }
 
   // clearUserAPIKey 清除该用户的专属 Key；确认文案按用户实际配置的 provider 命名，
@@ -1142,6 +1466,7 @@
   });
 
   document.getElementById("refresh-btn").addEventListener("click", listUsers);
+  document.getElementById("providers-btn").addEventListener("click", openProviderManager);
 
   // 点击其他区域时关闭已打开的下拉菜单。
   document.addEventListener("click", function () {

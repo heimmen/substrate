@@ -17,12 +17,24 @@
 // A blank or unparsable spec falls back to defaultProviderOptions.
 package main
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // providerOption is one selectable provider in the usermanagement UI.
 type providerOption struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Custom marks providers that come from the admin-managed registry
+	// (arbitrary OpenAI-compatible endpoints) rather than pi-web's built-in
+	// registry.
+	Custom bool `json:"custom,omitempty"`
+	// BaseURL, API and Models describe a custom endpoint so the usermanagement
+	// UI can list it without a second request. They are empty for built-ins.
+	BaseURL string   `json:"baseUrl,omitempty"`
+	API     string   `json:"api,omitempty"`
+	Models  []string `json:"models,omitempty"`
 }
 
 // defaultProviderID is the provider assumed when a request omits providerId and
@@ -82,6 +94,51 @@ func defaultProviderSpec() string {
 		parts = append(parts, p.ID+"="+p.Name)
 	}
 	return strings.Join(parts, ",")
+}
+
+// builtinProviderIndex indexes the built-in curated providers by id, so a
+// custom registry entry can be rejected when it would shadow one.
+func builtinProviderIndex() map[string]providerOption {
+	m := make(map[string]providerOption, len(defaultProviderOptions))
+	for _, p := range defaultProviderOptions {
+		m[p.ID] = p
+	}
+	return m
+}
+
+// providerOptions merges the built-in curated list with the admin-managed
+// registry, which is what both the UI dropdown and providerId validation use.
+// Registry entries are flagged Custom and ordered by id after the built-ins.
+func (s *server) providerOptions() []providerOption {
+	out := make([]providerOption, 0, len(s.providers)+4)
+	out = append(out, s.providers...)
+	if s.providerRegistry == nil {
+		return out
+	}
+	reg := s.providerRegistry.list()
+	ids := make([]string, 0, len(reg))
+	for id := range reg {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		out = append(out, s.providerOptionFor(id, reg[id]))
+	}
+	return out
+}
+
+// providerOptionFor renders one registry entry as a UI option, including the
+// endpoint details the usermanagement UI lists.
+func (s *server) providerOptionFor(id string, p registryProvider) providerOption {
+	name := p.Name
+	if name == "" {
+		name = id
+	}
+	models := make([]string, 0, len(p.Models))
+	for _, m := range p.Models {
+		models = append(models, m.ID)
+	}
+	return providerOption{ID: id, Name: name, Custom: true, BaseURL: p.BaseURL, API: p.API, Models: models}
 }
 
 // lookupProvider returns the curated option for id, if it is selectable.

@@ -188,6 +188,49 @@ func (s *fakePasswordStore) Delete(name string) error {
 	return nil
 }
 
+// fakeProviderRegistry is an in-memory providerRegistryStore for tests.
+type fakeProviderRegistry struct {
+	data map[string]registryProvider
+	err  error
+}
+
+func newFakeProviderRegistry() *fakeProviderRegistry {
+	return &fakeProviderRegistry{data: map[string]registryProvider{}}
+}
+
+func (f *fakeProviderRegistry) load(context.Context) error { return f.err }
+
+func (f *fakeProviderRegistry) list() map[string]registryProvider {
+	out := make(map[string]registryProvider, len(f.data))
+	for k, v := range f.data {
+		out[k] = v
+	}
+	return out
+}
+
+func (f *fakeProviderRegistry) set(_ context.Context, id string, p registryProvider) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.data[id] = p
+	return nil
+}
+
+func (f *fakeProviderRegistry) remove(_ context.Context, id string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	if _, ok := f.data[id]; !ok {
+		return false, nil
+	}
+	delete(f.data, id)
+	return true, nil
+}
+
+func (f *fakeProviderRegistry) document() registryDocument {
+	return registryDocument{Providers: f.list()}
+}
+
 // fakeKeyStore is an in-memory keyStore for tests.
 type fakeKeyStore struct {
 	keys map[string]providerKey
@@ -348,6 +391,7 @@ func newTestServer(f *fakeControlClient) *server {
 		defaultTier:       "small",
 		actors:            newFakeActorAuth(),
 		providers:         defaultProviderOptions,
+		providerRegistry:  newFakeProviderRegistry(),
 		idleTimeout:       defaultIdleTimeout,
 		idleTiers:         parseIdleTiers("small,mid"),
 		idle:              newIdleTracker(),
@@ -383,6 +427,10 @@ func doRequest(s *server, method, path, body string) *httptest.ResponseRecorder 
 		s.handleUserSubresource(rec, req)
 	case path == "/api/providers":
 		s.handleListProviders(rec, req)
+	case path == "/internal/providers/models.json":
+		s.handleInternalProviderModels(rec, req)
+	case strings.HasPrefix(path, "/api/providers/"):
+		s.handleDeleteProvider(rec, req)
 	default:
 		http.NotFound(rec, req)
 	}
@@ -2024,9 +2072,7 @@ func TestHandleListProviders(t *testing.T) {
 	if resp.Providers[0].ID != defaultProviderID || resp.Providers[0].Name == "" {
 		t.Errorf("first provider = %+v, want %s with a display name", resp.Providers[0], defaultProviderID)
 	}
-	if rec := doRequest(s, http.MethodPost, "/api/providers", ""); rec.Code != http.StatusNotFound {
-		t.Errorf("POST /api/providers status = %d, want 404", rec.Code)
-	}
+
 }
 
 func TestReconcileUsesStoredProvider(t *testing.T) {
@@ -2090,7 +2136,10 @@ func TestParseProviderOptions(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 			for i := range got {
-				if got[i] != tc.want[i] {
+				// providerOption now carries endpoint details (a slice), so it
+				// is no longer comparable as a whole; this test only cares about
+				// the parsed id/name.
+				if got[i].ID != tc.want[i].ID || got[i].Name != tc.want[i].Name {
 					t.Errorf("[%d] = %+v, want %+v", i, got[i], tc.want[i])
 				}
 			}
@@ -2271,5 +2320,199 @@ func TestLivePiWebProviderKey(t *testing.T) {
 	}
 	if stored, err := c.isKeyStored(ctx, host, providerID); err != nil || stored {
 		t.Errorf("after clearPersonalKey: stored=%v err=%v; want false/nil", stored, err)
+	}
+}
+
+// The provider registry endpoint serves the admin-managed registry as a
+// models.json document, degrades to an empty registry, and stays read-only.
+func TestHandleInternalProviderModels(t *testing.T) {
+	s := newTestServer(newFake())
+	reg := s.providerRegistry.(*fakeProviderRegistry)
+	reg.data["siliconflow"] = registryProvider{
+		Name:    "SiliconFlow",
+		BaseURL: "https://api.siliconflow.cn/v1",
+		API:     "openai-completions",
+		Models:  []registryModel{{ID: "deepseek-ai/DeepSeek-V3.2"}},
+	}
+
+	rec := doRequest(s, http.MethodGet, "/internal/providers/models.json", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var doc registryDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	got, ok := doc.Providers["siliconflow"]
+	if !ok || got.BaseURL != "https://api.siliconflow.cn/v1" || len(got.Models) != 1 {
+		t.Errorf("served registry = %+v, want the stored siliconflow provider", doc.Providers)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+
+	empty := doRequest(newTestServer(newFake()), http.MethodGet, "/internal/providers/models.json", "")
+	var emptyDoc registryDocument
+	if err := json.Unmarshal(empty.Body.Bytes(), &emptyDoc); err != nil {
+		t.Fatalf("decode empty registry: %v; body=%s", err, empty.Body.String())
+	}
+	if len(emptyDoc.Providers) != 0 {
+		t.Errorf("empty registry served %d providers", len(emptyDoc.Providers))
+	}
+
+	if post := doRequest(s, http.MethodPost, "/internal/providers/models.json", "{}"); post.Code != http.StatusNotFound {
+		t.Errorf("POST status = %d, want 404", post.Code)
+	}
+}
+
+func TestHandleCreateProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	reg := s.providerRegistry.(*fakeProviderRegistry)
+
+	rec := doRequest(s, http.MethodPost, "/api/providers",
+		`{"name":"Internal Gateway","baseUrl":"https://gw.internal/v1","models":["qwen3-32b","llama-3.3-70b"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Provider providerOption `json:"provider"`
+	}](t, rec)
+	if resp.Provider.ID != "internal-gateway" || !resp.Provider.Custom {
+		t.Errorf("provider = %+v, want id internal-gateway flagged custom", resp.Provider)
+	}
+	stored, ok := reg.data["internal-gateway"]
+	if !ok {
+		t.Fatalf("provider not persisted: %v", reg.data)
+	}
+	if stored.API != registryAPIDefault || len(stored.Models) != 2 {
+		t.Errorf("stored = %+v, want api=%s and 2 models", stored, registryAPIDefault)
+	}
+	if stored.Models[0].Name != "qwen3-32b" {
+		t.Errorf("model name = %q, want it defaulted to the id", stored.Models[0].Name)
+	}
+
+	// A custom provider id becomes selectable for per-user keys.
+	if rec := doRequest(s, http.MethodPost, "/api/users/alice/apikey",
+		`{"apiKey":"sk-x","providerId":"internal-gateway"}`); rec.Code != http.StatusOK {
+		t.Errorf("setting a key for a custom provider: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// And it shows up in the UI list.
+	list := decode[struct {
+		Providers []providerOption `json:"providers"`
+	}](t, doRequest(s, http.MethodGet, "/api/providers", ""))
+	found := false
+	for _, p := range list.Providers {
+		if p.ID == "internal-gateway" && p.Custom {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("custom provider missing from %d options", len(list.Providers))
+	}
+}
+
+func TestHandleCreateProviderValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty baseUrl", `{"name":"x","models":["m"]}`},
+		{"relative baseUrl", `{"name":"x","baseUrl":"/v1","models":["m"]}`},
+		{"unsupported scheme", `{"name":"x","baseUrl":"ftp://h/v1","models":["m"]}`},
+		{"no models", `{"name":"x","baseUrl":"https://h/v1","models":[]}`},
+		{"blank model", `{"name":"x","baseUrl":"https://h/v1","models":["  "]}`},
+		{"bad id charset", `{"id":"Bad ID","name":"x","baseUrl":"https://h/v1","models":["m"]}`},
+		{"shadows a builtin", `{"id":"openai","name":"x","baseUrl":"https://h/v1","models":["m"]}`},
+		{"bad json", `{`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(newFake())
+			rec := doRequest(s, http.MethodPost, "/api/providers", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if n := len(s.providerRegistry.(*fakeProviderRegistry).data); n != 0 {
+				t.Errorf("registry mutated on rejected input: %d entries", n)
+			}
+		})
+	}
+}
+
+func TestHandleDeleteProvider(t *testing.T) {
+	s := newTestServer(newFake())
+	reg := s.providerRegistry.(*fakeProviderRegistry)
+	reg.data["my-gw"] = registryProvider{Name: "My GW", BaseURL: "https://h/v1", Models: []registryModel{{ID: "m"}}}
+
+	rec := doRequest(s, http.MethodDelete, "/api/providers/my-gw", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := reg.data["my-gw"]; ok {
+		t.Errorf("provider still present after delete")
+	}
+	if rec := doRequest(s, http.MethodDelete, "/api/providers/my-gw", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("second delete status = %d, want 404", rec.Code)
+	}
+
+	// Only DELETE may remove an endpoint: other methods must not.
+	reg.data["keep-me"] = registryProvider{Name: "Keep", BaseURL: "https://h/v1", Models: []registryModel{{ID: "m"}}}
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodGet} {
+		if rec := doRequest(s, method, "/api/providers/keep-me", ""); rec.Code != http.StatusNotFound {
+			t.Errorf("%s status = %d, want 404", method, rec.Code)
+		}
+		if _, ok := reg.data["keep-me"]; !ok {
+			t.Fatalf("%s removed the provider; only DELETE may", method)
+		}
+	}
+}
+
+func TestProviderLabelAndOptionsIncludeCustom(t *testing.T) {
+	s := newTestServer(newFake())
+	s.providerRegistry.(*fakeProviderRegistry).data["my-gw"] = registryProvider{
+		Name: "My Gateway", BaseURL: "https://h/v1", API: registryAPIDefault,
+		Models: []registryModel{{ID: "m"}},
+	}
+	if got := providerLabel(s.providerOptions(), "my-gw"); got != "My Gateway" {
+		t.Errorf("providerLabel(custom) = %q, want My Gateway", got)
+	}
+	opts := s.providerOptions()
+	if len(opts) != len(defaultProviderOptions)+1 {
+		t.Fatalf("options = %d, want %d", len(opts), len(defaultProviderOptions)+1)
+	}
+	last := opts[len(opts)-1]
+	if last.ID != "my-gw" || !last.Custom {
+		t.Errorf("last option = %+v, want the custom provider flagged", last)
+	}
+	// The UI needs the endpoint details inline to list custom endpoints.
+	if last.BaseURL != "https://h/v1" || last.API != registryAPIDefault || len(last.Models) != 1 || last.Models[0] != "m" {
+		t.Errorf("custom option details = %+v, want baseUrl/api/models exposed", last)
+	}
+	if opts[0].BaseURL != "" || opts[0].Models != nil {
+		t.Errorf("built-in option must not carry endpoint details: %+v", opts[0])
+	}
+	if opts[0].Custom {
+		t.Errorf("built-in options must not be flagged custom: %+v", opts[0])
+	}
+}
+
+func TestSlugifyProviderID(t *testing.T) {
+	cases := map[string]string{
+		"Internal Gateway": "internal-gateway",
+		"Z.AI  GLM":        "z-ai-glm",
+		"":                 "custom",
+		"!!!":              "custom",
+		"  Leading  ":      "leading",
+	}
+	for in, want := range cases {
+		if got := slugifyProviderID(in); got != want {
+			t.Errorf("slugifyProviderID(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

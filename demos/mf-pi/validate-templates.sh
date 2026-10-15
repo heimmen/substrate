@@ -14,7 +14,7 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${MFPI_WORKER_REPLICAS}|2|g" \
       "$t" > /tmp/mfpi-render-check.yaml
   python3 - /tmp/mfpi-render-check.yaml "$t" <<'PYEOF'
-import sys, yaml
+import sys, json, yaml
 path, name = sys.argv[1], sys.argv[2]
 with open(path) as f:
     docs = [d for d in yaml.safe_load_all(f) if d]
@@ -25,11 +25,11 @@ counts = Counter(kinds)
 assert counts == Counter({
     "Namespace": 1,
     "Secret": 2,          # provider config + per-user key secret
-    "Role": 5,            # env-sources + passwords + expirations + tiers + keys
-    "RoleBinding": 5,
+    "Role": 6,            # env-sources + passwords + expirations + tiers + keys + providers
+    "RoleBinding": 6,
     "WorkerPool": 4,      # base mf-pi-workerpool + one per tier
     "ActorTemplate": 4,   # base mf-pi + one per tier
-    "ConfigMap": 3,       # passwords + expirations + tiers
+    "ConfigMap": 4,       # passwords + expirations + tiers + provider models
     "ServiceAccount": 1,
     "Deployment": 1,
     "Service": 1,
@@ -79,6 +79,12 @@ for at in atl_all:
     assert url.endswith("/internal/skills"), (at["metadata"]["name"], url)
     assert ".mfpi-managed-skills.json" in script, (at["metadata"]["name"], "pull loop missing")
     assert "fetch(base + \"/manifest\"" in script, (at["metadata"]["name"], "manifest fetch missing")
+    # Provider-registry pull loop: PI_WEB_MODELS_URL points at the admin's
+    # /internal/providers/models.json and the supervisor merges it into the
+    # agent's models.json.
+    models_url = env["PI_WEB_MODELS_URL"].get("value") or ""
+    assert models_url.endswith("/internal/providers/models.json"), (at["metadata"]["name"], models_url)
+    assert "provider-models: updated" in script, (at["metadata"]["name"], "provider-models loop missing")
     # Record the base worker label from mf-pi, then check tier templates route
     # to the matching per-tier worker label.
     worker = spec["workerSelector"]["matchLabels"]["workload"]
@@ -110,6 +116,34 @@ admin_mounts = {m["name"]: m for m in admin_pod["containers"][0]["volumeMounts"]
 assert admin_mounts["skills"]["mountPath"] == "/var/lib/mfpi-skills", admin_mounts
 admin_vols = {v["name"]: v for v in admin_pod["volumes"]}
 assert admin_vols["skills"]["persistentVolumeClaim"]["claimName"] == "mfpi-shared-skills", admin_vols
+# The admin-managed provider registry is reached through the API server (the
+# usermanagement UI edits it), not mounted into the pod, and the admin SA is
+# granted get/update on exactly that ConfigMap.
+assert "PROVIDER_MODELS_FILE" not in admin_env, sorted(admin_env)
+assert admin_env["PROVIDER_MODELS_CONFIGMAP"].get("value") == "mfpi-provider-models", admin_env
+assert "provider-models" not in admin_mounts, admin_mounts
+assert "provider-models" not in admin_vols, admin_vols
+prov_role = get("Role", "mfpi-admin-providers")
+prov_rule = prov_role["rules"][0]
+assert prov_rule["resourceNames"] == ["mfpi-provider-models"], prov_rule
+assert set(prov_rule["verbs"]) == {"get", "update"}, prov_rule
+assert get("RoleBinding", "mfpi-admin-providers")["roleRef"]["name"] == "mfpi-admin-providers"
+
+# Provider registry ConfigMap: the seed the admin reads and rewrites. It must be
+# a parseable models.json, in the namespace the admin is pointed at, and every
+# entry must carry a baseUrl, an api implementation and at least one model id.
+# Custom endpoints do NOT have to appear in KEY_PROVIDERS: the UI list is the
+# built-in curated set merged with this registry at runtime.
+pm = get("ConfigMap", "mfpi-provider-models")
+assert admin_env["PROVIDER_MODELS_NAMESPACE"].get("value") == pm["metadata"]["namespace"], pm["metadata"]
+registry = json.loads(pm["data"]["provider-models.json"])
+assert isinstance(registry.get("providers"), dict), registry
+for pid, prov in registry["providers"].items():
+    assert prov.get("baseUrl"), (pid, prov)
+    assert prov.get("api"), (pid, prov)
+    assert prov.get("models"), (pid, prov)
+    for m in prov["models"]:
+        assert m.get("id"), (pid, m)
 
 # Shared skills PVC: RWO, standard storage class, 1Gi.
 pvc = get("PersistentVolumeClaim", "mfpi-shared-skills")

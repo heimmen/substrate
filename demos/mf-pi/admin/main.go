@@ -77,6 +77,13 @@ const (
 	defaultPasswordsConfigMap = "mfpi-user-passwords"
 	defaultPasswordsNamespace = "ate-demo-mf-pi"
 
+	// ConfigMap holding the admin-managed provider registry (custom
+	// OpenAI-compatible endpoints) served to actors at
+	// /internal/providers/models.json. Pre-created by the manifests so the
+	// admin SA needs only get/update.
+	defaultProviderRegistryConfigMap = "mfpi-provider-models"
+	defaultProviderRegistryNamespace = "ate-demo-mf-pi"
+
 	// Secret holding per-user provider credentials (username -> JSON
 	// {providerId, apiKey}). See apikey.go.
 	// Pre-created empty in the manifests so the admin SA needs only
@@ -335,6 +342,10 @@ type server struct {
 	// providers is the curated list of providers the UI may store a key for
 	// (see providers.go), overridable per environment via KEY_PROVIDERS.
 	providers []providerOption
+	// providerRegistry is the admin-managed registry of custom
+	// OpenAI-compatible endpoints (see providermodels.go). It backs both the
+	// actor-facing /internal/providers/models.json and the UI provider list.
+	providerRegistry providerRegistryStore
 	// skills is the managed shared-skill store (PVC-backed). Nil when the
 	// SKILLS_DIR is unavailable; the /api/skills and /internal/skills routes
 	// are only registered when non-nil.
@@ -491,11 +502,122 @@ func (s *server) handleUserSubresource(w http.ResponseWriter, r *http.Request) {
 // per-user question of which provider is configured is answered by
 // userSummary.personalKeyProvider.
 func (s *server) handleListProviders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"providers": s.providerOptions()})
+	case http.MethodPost:
+		s.handleCreateProvider(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// handleCreateProvider adds (or replaces) one custom OpenAI-compatible endpoint
+// in the admin-managed registry. The endpoint carries no credential: keys stay
+// per user, set through POST /api/users/{name}/apikey.
+func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID      string   `json:"id"`
+		Name    string   `json:"name"`
+		BaseURL string   `json:"baseUrl"`
+		API     string   `json:"api"`
+		Models  []string `json:"models"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		id = slugifyProviderID(req.Name)
+	}
+	models := make([]registryModel, 0, len(req.Models))
+	for _, m := range req.Models {
+		if m = strings.TrimSpace(m); m != "" {
+			models = append(models, registryModel{ID: m})
+		}
+	}
+	def, err := validateRegistryProvider(id, registryProvider{
+		Name:    strings.TrimSpace(req.Name),
+		BaseURL: strings.TrimSpace(req.BaseURL),
+		API:     strings.TrimSpace(req.API),
+		Models:  models,
+	}, builtinProviderIndex())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.providerRegistry.set(ctx, id, def); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 provider 失败: " + err.Error()})
+		return
+	}
+	log.Printf("provider registry: saved %q (%s, %d model(s))", id, def.BaseURL, len(def.Models))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider": s.providerOptionFor(id, def),
+		"message":  def.Name + " 已保存；该端点会在 60s 内出现在各用户的模型列表中",
+	})
+}
+
+// handleDeleteProvider removes one custom endpoint from the registry. The
+// provider stops being offered to the UI immediately; actors keep it in their
+// own models.json until it is removed there too (the pull only merges).
+func (s *server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		// Reachable for any method on /api/providers/{id}; only DELETE removes.
 		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"providers": s.providers})
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/providers/"), "/")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 provider id"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	removed, err := s.providerRegistry.remove(ctx, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "删除 provider 失败: " + err.Error()})
+		return
+	}
+	if !removed {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "provider 不存在: " + id})
+		return
+	}
+	log.Printf("provider registry: removed %q", id)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":  id + " 已从注册表移除；已拉取该端点的 actor 仍保留本地 models.json 中的定义",
+		"provider": id,
+	})
+}
+
+// slugifyProviderID derives a provider id from a display name: lower-cased,
+// with '-', '_', '.' and spaces collapsed to a single '-' (trimmed at the ends)
+// and every other non-alphanumeric character dropped. It falls back to "custom"
+// when nothing usable is left, so the result always satisfies
+// registryProviderIDRe.
+func slugifyProviderID(name string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastDash = false
+		case r == '-' || r == '_' || r == '.' || r == ' ':
+			if b.Len() > 0 && !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	id := strings.Trim(b.String(), "-.")
+	if id == "" {
+		return "custom"
+	}
+	return id
 }
 
 // handleListUsers mirrors list-users.sh: ListActors in the configured atespace.
@@ -712,7 +834,7 @@ func (s *server) handleSetAPIKey(w http.ResponseWriter, r *http.Request, name st
 	if providerID == "" {
 		providerID = defaultProviderID
 	}
-	provider, ok := lookupProvider(s.providers, providerID)
+	provider, ok := lookupProvider(s.providerOptions(), providerID)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "不支持的 provider: " + providerID + "（可选: " + s.providerIDList() + "）",
@@ -783,8 +905,9 @@ func (s *server) handleSetAPIKey(w http.ResponseWriter, r *http.Request, name st
 
 // providerIDList renders the selectable provider ids for error messages.
 func (s *server) providerIDList() string {
-	ids := make([]string, 0, len(s.providers))
-	for _, p := range s.providers {
+	options := s.providerOptions()
+	ids := make([]string, 0, len(options))
+	for _, p := range options {
 		ids = append(ids, p.ID)
 	}
 	return strings.Join(ids, ", ")
@@ -826,7 +949,7 @@ func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name 
 		writeJSON(w, http.StatusOK, map[string]string{"message": "Key 已清除", "name": name})
 		return
 	}
-	label := providerLabel(s.providers, stored.ProviderID)
+	label := providerLabel(s.providerOptions(), stored.ProviderID)
 
 	if err := s.ensureRunningActor(ctx, name); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "清除失败（无法恢复用户）: " + err.Error()})
@@ -995,7 +1118,7 @@ func (s *server) injectStoredKey(ctx context.Context, name string, alreadyResume
 	if !ok {
 		return ""
 	}
-	label := providerLabel(s.providers, key.ProviderID)
+	label := providerLabel(s.providerOptions(), key.ProviderID)
 	host := actorHostname(name, s.atespace)
 	if alreadyResumed {
 		if err := s.waitForRunning(ctx, name); err != nil {
@@ -1036,6 +1159,13 @@ func (s *server) startReconciler(ctx context.Context) {
 			return
 		case <-ticker.C:
 			rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			// Pick up registry edits made outside the admin (kubectl edit) so
+			// the actor-facing document never goes stale.
+			if s.providerRegistry != nil {
+				if err := s.providerRegistry.load(rctx); err != nil {
+					log.Printf("reconcile: reload provider registry: %v", err)
+				}
+			}
 			s.reconcileKeys(rctx)
 			s.reconcileExpirations(rctx)
 			s.reconcileIdle(rctx)
@@ -1378,6 +1508,10 @@ type serverConfig struct {
 	idleTiers          []string
 	routerAddr         string
 	skillsDir          string
+	// providerRegistryConfigMap/Namespace hold the admin-managed provider
+	// registry served to actors; see providermodels.go.
+	providerRegistryConfigMap string
+	providerRegistryNamespace string
 	// providerOptions is the curated list of providers the UI may store a key
 	// for, overridable via KEY_PROVIDERS (see providers.go).
 	providerOptions []providerOption
@@ -1385,23 +1519,25 @@ type serverConfig struct {
 
 func serverConfigFromEnv() serverConfig {
 	cfg := serverConfig{
-		atespace:           envOr("ATESPACE", defaultAtespace),
-		templateNamespace:  envOr("ACTOR_TEMPLATE_NAMESPACE", defaultTemplateNamespace),
-		templateName:       envOr("ACTOR_TEMPLATE_NAME", defaultTemplateName),
-		ateapiAddr:         envOr("ATEAPI_ADDR", defaultAteapiAddr),
-		ateapiCAFile:       envOr("ATEAPI_CA_FILE", defaultAteapiCAFile),
-		ateapiTokenFile:    envOr("ATEAPI_TOKEN_FILE", defaultAteapiTokenFile),
-		passwordsConfigMap: envOr("PASSWORDS_CONFIGMAP", defaultPasswordsConfigMap),
-		passwordsNamespace: envOr("PASSWORDS_NAMESPACE", defaultPasswordsNamespace),
-		keysSecret:         envOr("KEYS_SECRET", defaultKeysSecret),
-		keysNamespace:      envOr("KEYS_NAMESPACE", defaultKeysNamespace),
-		expiryConfigMap:    envOr("EXPIRY_CONFIGMAP", defaultExpiryConfigMap),
-		expiryNamespace:    envOr("EXPIRY_NAMESPACE", defaultExpiryNamespace),
-		tiersConfigMap:     envOr("TIERS_CONFIGMAP", defaultTiersConfigMap),
-		tiersNamespace:     envOr("TIERS_NAMESPACE", defaultTiersNamespace),
-		defaultTier:        envOr("DEFAULT_TIER", defaultTier),
-		routerAddr:         envOr("ROUTER_ADDR", defaultRouterAddr),
-		skillsDir:          envOr("SKILLS_DIR", defaultSkillsDir),
+		atespace:                  envOr("ATESPACE", defaultAtespace),
+		templateNamespace:         envOr("ACTOR_TEMPLATE_NAMESPACE", defaultTemplateNamespace),
+		templateName:              envOr("ACTOR_TEMPLATE_NAME", defaultTemplateName),
+		ateapiAddr:                envOr("ATEAPI_ADDR", defaultAteapiAddr),
+		ateapiCAFile:              envOr("ATEAPI_CA_FILE", defaultAteapiCAFile),
+		ateapiTokenFile:           envOr("ATEAPI_TOKEN_FILE", defaultAteapiTokenFile),
+		passwordsConfigMap:        envOr("PASSWORDS_CONFIGMAP", defaultPasswordsConfigMap),
+		passwordsNamespace:        envOr("PASSWORDS_NAMESPACE", defaultPasswordsNamespace),
+		keysSecret:                envOr("KEYS_SECRET", defaultKeysSecret),
+		keysNamespace:             envOr("KEYS_NAMESPACE", defaultKeysNamespace),
+		expiryConfigMap:           envOr("EXPIRY_CONFIGMAP", defaultExpiryConfigMap),
+		expiryNamespace:           envOr("EXPIRY_NAMESPACE", defaultExpiryNamespace),
+		tiersConfigMap:            envOr("TIERS_CONFIGMAP", defaultTiersConfigMap),
+		tiersNamespace:            envOr("TIERS_NAMESPACE", defaultTiersNamespace),
+		defaultTier:               envOr("DEFAULT_TIER", defaultTier),
+		routerAddr:                envOr("ROUTER_ADDR", defaultRouterAddr),
+		skillsDir:                 envOr("SKILLS_DIR", defaultSkillsDir),
+		providerRegistryConfigMap: envOr("PROVIDER_MODELS_CONFIGMAP", defaultProviderRegistryConfigMap),
+		providerRegistryNamespace: envOr("PROVIDER_MODELS_NAMESPACE", defaultProviderRegistryNamespace),
 	}
 	cfg.idleTimeout = defaultIdleTimeout
 	if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
@@ -1468,6 +1604,7 @@ func main() {
 	keys := newSecretKeyStore(k8s, cfg.keysNamespace, cfg.keysSecret)
 	expiries := newConfigMapExpiryStore(k8s, cfg.expiryNamespace, cfg.expiryConfigMap)
 	tiers := newConfigMapTierStore(k8s, cfg.tiersNamespace, cfg.tiersConfigMap)
+	providerRegistry := newConfigMapProviderRegistry(k8s, cfg.providerRegistryNamespace, cfg.providerRegistryConfigMap)
 	loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := passwords.load(loadCtx); err != nil {
 		cancel()
@@ -1485,6 +1622,12 @@ func main() {
 		cancel()
 		log.Fatalf("loading tier store: %v", err)
 	}
+	// A registry that fails to parse is fatal at boot (an operator typo should
+	// be visible immediately), but a missing ConfigMap is an empty registry.
+	if err := providerRegistry.load(loadCtx); err != nil {
+		cancel()
+		log.Fatalf("loading provider registry: %v", err)
+	}
 	cancel()
 
 	srv := &server{
@@ -1501,6 +1644,7 @@ func main() {
 		actors:            newHTTPActorAuthClient(cfg.routerAddr),
 		providers:         cfg.providerOptions,
 		skills:            newSkillStore(cfg.skillsDir),
+		providerRegistry:  providerRegistry,
 		applier:           newHTTPApplyReloader(cfg.routerAddr),
 		idleTimeout:       cfg.idleTimeout,
 		idleTiers:         parseIdleTiers(strings.Join(cfg.idleTiers, ",")),
@@ -1520,6 +1664,7 @@ func main() {
 	mux.HandleFunc("/", srv.handleIndex)
 	mux.HandleFunc("/api/users", srv.handleUsers)
 	mux.HandleFunc("/api/providers", srv.handleListProviders)
+	mux.HandleFunc("/api/providers/", srv.handleDeleteProvider)
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
 	// Readiness gate: like /_mfpi_auth but also rejects (403) a request whose
@@ -1536,6 +1681,7 @@ func main() {
 	mux.HandleFunc("/api/skills/", srv.handleSkillsSubresource)
 	mux.HandleFunc("/api/skills/apply", srv.handleApplySkillsAPIRoute)
 	mux.HandleFunc("/internal/skills/manifest", srv.skills.handleInternalManifest)
+	mux.HandleFunc("/internal/providers/models.json", srv.handleInternalProviderModels)
 	mux.HandleFunc("/internal/skills/", srv.skills.handleInternalSkillTgz)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

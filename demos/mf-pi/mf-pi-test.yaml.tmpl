@@ -204,6 +204,55 @@ spec:
         done
       ) &
 
+      # Pull the administrator-managed provider registry (see
+      # admin/providermodels.go). The admin serves a models.json document that
+      # adds OpenAI-compatible endpoints beyond pi-web's built-in registry
+      # (SiliconFlow, an internal gateway, ...). The platform cannot hand an
+      # actor a ConfigMap, so it is pulled over HTTP like managed skills. Only
+      # the managed providers are merged in: other keys and providers already in
+      # the agent's models.json survive, and a failed fetch or an unparseable
+      # body leaves the current file untouched. pi-web re-reads models.json on
+      # every request, so a change applies without restarting sessiond/web.
+      if [ -n "${PI_WEB_MODELS_URL:-}" ]; then
+        (
+          while true; do
+            node -e '
+              const fs = require("fs");
+              const path = require("path");
+              const url = process.env.PI_WEB_MODELS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "models.json");
+              if (!url) process.exit(0);
+              fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
+                .then((res) => {
+                  if (!res.ok) throw new Error("HTTP " + res.status);
+                  return res.json();
+                })
+                .then((managed) => {
+                  if (!managed || typeof managed !== "object" || !managed.providers) {
+                    throw new Error("payload has no providers");
+                  }
+                  let current = {};
+                  try { current = JSON.parse(fs.readFileSync(dst, "utf8")) || {}; } catch (err) {}
+                  const merged = Object.assign({}, current, {
+                    providers: Object.assign({}, current.providers || {}, managed.providers),
+                  });
+                  const next = JSON.stringify(merged, null, 2) + "\n";
+                  let existing = null;
+                  try { existing = fs.readFileSync(dst, "utf8"); } catch (err) {}
+                  if (existing !== next) {
+                    const tmp = dst + ".tmp";
+                    fs.writeFileSync(tmp, next);
+                    fs.renameSync(tmp, dst);
+                    console.log("provider-models: updated " + dst);
+                  }
+                })
+                .catch((err) => { console.error("provider-models: " + err.message); });
+            ' 2>/dev/null || true
+            sleep 60
+          done
+        ) &
+      fi
       # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
@@ -407,6 +456,10 @@ spec:
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
     - name: PI_WEB_SKILLS_URL
       value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/skills
+    # Admin endpoint serving the operator-managed provider registry
+    # (models.json); see admin/providermodels.go.
+    - name: PI_WEB_MODELS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/providers/models.json
     - name: DEEPSEEK_API_KEY
       valueFrom:
         secretKeyRef:
@@ -482,6 +535,55 @@ spec:
         done
       ) &
 
+      # Pull the administrator-managed provider registry (see
+      # admin/providermodels.go). The admin serves a models.json document that
+      # adds OpenAI-compatible endpoints beyond pi-web's built-in registry
+      # (SiliconFlow, an internal gateway, ...). The platform cannot hand an
+      # actor a ConfigMap, so it is pulled over HTTP like managed skills. Only
+      # the managed providers are merged in: other keys and providers already in
+      # the agent's models.json survive, and a failed fetch or an unparseable
+      # body leaves the current file untouched. pi-web re-reads models.json on
+      # every request, so a change applies without restarting sessiond/web.
+      if [ -n "${PI_WEB_MODELS_URL:-}" ]; then
+        (
+          while true; do
+            node -e '
+              const fs = require("fs");
+              const path = require("path");
+              const url = process.env.PI_WEB_MODELS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "models.json");
+              if (!url) process.exit(0);
+              fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
+                .then((res) => {
+                  if (!res.ok) throw new Error("HTTP " + res.status);
+                  return res.json();
+                })
+                .then((managed) => {
+                  if (!managed || typeof managed !== "object" || !managed.providers) {
+                    throw new Error("payload has no providers");
+                  }
+                  let current = {};
+                  try { current = JSON.parse(fs.readFileSync(dst, "utf8")) || {}; } catch (err) {}
+                  const merged = Object.assign({}, current, {
+                    providers: Object.assign({}, current.providers || {}, managed.providers),
+                  });
+                  const next = JSON.stringify(merged, null, 2) + "\n";
+                  let existing = null;
+                  try { existing = fs.readFileSync(dst, "utf8"); } catch (err) {}
+                  if (existing !== next) {
+                    const tmp = dst + ".tmp";
+                    fs.writeFileSync(tmp, next);
+                    fs.renameSync(tmp, dst);
+                    console.log("provider-models: updated " + dst);
+                  }
+                })
+                .catch((err) => { console.error("provider-models: " + err.message); });
+            ' 2>/dev/null || true
+            sleep 60
+          done
+        ) &
+      fi
       # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
@@ -685,6 +787,10 @@ spec:
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
     - name: PI_WEB_SKILLS_URL
       value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/skills
+    # Admin endpoint serving the operator-managed provider registry
+    # (models.json); see admin/providermodels.go.
+    - name: PI_WEB_MODELS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/providers/models.json
     - name: DEEPSEEK_API_KEY
       valueFrom:
         secretKeyRef:
@@ -761,6 +867,55 @@ spec:
         done
       ) &
 
+      # Pull the administrator-managed provider registry (see
+      # admin/providermodels.go). The admin serves a models.json document that
+      # adds OpenAI-compatible endpoints beyond pi-web's built-in registry
+      # (SiliconFlow, an internal gateway, ...). The platform cannot hand an
+      # actor a ConfigMap, so it is pulled over HTTP like managed skills. Only
+      # the managed providers are merged in: other keys and providers already in
+      # the agent's models.json survive, and a failed fetch or an unparseable
+      # body leaves the current file untouched. pi-web re-reads models.json on
+      # every request, so a change applies without restarting sessiond/web.
+      if [ -n "${PI_WEB_MODELS_URL:-}" ]; then
+        (
+          while true; do
+            node -e '
+              const fs = require("fs");
+              const path = require("path");
+              const url = process.env.PI_WEB_MODELS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "models.json");
+              if (!url) process.exit(0);
+              fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
+                .then((res) => {
+                  if (!res.ok) throw new Error("HTTP " + res.status);
+                  return res.json();
+                })
+                .then((managed) => {
+                  if (!managed || typeof managed !== "object" || !managed.providers) {
+                    throw new Error("payload has no providers");
+                  }
+                  let current = {};
+                  try { current = JSON.parse(fs.readFileSync(dst, "utf8")) || {}; } catch (err) {}
+                  const merged = Object.assign({}, current, {
+                    providers: Object.assign({}, current.providers || {}, managed.providers),
+                  });
+                  const next = JSON.stringify(merged, null, 2) + "\n";
+                  let existing = null;
+                  try { existing = fs.readFileSync(dst, "utf8"); } catch (err) {}
+                  if (existing !== next) {
+                    const tmp = dst + ".tmp";
+                    fs.writeFileSync(tmp, next);
+                    fs.renameSync(tmp, dst);
+                    console.log("provider-models: updated " + dst);
+                  }
+                })
+                .catch((err) => { console.error("provider-models: " + err.message); });
+            ' 2>/dev/null || true
+            sleep 60
+          done
+        ) &
+      fi
       # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
@@ -964,6 +1119,10 @@ spec:
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
     - name: PI_WEB_SKILLS_URL
       value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/skills
+    # Admin endpoint serving the operator-managed provider registry
+    # (models.json); see admin/providermodels.go.
+    - name: PI_WEB_MODELS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/providers/models.json
     - name: DEEPSEEK_API_KEY
       valueFrom:
         secretKeyRef:
@@ -1040,6 +1199,55 @@ spec:
         done
       ) &
 
+      # Pull the administrator-managed provider registry (see
+      # admin/providermodels.go). The admin serves a models.json document that
+      # adds OpenAI-compatible endpoints beyond pi-web's built-in registry
+      # (SiliconFlow, an internal gateway, ...). The platform cannot hand an
+      # actor a ConfigMap, so it is pulled over HTTP like managed skills. Only
+      # the managed providers are merged in: other keys and providers already in
+      # the agent's models.json survive, and a failed fetch or an unparseable
+      # body leaves the current file untouched. pi-web re-reads models.json on
+      # every request, so a change applies without restarting sessiond/web.
+      if [ -n "${PI_WEB_MODELS_URL:-}" ]; then
+        (
+          while true; do
+            node -e '
+              const fs = require("fs");
+              const path = require("path");
+              const url = process.env.PI_WEB_MODELS_URL || "";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const dst = path.join(agentDir, "models.json");
+              if (!url) process.exit(0);
+              fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
+                .then((res) => {
+                  if (!res.ok) throw new Error("HTTP " + res.status);
+                  return res.json();
+                })
+                .then((managed) => {
+                  if (!managed || typeof managed !== "object" || !managed.providers) {
+                    throw new Error("payload has no providers");
+                  }
+                  let current = {};
+                  try { current = JSON.parse(fs.readFileSync(dst, "utf8")) || {}; } catch (err) {}
+                  const merged = Object.assign({}, current, {
+                    providers: Object.assign({}, current.providers || {}, managed.providers),
+                  });
+                  const next = JSON.stringify(merged, null, 2) + "\n";
+                  let existing = null;
+                  try { existing = fs.readFileSync(dst, "utf8"); } catch (err) {}
+                  if (existing !== next) {
+                    const tmp = dst + ".tmp";
+                    fs.writeFileSync(tmp, next);
+                    fs.renameSync(tmp, dst);
+                    console.log("provider-models: updated " + dst);
+                  }
+                })
+                .catch((err) => { console.error("provider-models: " + err.message); });
+            ' 2>/dev/null || true
+            sleep 60
+          done
+        ) &
+      fi
       # Pull administrator-managed skills (see docs/deploy_skill_to_actor.md). The
       # admin is the authoritative source; each actor conditionally syncs the
       # managed skills into $PI_CODING_AGENT_DIR/skills on a 10s cadence,
@@ -1243,6 +1451,10 @@ spec:
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
     - name: PI_WEB_SKILLS_URL
       value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/skills
+    # Admin endpoint serving the operator-managed provider registry
+    # (models.json); see admin/providermodels.go.
+    - name: PI_WEB_MODELS_URL
+      value: http://mfpi-admin.ate-demo-mf-pi-test.svc.cluster.local:8080/internal/providers/models.json
     - name: DEEPSEEK_API_KEY
       valueFrom:
         secretKeyRef:
@@ -1420,6 +1632,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 
+# Lets the admin manage the provider registry (custom OpenAI-compatible
+# endpoints) through /api/providers. Get/update only: the manifests
+# pre-create the ConfigMap, and a redeploy resets it to the seed below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mfpi-admin-providers
+  namespace: ate-demo-mf-pi-test
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["mfpi-provider-models"]
+  verbs: ["get", "update"]
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mfpi-admin-providers
+  namespace: ate-demo-mf-pi-test
+subjects:
+- kind: ServiceAccount
+  name: mfpi-admin
+  namespace: ate-demo-mf-pi-test
+roleRef:
+  kind: Role
+  name: mfpi-admin-providers
+  apiGroup: rbac.authorization.k8s.io
+---
+
 # mf-pi user-management UI (TEST). Served through the mfpi-nginx-test proxy
 # at /usermanagement/; same in-cluster auth pattern as production. Holds the
 apiVersion: apps/v1
@@ -1474,6 +1716,14 @@ spec:
         # default list in admin/providers.go.
         - name: KEY_PROVIDERS
           value: "deepseek=DeepSeek,openai=OpenAI,openrouter=OpenRouter,moonshotai=Moonshot AI (Kimi),zai=Z.AI (GLM),qwen-token-plan=Qwen (通义千问),minimax=MiniMax,groq=Groq,mistral=Mistral,xai=xAI (Grok)"
+        # Admin-managed provider registry (custom OpenAI-compatible
+        # endpoints). The usermanagement UI edits it through /api/providers
+        # and the admin serves it to the actors at
+        # /internal/providers/models.json; see admin/providermodels.go.
+        - name: PROVIDER_MODELS_CONFIGMAP
+          value: mfpi-provider-models
+        - name: PROVIDER_MODELS_NAMESPACE
+          value: ate-demo-mf-pi-test
         - name: EXPIRY_CONFIGMAP
           value: mfpi-user-expirations
         - name: EXPIRY_NAMESPACE
@@ -1556,3 +1806,56 @@ spec:
   ports:
   - port: 8080
     targetPort: 8080
+
+---
+
+# Provider registry: custom OpenAI-compatible endpoints. The
+# usermanagement UI edits this through /api/providers (the content below
+# is only the seed, and a redeploy resets the registry to it). The admin
+# serves it to every actor, which merges it into <agentDir>/models.json
+# (see admin/providermodels.go and docs/provider_endpoints.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mfpi-provider-models
+  namespace: ate-demo-mf-pi-test
+data:
+  provider-models.json: |
+    {
+      "providers": {
+        "siliconflow": {
+          "name": "SiliconFlow (硅基流动)",
+          "baseUrl": "https://api.siliconflow.cn/v1",
+          "api": "openai-completions",
+          "models": [
+            {
+              "id": "deepseek-ai/DeepSeek-V3.2",
+              "name": "DeepSeek V3.2 (SiliconFlow)",
+              "reasoning": false,
+              "input": ["text"],
+              "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+              "contextWindow": 128000,
+              "maxTokens": 8192
+            },
+            {
+              "id": "Qwen/Qwen3-32B",
+              "name": "Qwen3 32B (SiliconFlow)",
+              "reasoning": false,
+              "input": ["text"],
+              "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+              "contextWindow": 32768,
+              "maxTokens": 8192
+            },
+            {
+              "id": "moonshotai/Kimi-K2.7-Code",
+              "name": "Kimi K2.7 Code (SiliconFlow)",
+              "reasoning": false,
+              "input": ["text"],
+              "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+              "contextWindow": 128000,
+              "maxTokens": 8192
+            }
+          ]
+        }
+      }
+    }
