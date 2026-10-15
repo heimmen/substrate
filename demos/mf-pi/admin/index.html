@@ -197,8 +197,17 @@
   .modal-note, .modal-hint { font-size: 12px; color: var(--muted); margin: -4px 0 12px; }
   .modal-error { font-size: 13px; color: var(--danger); margin: -4px 0 8px; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  /* 自定义模型端点管理器：比 Key 对话框宽，内容超高时整体滚动。 */
-  .modal.endpoint-modal { max-width: 560px; max-height: 90vh; overflow-y: auto; }
+  /* 模型设置对话框：固定尺寸。两个标签页共用同一个固定高度的外层，切换标签不会
+     改变对话框大小（内容短的那一页底部留白，这是刻意的取舍）。外框不滚动，滚动
+     只发生在下面的 .tab-panel，因此整页只有一个滚动条。 */
+  .modal.endpoint-modal {
+    max-width: 560px;
+    height: 90vh;
+    max-height: 760px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
   .modal textarea {
     width: 100%;
     padding: 8px 12px;
@@ -212,7 +221,8 @@
     resize: vertical;
     min-height: 64px;
   }
-  .endpoint-list { max-height: 200px; overflow-y: auto; margin-bottom: 12px; }
+  /* 端点列表不再各自滚动：它们是标签页滚动区里的普通内容，避免嵌套滚动条。 */
+  .endpoint-list { margin-bottom: 12px; }
   .endpoint-item {
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -260,6 +270,24 @@
     border-bottom-color: var(--accent);
     font-weight: 600;
   }
+  .modal.endpoint-modal .tab-strip { flex: none; }
+  /* 标签页面板 = 唯一的滚动容器；min-height:0 让它在 flex 列里正确收缩。
+     面板本身是 flex 列，好让内容不足时把操作按钮压到底部（下面那条 margin-top:auto），
+     两个标签页因此既尺寸一致，又不会在内容少的一页留下大片突兀空白。 */
+  .tab-panel {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .tab-panel > .modal-actions { margin-top: auto; padding-top: 8px; }
+  /* 面板里直接作为 flex 子项的表单控件必须退出纵向伸展：顶部有一条通用的
+     `input[type="text"] { flex: 1 }`（给「添加用户」那种横排 form 用的），
+     在 flex 列里会把输入框拉成整块高盒子。 */
+  .tab-panel > input,
+  .tab-panel > select,
+  .tab-panel > textarea { flex: none; }
   .tab-panel[hidden] { display: none; }
   .modal-hint code, .modal-note code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -311,9 +339,17 @@
   .model-input-types { display: flex; gap: 16px; font-size: 13px; margin-bottom: 4px; }
   .model-input-types label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .model-row .model-row-error { margin: 6px 0 0; }
-  .model-picker-modal { max-width: 520px; }
+  /* 候选勾选对话框：按内容自适应，但不超过视口；超高时由列表吸收（单一滚动条）。 */
+  .model-picker-modal {
+    max-width: 520px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
   .model-picker-list {
-    max-height: 300px;
+    flex: 0 1 auto;
+    min-height: 60px;
     overflow-y: auto;
     border: 1px solid var(--border);
     border-radius: 6px;
