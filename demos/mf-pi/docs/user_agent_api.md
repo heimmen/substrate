@@ -470,10 +470,10 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
 列表**，**后接**注册表中的**自定义端点**（带 `"custom":true`，见 `mfpi-provider-models`
 与 `docs/provider_endpoints.md`）。`KEY_PROVIDERS` 只覆盖内置列表，自定义端点不需要写进它。
 
-管理面 `/usermanagement/` 顶部的「**模型端点**」按钮即通过本端点与下面的 `POST` / `DELETE`
+管理面 `/usermanagement/` 顶部唯一的「**模型设置**」按钮（「模型端点」标签页）即通过本端点与下面的 `POST` / `DELETE`
 管理注册表：模态框列出 `custom:true` 的端点，可逐行**删除**，并可用「**添加端点**」表单
 （显示名 / Base URL / 模型名（逗号或换行分隔）/ API 类型 / 可选 id）新增；增删后前端会重新
-拉取本列表，因此「**设置 Key**」下拉立即能选到新端点（自定义项标注 `…（自定义）`）。
+拉取本列表，因此「**用户 API Key**」标签页的 provider 下拉立即能选到新端点（自定义项标注 `…（自定义）`）。
 
 **请求参数**：无。
 
@@ -494,12 +494,15 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
     { "id": "xai", "name": "xAI (Grok)" },
     { "id": "siliconflow", "name": "SiliconFlow (硅基流动)", "custom": true,
       "baseUrl": "https://api.siliconflow.cn/v1", "api": "openai-completions",
-      "models": ["deepseek-ai/DeepSeek-V3.2", "Qwen/Qwen3-32B", "moonshotai/Kimi-K2.7-Code"] }
+      "models": [
+        { "id": "deepseek-ai/DeepSeek-V3.2", "name": "DeepSeek V3.2 (SiliconFlow)",
+          "contextWindow": 128000, "maxTokens": 8192, "input": ["text"] }
+      ] }
   ]
 }
 ```
 
-provider 对象字段（`custom:true` 的项额外带 `baseUrl` / `api` / `models`，供「模型端点」管理页直接逐行渲染，无需再发一次请求）：
+provider 对象字段（`custom:true` 的项额外带 `baseUrl` / `api` / `models`，供「模型设置 → 模型端点」标签页直接逐行渲染，无需再发一次请求）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -508,7 +511,7 @@ provider 对象字段（`custom:true` 的项额外带 `baseUrl` / `api` / `model
 | `custom` | bool | `true` 表示注册表中的自定义端点；内置项省略该字段 |
 | `baseUrl` | string | 端点地址；**仅**自定义端点带，内置项省略 |
 | `api` | string | pi-ai 的 API 实现（如 `openai-completions`）；**仅**自定义端点带，内置项省略 |
-| `models` | string[] | 模型 id 列表；**仅**自定义端点带，内置项省略 |
+| `models` | object[] | 模型列表；**仅**自定义端点带，内置项省略。每项见下表 |
 
 **覆盖内置列表**：`KEY_PROVIDERS` 为逗号分隔的列表，每项为 `id` 或 `id=显示名`（留空或无法解析时回退到内置默认值），例如：
 
@@ -535,11 +538,29 @@ KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 | `name` | string | 否 | 显示名；缺省即最终 id |
 | `baseUrl` | string | 是 | 须为 `http://` 或 `https://` 开头的完整地址 |
 | `api` | string | 否 | pi-ai API 实现；缺省 `openai-completions` |
-| `models` | string[] | 是 | 模型名列表，至少一个非空项；重名去重，每个模型的显示名缺省即其 id |
+| `models` | object[]（也接受 string[]） | 是 | 模型列表，至少一个非空项；重名去重。对象项见下表，字符串项等价于只填 `id` |
 | `id` | string | 否 | provider id；缺省由 `name` 推导：转小写，`-` / `_` / `.` / 空格折叠为 `-` 并去首尾，**其它非字母数字字符直接丢弃**（如 `Z.AI  GLM` → `z-ai-glm`），推不出字符时回退 `custom`。须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不得与内置 provider 同名 |
 
+`models[]` 项字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | string | 是 | 模型 id（原样交给 provider） |
+| `name` | string | 否 | 显示名；缺省即 `id` |
+| `contextWindow` | int | 否 | 上下文窗口（正整数）；省略即不声明，由 pi-web 继承 |
+| `maxTokens` | int | 否 | 最大输出 token 数（正整数）；省略即不声明 |
+| `input` | string[] | 否 | 输入类型，取值只能是 `text` / `image`；省略即不声明 |
+
 ```json
-{ "name": "Internal Gateway", "baseUrl": "https://llm.internal.example/v1", "models": ["qwen3-32b"] }
+{
+  "name": "Internal Gateway",
+  "baseUrl": "https://llm.internal.example/v1",
+  "api": "openai-completions",
+  "models": [
+    { "id": "qwen3-32b", "name": "Qwen3 32B", "contextWindow": 32768, "maxTokens": 8192, "input": ["text"] },
+    { "id": "legacy-chat" }
+  ]
+}
 ```
 
 **成功响应** `200`：
@@ -548,7 +569,11 @@ KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 {
   "provider": {
     "id": "internal-gateway", "name": "Internal Gateway", "custom": true,
-    "baseUrl": "https://llm.internal.example/v1", "models": ["qwen3-32b"]
+    "baseUrl": "https://llm.internal.example/v1", "api": "openai-completions",
+    "models": [
+      { "id": "qwen3-32b", "name": "Qwen3 32B", "contextWindow": 32768, "maxTokens": 8192, "input": ["text"] },
+      { "id": "legacy-chat", "name": "legacy-chat" }
+    ]
   },
   "message": "Internal Gateway 已保存；该端点会在 60s 内出现在各用户的模型列表中"
 }
@@ -565,7 +590,11 @@ KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 | `400` | `{"error":"provider id \"openai\" 与内置 provider 冲突，请换一个"}` | `id` 与内置 provider 同名 |
 | `400` | `{"error":"baseUrl 不能为空"}` | 缺 `baseUrl` |
 | `400` | `{"error":"baseUrl \"x\" 非法：需要 http:// 或 https:// 开头的完整地址"}` | `baseUrl` 非法 |
-| `400` | `{"error":"至少要指定一个模型名"}` | `models` 为空或全为空白 |
+| `400` | `{"error":"至少要指定一个模型名"}` | `models` 为空，或字符串项全为空白 |
+| `400` | `{"error":"模型名不能为空"}` | 某个对象项缺 `id` |
+| `400` | `{"error":"模型 \"X\" 的上下文窗口必须是正整数"}` | `contextWindow` 为 0/负数/非整数 |
+| `400` | `{"error":"模型 \"X\" 的最大输出 token 数必须是正整数"}` | `maxTokens` 为 0/负数/非整数 |
+| `400` | `{"error":"模型 \"X\" 的输入类型只能是 text 或 image"}` | `input` 含其它取值 |
 | `500` | `{"error":"保存 provider 失败: ..."}` | 写 ConfigMap 失败 |
 
 ```bash
@@ -573,6 +602,53 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/providers" \
   -H 'Content-Type: application/json' \
   -d '{"name":"Internal Gateway","baseUrl":"https://llm.internal.example/v1","models":["qwen3-32b"]}'
 ```
+
+---
+
+### `POST /api/providers/discover` — 探测端点的模型列表（新增，暂不占用编号）
+
+代管理页面「获取可用模型」按钮向后端发起探测：用**表单当前的** API 地址 / 协议 / Key
+（Key 仅用于本次探测，**不会保存**）去问端点它提供哪些模型，返回候选列表供勾选，避免手抄模型名。
+探测在服务端执行（浏览器不与外部端点直接通信）。读法与 pi-web 自身一致：OpenAI 风格的 `data`
+数组，或 Anthropic 风格的 `models` 对象，并兼容网关常见的字段别名。
+
+**请求体**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `baseUrl` | string | 是 | 端点地址，`http://` / `https://` 开头 |
+| `api` | string | 否 | 缺省 `openai-completions`。仅 `openai-completions`、`openai-responses`、`anthropic-messages` 可探测 |
+| `apiKey` | string | 否 | 仅用于本次探测，不落库；为空则不带凭据 |
+
+**成功响应** `200`（`name` 恒有，缺省为 id；容量未知时省略）：
+
+```json
+{ "models": [ { "id": "qwen3-32b", "name": "Qwen3 32B", "contextWindow": 32768, "maxTokens": 8192 } ] }
+```
+
+端点存在但没有列出任何模型时返回 `200 {"models":[]}`（**不是**错误），管理页面提示手工添加。
+
+**错误**：
+
+| 状态码 | 响应 | 场景 |
+|---|---|---|
+| `400` | `{"error":"请求体不是合法 JSON"}` | body 无法解析 |
+| `400` | `{"error":"baseUrl 不能为空"}` / `{"error":"baseUrl \"x\" 非法：需要 http:// 或 https:// 开头的完整地址"}` | 地址缺失/非法 |
+| `400` | `{"error":"API 协议 \"x\" 不支持探测模型列表；请手工填写模型"}` | 协议不可列出 |
+| `502` | `{"error":"无法连接 <url>"}` | 网络/超时 |
+| `502` | `{"error":"<url> 返回 401；请检查 API Key"}` | 上游 401/403 |
+| `502` | `{"error":"<url> 返回 <status>"}` | 上游其它非 2xx |
+| `502` | `{"error":"<url> 的模型列表既没有 data 数组也没有 models 对象；请手工填写模型"}` | 响应形状无法解读 |
+| `502` | `{"error":"<url> 的响应超过 4MiB，已拒绝"}` | 响应过大 |
+
+```bash
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/providers/discover" \
+  -H 'Content-Type: application/json' \
+  -d '{"baseUrl":"https://api.siliconflow.cn/v1","api":"openai-completions","apiKey":"sk-..."}'
+```
+
+> 端点地址由管理员提供且经 Basic Auth 保护：本端点只对运维开放，**不要**把它暴露给终端用户。
+> 探测只发一次 GET，带上限（单页、4MiB、20s 超时）且仅接受 http(s)。
 
 ---
 
@@ -2516,7 +2592,7 @@ curl -u alice:secret -X POST "$BASE/api/auth/oauth/c2f0e6d1-3a4b-4c5d-8e9f-0a1b2
 
 #### 完整交互式 API-key 流程（mf-pi admin 实际使用的序列）
 
-pi-web 把「OAuth 流」和「交互式 API-key 流」放在同一套 `AuthInteraction` 传输上：`OAuthLoginFlowService` 的类名与 wire 名是历史遗留，`authType` 决定 `runtime.login(providerId, authType, interaction)`（`oauthLoginFlowService.ts:45-49,98`）。因此 API-key 流程**也**使用 `/auth/oauth/:flowId*` 端点。mf-pi 的多用户 admin 就是按这个序列把每个用户的 provider key 写进各自 actor 的 `auth.json`（usermanagement 的「设置 Key」可选择 provider，见 §4.6）。
+pi-web 把「OAuth 流」和「交互式 API-key 流」放在同一套 `AuthInteraction` 传输上：`OAuthLoginFlowService` 的类名与 wire 名是历史遗留，`authType` 决定 `runtime.login(providerId, authType, interaction)`（`oauthLoginFlowService.ts:45-49,98`）。因此 API-key 流程**也**使用 `/auth/oauth/:flowId*` 端点。mf-pi 的多用户 admin 就是按这个序列把每个用户的 provider key 写进各自 actor 的 `auth.json`（usermanagement 的「模型设置 → 用户 API Key」可选择 provider，见 §4.6）。
 
 下述步骤与行号均来自 `demos/mf-pi/admin/apikey.go`：
 

@@ -32,9 +32,9 @@ type providerOption struct {
 	Custom bool `json:"custom,omitempty"`
 	// BaseURL, API and Models describe a custom endpoint so the usermanagement
 	// UI can list it without a second request. They are empty for built-ins.
-	BaseURL string   `json:"baseUrl,omitempty"`
-	API     string   `json:"api,omitempty"`
-	Models  []string `json:"models,omitempty"`
+	BaseURL string          `json:"baseUrl,omitempty"`
+	API     string          `json:"api,omitempty"`
+	Models  []registryModel `json:"models,omitempty"`
 }
 
 // defaultProviderID is the provider assumed when a request omits providerId and
@@ -134,11 +134,7 @@ func (s *server) providerOptionFor(id string, p registryProvider) providerOption
 	if name == "" {
 		name = id
 	}
-	models := make([]string, 0, len(p.Models))
-	for _, m := range p.Models {
-		models = append(models, m.ID)
-	}
-	return providerOption{ID: id, Name: name, Custom: true, BaseURL: p.BaseURL, API: p.API, Models: models}
+	return providerOption{ID: id, Name: name, Custom: true, BaseURL: p.BaseURL, API: p.API, Models: p.Models}
 }
 
 // lookupProvider returns the curated option for id, if it is selectable.

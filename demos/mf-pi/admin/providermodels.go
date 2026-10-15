@@ -52,11 +52,22 @@ const (
 var registryProviderIDPattern = regexp.MustCompile(registryProviderIDRe)
 
 // registryModel is one model offered by a custom provider. Only the id is
-// required; pi-web fills in sensible defaults for everything else.
+// required; pi-web fills in sensible defaults for everything else. The fields
+// mirror the subset of pi-ai's model definition the usermanagement UI edits.
 type registryModel struct {
 	ID   string `json:"id"`
 	Name string `json:"name,omitempty"`
+	// ContextWindow and MaxTokens are token counts; zero means "not declared",
+	// in which case pi-web inherits whatever the route or catalog provides.
+	ContextWindow int `json:"contextWindow,omitempty"`
+	MaxTokens     int `json:"maxTokens,omitempty"`
+	// Input lists accepted modalities (text, image). Empty means "not
+	// declared" so the route's own default applies.
+	Input []string `json:"input,omitempty"`
 }
+
+// modelInputModalities are the modalities a declaration may name.
+var modelInputModalities = map[string]bool{"text": true, "image": true}
 
 // registryProvider is one custom OpenAI-compatible endpoint.
 type registryProvider struct {
@@ -272,10 +283,24 @@ func validateRegistryProvider(id string, p registryProvider, reserved map[string
 		if m.Name == "" {
 			m.Name = m.ID
 		}
+		for _, modality := range m.Input {
+			if !modelInputModalities[modality] {
+				return p, fmt.Errorf("模型 %q 的输入类型只能是 text 或 image", m.ID)
+			}
+		}
 		models = append(models, m)
 	}
 	p.Models = models
 	return p, nil
+}
+
+// modelCapacityError names the offending model in a capacity fault, so a form
+// with several rows points at the row to fix.
+func modelCapacityError(id string, contextWindow bool) error {
+	if contextWindow {
+		return fmt.Errorf("模型 %q 的上下文窗口必须是正整数", id)
+	}
+	return fmt.Errorf("模型 %q 的最大输出 token 数必须是正整数", id)
 }
 
 // handleInternalProviderModels serves the admin-managed registry to the actors'

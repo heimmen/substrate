@@ -57,24 +57,34 @@
 经 nginx 均在 `/usermanagement` 下，走 HTTP Basic（`admin`）；直连 `mfpi-admin:8080` 时去掉
 前缀且无鉴权。
 
-**管理面 UI**：`/usermanagement/` 顶部的「**模型端点**」按钮打开一个模态框，列出注册表中的
-自定义端点（`custom:true`），每行可**删除**；「**添加端点**」表单包含显示名 / Base URL /
-模型名（逗号或换行分隔）/ API 类型 / 可选 id。增删后前端会重新拉取 provider 列表，因此
-「**设置 Key**」下拉立即能选到新端点（自定义项标注 `…（自定义）`）。以下 API 即该 UI 的后端。
+**管理面 UI**：`/usermanagement/` 顶部**唯一**的「**模型设置**」按钮打开一个对话框，含两个标签页。
+「**模型端点**」列出内置 provider（只读，带「内置」标记）与注册表中的自定义端点（`custom:true`，
+每行可**删除**），并提供新增表单：Provider ID（可选，缺省由显示名派生）/ 显示名 / API 地址 /
+API 协议（OpenAI Chat Completions、OpenAI Responses、Anthropic Messages）/ 探测用 API Key
+（**仅用于探测，不保存**）/ 模型目录。模型目录既可以用「**获取可用模型**」向端点探测后勾选
+（见 §4.1），也可以手工逐行填写模型 ID、显示名称、上下文窗口、最大输出 token 数与输入类型
+（文本/图片）。「**用户 API Key**」选择用户与 provider 后保存或清除该用户的凭据（用户行菜单
+不再提供设置/清除 Key）。增删端点后前端会重新拉取 provider 列表，两个标签页立即反映变更。
+以下 API 即该 UI 的后端。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/providers` | 列出可选 provider：内置列表，后接注册表中的自定义端点（后者带 `"custom":true`，并附 `baseUrl` / `models` 供管理页渲染） |
+| GET | `/api/providers` | 列出可选 provider：内置列表，后接注册表中的自定义端点（后者带 `"custom":true`，并附 `baseUrl` / `api` / `models`（对象数组）供管理页渲染） |
 | POST | `/api/providers` | 新增 / 覆盖一个自定义端点 |
+| POST | `/api/providers/discover` | 探测端点提供哪些模型（「获取可用模型」的后端） |
 | DELETE | `/api/providers/{id}` | 从注册表移除一个自定义端点 |
 
-**POST** body：`{"id"?:string,"name":string,"baseUrl":string,"api"?:string,"models":string[]}`
+**POST** body：`{"id"?:string,"name":string,"baseUrl":string,"api"?:string,"models":[{id,name?,contextWindow?,maxTokens?,input?}]}`
+（`models` 也可传字符串数组，等价于只填 `id`）
 
 - `id` 可省略，由 `name` 推导：转小写；`-` `_` `.` 与空格折叠为 `-`（去掉首尾），**其它非字母
   数字字符直接丢弃**（例：`Z.AI  GLM` → `z-ai-glm`）；推不出任何字符时回退为 `custom`。显式 id 须匹配
   `^[a-z0-9][a-z0-9._-]*$`，且不得与内置 provider 冲突。
 - `name` 可省略（缺省即 id）；`api` 缺省 `openai-completions`；`models` 至少一个非空项，
   重名去重，每个模型的显示名缺省即其 id。
+- 模型项可选 `contextWindow` / `maxTokens`（正整数，省略即不声明，由 pi-web 继承）与
+  `input`（`text` / `image`；省略即不声明）。注册表只会保存这几个字段，因此清单 seed 也只写这几个
+  ——手工往 ConfigMap 里塞管理面不认识的字段，会在下一次写入时被丢弃。
 - `400` 错误（`{"error":...}`）：
   - `请求体不是合法 JSON`
   - `provider id "X" 非法：需匹配 ^[a-z0-9][a-z0-9._-]*$`
@@ -82,16 +92,34 @@
   - `baseUrl 不能为空`
   - `baseUrl "x" 非法：需要 http:// 或 https:// 开头的完整地址`
   - `至少要指定一个模型名`
+  - `模型名不能为空`
+  - `模型 "X" 的上下文窗口必须是正整数` / `模型 "X" 的最大输出 token 数必须是正整数`
+  - `模型 "X" 的输入类型只能是 text 或 image`
 - `500`：`{"error":"保存 provider 失败: ..."}`（写 ConfigMap 失败）。
 
 ```bash
 curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/providers" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Internal Gateway","baseUrl":"https://llm.internal.example/v1","models":["qwen3-32b"]}'
+  -d '{"name":"Internal Gateway","baseUrl":"https://llm.internal.example/v1",
+     "api":"openai-completions",
+     "models":[{"id":"qwen3-32b","name":"Qwen3 32B","contextWindow":32768,"maxTokens":8192,"input":["text"]}]}'
 # 200 {"provider":{"id":"internal-gateway","name":"Internal Gateway","custom":true,
-#              "baseUrl":"https://llm.internal.example/v1","models":["qwen3-32b"]},
+#              "baseUrl":"https://llm.internal.example/v1","api":"openai-completions",
+#              "models":[{"id":"qwen3-32b","name":"Qwen3 32B","contextWindow":32768,"maxTokens":8192,"input":["text"]}]},
 #      "message":"Internal Gateway 已保存；该端点会在 60s 内出现在各用户的模型列表中"}
 ```
+
+### 4.1 探测模型列表
+
+`POST /api/providers/discover` body `{"baseUrl":...,"api"?:...,"apiKey"?:...}`：用**表单当前的**
+地址 / 协议 / Key 向端点发一次 GET（OpenAI 协议读 `{base}/models`；Anthropic 协议读根路径的
+`/v1/models`，带 `anthropic-version` 与 `x-api-key`），把回复里 OpenAI 风格的 `data` 数组或
+Anthropic 风格的 `models` 对象读成候选模型（兼容 `context_length`、`max_output_tokens`、
+`limit.context`、`top_provider.max_completion_tokens` 等别名）。成功 `200 {"models":[...]}`；
+端点没列出任何模型时同样是 `200`，但 `models` 为空数组（页面提示手工添加）。协议不可列出、
+地址非法返回 `400`；连不上、上游 401/403/其它状态、响应不可解读或超过 4MiB 返回 `502`，
+错误文案里带 URL，401/403 额外提示检查 API Key。`apiKey` **只用于这一次探测**，不写入注册表
+（凭据仍按用户设置，见 §1）。
 
 **DELETE**：成功返回 `200`，body 为 `{"message":"<id> 已从注册表移除；已拉取该端点的 actor 仍保留本地 models.json 中的定义","provider":"<id>"}`；不存在返回 `404 {"error":"provider 不存在: <id>"}`。
 

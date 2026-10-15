@@ -517,11 +517,11 @@ func (s *server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 // per user, set through POST /api/users/{name}/apikey.
 func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID      string   `json:"id"`
-		Name    string   `json:"name"`
-		BaseURL string   `json:"baseUrl"`
-		API     string   `json:"api"`
-		Models  []string `json:"models"`
+		ID      string            `json:"id"`
+		Name    string            `json:"name"`
+		BaseURL string            `json:"baseUrl"`
+		API     string            `json:"api"`
+		Models  []json.RawMessage `json:"models"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
@@ -531,11 +531,10 @@ func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = slugifyProviderID(req.Name)
 	}
-	models := make([]registryModel, 0, len(req.Models))
-	for _, m := range req.Models {
-		if m = strings.TrimSpace(m); m != "" {
-			models = append(models, registryModel{ID: m})
-		}
+	models, err := parseProviderModels(req.Models)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 	def, err := validateRegistryProvider(id, registryProvider{
 		Name:    strings.TrimSpace(req.Name),
@@ -591,6 +590,55 @@ func (s *server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 		"message":  id + " 已从注册表移除；已拉取该端点的 actor 仍保留本地 models.json 中的定义",
 		"provider": id,
 	})
+}
+
+// providerModelRequest is one declared model as the console sends it. The
+// capacities are pointers so an explicit 0 is a refusal rather than "unset".
+type providerModelRequest struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	ContextWindow *int     `json:"contextWindow"`
+	MaxTokens     *int     `json:"maxTokens"`
+	Input         []string `json:"input"`
+}
+
+// parseProviderModels accepts either an object per model or a bare model id
+// string, so a caller that still sends ["model-id"] keeps working.
+func parseProviderModels(raw []json.RawMessage) ([]registryModel, error) {
+	models := make([]registryModel, 0, len(raw))
+	for _, item := range raw {
+		var id string
+		if err := json.Unmarshal(item, &id); err == nil {
+			if id = strings.TrimSpace(id); id != "" {
+				models = append(models, registryModel{ID: id})
+			}
+			continue
+		}
+		var m providerModelRequest
+		if err := json.Unmarshal(item, &m); err != nil {
+			return nil, fmt.Errorf("模型条目既不是字符串也不是对象")
+		}
+		m.ID = strings.TrimSpace(m.ID)
+		m.Name = strings.TrimSpace(m.Name)
+		if m.ID == "" {
+			return nil, fmt.Errorf("模型名不能为空")
+		}
+		if m.ContextWindow != nil && *m.ContextWindow <= 0 {
+			return nil, modelCapacityError(m.ID, true)
+		}
+		if m.MaxTokens != nil && *m.MaxTokens <= 0 {
+			return nil, modelCapacityError(m.ID, false)
+		}
+		model := registryModel{ID: m.ID, Name: m.Name, Input: m.Input}
+		if m.ContextWindow != nil {
+			model.ContextWindow = *m.ContextWindow
+		}
+		if m.MaxTokens != nil {
+			model.MaxTokens = *m.MaxTokens
+		}
+		models = append(models, model)
+	}
+	return models, nil
 }
 
 // slugifyProviderID derives a provider id from a display name: lower-cased,
@@ -1664,6 +1712,7 @@ func main() {
 	mux.HandleFunc("/", srv.handleIndex)
 	mux.HandleFunc("/api/users", srv.handleUsers)
 	mux.HandleFunc("/api/providers", srv.handleListProviders)
+	mux.HandleFunc("/api/providers/discover", srv.handleDiscoverProviderModels)
 	mux.HandleFunc("/api/providers/", srv.handleDeleteProvider)
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)

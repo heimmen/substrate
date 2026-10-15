@@ -222,7 +222,7 @@ pi-web 前端所有请求（API `/api/...`、插件资源 `/pi-web-plugins/...`�
 - **删除用户**：先挂起再删除（对应 `delete-user.sh`），并**同时 purge 该用户的
   持久卷**（见下文「用户数据持久化 → 彻底删除（purge）」）
 - **Provider Key**：每行显示该用户是否已设专属 provider API Key（「已设置 /
-  未设置」徽标），并提供「**设置 Key**」/「**清除**」按钮，为指定用户动态注入或
+  未设置」徽标）；「**模型设置 → 用户 API Key**」标签页为该用户动态注入或
   退出其专属 key（详见下文「每用户专属 provider API Key」）
 
 访问方式：`http://<hostname>:58681/usermanagement/`（经 mfpi-nginx 代理转发到
@@ -295,7 +295,7 @@ pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优�
 （如 `DEEPSEEK_API_KEY`，无需重启）；清除后该用户回退到 env key。
 
 **界面（管理 UI）**：`/usermanagement/` 每行显示专属 Key 徽标（已设置 /
-未设置），并可用「**设置 Key**」（选择 provider 并输入 `sk-...`）或「**清除**」按钮操作。
+未设置）；在「**模型设置 → 用户 API Key**」里选择该用户与 provider、输入 `sk-...` 保存，或清除。
 
 **CLI**（`set-user-apikey.sh <username> <api-key> [provider-id]`，经临时 port-forward
 调 mfpi-admin REST `api/users/<name>/apikey`）：
@@ -333,7 +333,7 @@ key（重试退避按 user+provider 计），因此任何 resume 路径（包括
 ### 自定义 OpenAI 兼容端点（管理面注册表）
 
 除 pi-web 内置 registry 中的 provider 外，管理员还可以新增**任意 OpenAI 兼容端点**
-（显示名 + `baseUrl` + 模型名列表），它对**所有**用户的 pi-web 模型选择器立即可选。管理
+（Provider ID / 显示名 / `baseUrl` / API 协议 / 模型列表），它对**所有**用户的 pi-web 模型选择器立即可选。管理
 UI 的 provider 选择器用的是「内置列表 + 注册表」合并后的结果；当前清单的 seed 里预置了
 **SiliconFlow（硅基流动）** 作为示例（id `siliconflow`，`baseUrl`
 `https://api.siliconflow.cn/v1`）。
@@ -341,17 +341,27 @@ UI 的 provider 选择器用的是「内置列表 + 注册表」合并后的结�
 **注册表位置与写入方**：ConfigMap `mfpi-provider-models` 的 `provider-models.json` 键，内容
 是一份 `models.json` 文档（生产模板 `mf-pi.yaml.tmpl` 与测试模板 `mf-pi-test.yaml.tmpl` 各
 一份）。`mfpi-admin` 经 Kubernetes API server 读写它（RBAC `mfpi-admin-providers` 授予
-`get` / `update`）。管理面操作：`/usermanagement/` 顶部的「**模型端点**」按钮打开模态框，
-列出注册表中的自定义端点（`custom:true`），每行可**删除**，也可用「**添加端点**」表单
-（显示名 / Base URL / 模型名，逗号或换行分隔 / API 类型 / 可选 id）新增；增删后会重新拉取
-provider 列表，「**设置 Key**」下拉立即能选到新端点（自定义项标注 `…（自定义）`）。也可直接
-用 API——**无需重建镜像、无需重启 Actor**：
+`get` / `update`）。管理面操作：`/usermanagement/` 顶部**唯一**的「**模型设置**」按钮打开一个
+对话框，含两个标签页。「**模型端点**」标签页列出内置 provider（只读，带「内置」标记，由部署的
+`KEY_PROVIDERS` 决定）与注册表中的自定义端点（`custom:true`，每行可**删除**），并提供新增表单
+（Provider ID（可选，缺省由显示名派生）/ 显示名 / API 地址 / API 协议 / 探测用 Key（不保存）/
+模型列表）。模型列表支持**「获取可用模型」**：用表单当前的地址、协议与 Key 去问端点它提供哪些
+模型（服务端发起，Key 只用于这一次探测），成功后弹出可搜索的勾选框，把选中的模型连同上下文
+窗口、最大输出 token 数一起填入行内；也可以手工逐行填写模型 ID、显示名称、上下文窗口、最大
+输出 token 数与输入类型（文本/图片）。「**用户 API Key**」标签页选择用户与 provider，保存或清除
+该用户的凭据（用户行菜单已不再提供设置/清除 Key）。增删端点后会重新拉取 provider 列表，两个
+标签页立即反映变更。也可直接用 API——**无需重建镜像、无需重启 Actor**：
 
 ```bash
 # 新增 / 覆盖一个端点（id 缺省由 name 推导；api 缺省 openai-completions）
 curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/providers" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Internal Gateway","baseUrl":"https://llm.internal.example/v1","models":["qwen3-32b"]}'
+  -d '{"name":"Internal Gateway","baseUrl":"https://llm.internal.example/v1",
+       "models":[{"id":"qwen3-32b","name":"Qwen3 32B","contextWindow":32768,"maxTokens":8192,"input":["text"]}]}'
+# 探测端点提供哪些模型（"获取可用模型"背后的接口；apiKey 只用于这次探测，不保存）
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/providers/discover" \
+  -H 'Content-Type: application/json' \
+  -d '{"baseUrl":"https://api.siliconflow.cn/v1","api":"openai-completions","apiKey":"sk-..."}'
 # 移除
 curl -sS -u admin:'mf@pass2026' -X DELETE \
   "${BASE}/usermanagement/api/providers/internal-gateway"

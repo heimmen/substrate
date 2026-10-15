@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -429,6 +431,8 @@ func doRequest(s *server, method, path, body string) *httptest.ResponseRecorder 
 		s.handleListProviders(rec, req)
 	case path == "/internal/providers/models.json":
 		s.handleInternalProviderModels(rec, req)
+	case path == "/api/providers/discover":
+		s.handleDiscoverProviderModels(rec, req)
 	case strings.HasPrefix(path, "/api/providers/"):
 		s.handleDeleteProvider(rec, req)
 	default:
@@ -2491,7 +2495,7 @@ func TestProviderLabelAndOptionsIncludeCustom(t *testing.T) {
 		t.Errorf("last option = %+v, want the custom provider flagged", last)
 	}
 	// The UI needs the endpoint details inline to list custom endpoints.
-	if last.BaseURL != "https://h/v1" || last.API != registryAPIDefault || len(last.Models) != 1 || last.Models[0] != "m" {
+	if last.BaseURL != "https://h/v1" || last.API != registryAPIDefault || len(last.Models) != 1 || last.Models[0].ID != "m" {
 		t.Errorf("custom option details = %+v, want baseUrl/api/models exposed", last)
 	}
 	if opts[0].BaseURL != "" || opts[0].Models != nil {
@@ -2513,6 +2517,302 @@ func TestSlugifyProviderID(t *testing.T) {
 	for in, want := range cases {
 		if got := slugifyProviderID(in); got != want {
 			t.Errorf("slugifyProviderID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Declared model rows and endpoint model discovery.
+// ---------------------------------------------------------------------------
+
+func TestHandleCreateProviderAcceptsModelObjects(t *testing.T) {
+	s := newTestServer(newFake())
+	reg := s.providerRegistry.(*fakeProviderRegistry)
+
+	rec := doRequest(s, http.MethodPost, "/api/providers", `{
+		"name":"Acme Gateway","baseUrl":"https://gateway.acme.example/v1","api":"anthropic-messages",
+		"models":[
+			{"id":"acme-large","name":"Acme Large","contextWindow":131072,"maxTokens":32768,"input":["text","image"]},
+			{"id":"acme-small"}
+		]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	stored := reg.data["acme-gateway"]
+	if len(stored.Models) != 2 {
+		t.Fatalf("stored models = %+v, want 2", stored.Models)
+	}
+	first := stored.Models[0]
+	if first.ID != "acme-large" || first.Name != "Acme Large" || first.ContextWindow != 131072 ||
+		first.MaxTokens != 32768 || len(first.Input) != 2 {
+		t.Errorf("first model = %+v, want the declared fields preserved", first)
+	}
+	if second := stored.Models[1]; second.Name != "acme-small" || second.ContextWindow != 0 {
+		t.Errorf("second model = %+v, want name defaulted to id and no capacities", second)
+	}
+	resp := decode[struct {
+		Provider providerOption `json:"provider"`
+	}](t, rec)
+	if resp.Provider.Models[0].ContextWindow != 131072 || resp.Provider.API != "anthropic-messages" {
+		t.Errorf("response provider = %+v, want the model fields echoed back", resp.Provider)
+	}
+}
+
+// Bare model-id strings stay accepted so an older caller keeps working.
+func TestHandleCreateProviderAcceptsModelIDStrings(t *testing.T) {
+	s := newTestServer(newFake())
+	rec := doRequest(s, http.MethodPost, "/api/providers",
+		`{"name":"gw","baseUrl":"https://h/v1","models":["m-one","m-two",""]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	stored := s.providerRegistry.(*fakeProviderRegistry).data["gw"]
+	if len(stored.Models) != 2 {
+		t.Errorf("models = %+v, want the two non-empty ids", stored.Models)
+	}
+}
+
+func TestParseProviderModelsRejectsBadRows(t *testing.T) {
+	cases := map[string]string{
+		"zero context window":  `[{"id":"m","contextWindow":0}]`,
+		"negative max tokens":  `[{"id":"m","maxTokens":-5}]`,
+		"non-integer capacity": `[{"id":"m","contextWindow":1.5}]`,
+		"empty id":             `[{"name":"x"}]`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			var raw []json.RawMessage
+			if err := json.Unmarshal([]byte(body), &raw); err != nil {
+				t.Fatalf("fixture: %v", err)
+			}
+			if _, err := parseProviderModels(raw); err == nil {
+				t.Errorf("parseProviderModels(%s) = nil error, want a refusal", body)
+			}
+		})
+	}
+}
+
+func TestValidateRegistryProviderRejectsUnknownInputModality(t *testing.T) {
+	_, err := validateRegistryProvider("gw", registryProvider{
+		BaseURL: "https://h/v1",
+		Models:  []registryModel{{ID: "m", Input: []string{"audio"}}},
+	}, builtinProviderIndex())
+	if err == nil || !strings.Contains(err.Error(), "输入类型只能是 text 或 image") {
+		t.Errorf("err = %v, want the modality refusal", err)
+	}
+}
+
+// The probe reads an OpenAI-style `data` array, including the field aliases
+// gateways actually publish.
+func TestDiscoverProviderModelsOpenAIShape(t *testing.T) {
+	var gotPath, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[
+			{"id":"acme-large","name":"Acme Large","context_length":131072,"max_output_tokens":32768},
+			{"id":"acme-mini","top_provider":{"max_completion_tokens":4096},"limit":{"context":8192}},
+			{"id":"acme-tiny"}
+		]}`)
+	}))
+	defer upstream.Close()
+
+	s := newTestServer(newFake())
+	rec := doRequest(s, http.MethodPost, "/api/providers/discover",
+		`{"baseUrl":"`+upstream.URL+`/v1","api":"openai-completions","apiKey":"sk-probe"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/v1/models" {
+		t.Errorf("probed path = %q, want /v1/models", gotPath)
+	}
+	if gotAuth != "Bearer sk-probe" {
+		t.Errorf("authorization = %q, want the probe key", gotAuth)
+	}
+	resp := decode[struct {
+		Models []discoveredModel `json:"models"`
+	}](t, rec)
+	if len(resp.Models) != 3 {
+		t.Fatalf("models = %+v, want 3", resp.Models)
+	}
+	if m := resp.Models[0]; m.ID != "acme-large" || m.Name != "Acme Large" || m.ContextWindow != 131072 || m.MaxTokens != 32768 {
+		t.Errorf("first = %+v, want aliases read", m)
+	}
+	if m := resp.Models[1]; m.ContextWindow != 8192 || m.MaxTokens != 4096 {
+		t.Errorf("second = %+v, want the nested limit/top_provider capacities", m)
+	}
+	if m := resp.Models[2]; m.Name != "acme-tiny" || m.ContextWindow != 0 {
+		t.Errorf("third = %+v, want the name defaulted to the id", m)
+	}
+}
+
+// An Anthropic-style `models` object lists at the root's /v1/models with the
+// version header, and entries may be keyed without their own id.
+func TestDiscoverProviderModelsAnthropicShape(t *testing.T) {
+	var gotPath, gotVersion, gotKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotVersion, gotKey = r.URL.Path, r.Header.Get("anthropic-version"), r.Header.Get("x-api-key")
+		_, _ = io.WriteString(w, `{"models":{"claude-x":{"display_name":"Claude X"}}}`)
+	}))
+	defer upstream.Close()
+
+	s := newTestServer(newFake())
+	rec := doRequest(s, http.MethodPost, "/api/providers/discover",
+		`{"baseUrl":"`+upstream.URL+`/v1","api":"anthropic-messages","apiKey":"sk-a"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/v1/models" {
+		t.Errorf("probed path = %q, want the root's /v1/models", gotPath)
+	}
+	if gotVersion != anthropicVersion || gotKey != "sk-a" {
+		t.Errorf("headers = version %q key %q, want %q and the probe key", gotVersion, gotKey, anthropicVersion)
+	}
+	resp := decode[struct {
+		Models []discoveredModel `json:"models"`
+	}](t, rec)
+	if len(resp.Models) != 1 || resp.Models[0].ID != "claude-x" || resp.Models[0].Name != "Claude X" {
+		t.Errorf("models = %+v, want the key used as the id", resp.Models)
+	}
+}
+
+// A present but empty listing is a successful "nothing listed", not a parse
+// failure: the console says so and keeps hand entry available.
+func TestDiscoverProviderModelsEmptyListing(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[]}`)
+	}))
+	defer upstream.Close()
+
+	s := newTestServer(newFake())
+	rec := doRequest(s, http.MethodPost, "/api/providers/discover", `{"baseUrl":"`+upstream.URL+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[struct {
+		Models []discoveredModel `json:"models"`
+	}](t, rec)
+	if len(resp.Models) != 0 {
+		t.Errorf("models = %+v, want none", resp.Models)
+	}
+}
+
+func TestDiscoverProviderModelsFailureModes(t *testing.T) {
+	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer unauthorized.Close()
+	unshaped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"object":"list"}`)
+	}))
+	defer unshaped.Close()
+
+	cases := []struct {
+		name     string
+		body     string
+		wantCode int
+		wantText string
+	}{
+		{"not json", `{`, http.StatusBadRequest, "请求体不是合法 JSON"},
+		{"empty base url", `{"baseUrl":"  "}`, http.StatusBadRequest, "baseUrl 不能为空"},
+		{"relative base url", `{"baseUrl":"/v1"}`, http.StatusBadRequest, "非法"},
+		{"unlistable protocol", `{"baseUrl":"https://h/v1","api":"google-generative-ai"}`, http.StatusBadRequest, "不支持探测模型列表"},
+		{"unauthorized", `{"baseUrl":"` + unauthorized.URL + `"}`, http.StatusBadGateway, "请检查 API Key"},
+		{"unshaped reply", `{"baseUrl":"` + unshaped.URL + `"}`, http.StatusBadGateway, "请手工填写模型"},
+		{"unreachable", `{"baseUrl":"http://127.0.0.1:1"}`, http.StatusBadGateway, "无法连接"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(newFake())
+			rec := doRequest(s, http.MethodPost, "/api/providers/discover", tc.body)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantText) {
+				t.Errorf("body = %s, want it to mention %q", rec.Body.String(), tc.wantText)
+			}
+		})
+	}
+
+	// Only POST probes; the route stays read-only otherwise.
+	s := newTestServer(newFake())
+	if rec := doRequest(s, http.MethodGet, "/api/providers/discover", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("GET status = %d, want 404", rec.Code)
+	}
+}
+
+func TestListingURL(t *testing.T) {
+	cases := []struct{ base, api, want string }{
+		{"https://gw.example/v1", "openai-completions", "https://gw.example/v1/models"},
+		{"https://gw.example/v1/", "openai-responses", "https://gw.example/v1/models"},
+		{"https://gw.example/v1", "anthropic-messages", "https://gw.example/v1/models?limit=" + fmt.Sprint(anthropicModelPage)},
+		{"https://gw.example", "anthropic-messages", "https://gw.example/v1/models?limit=" + fmt.Sprint(anthropicModelPage)},
+		{"https://gw.example/openai/v1", "openai-completions", "https://gw.example/openai/v1/models"},
+	}
+	for _, tc := range cases {
+		if got := listingURL(tc.base, tc.api); got != tc.want {
+			t.Errorf("listingURL(%q, %q) = %q, want %q", tc.base, tc.api, got, tc.want)
+		}
+	}
+}
+
+// The registry round-trips through the admin's own structs: whatever an
+// operator writes into the ConfigMap, the console must be able to read and
+// write it back without silently dropping fields. (This is why the manifest
+// seed is limited to the fields the console models.)
+func TestRegistryDocumentRoundTrips(t *testing.T) {
+	const seed = `{"providers":{"siliconflow":{"name":"SiliconFlow","baseUrl":"https://api.siliconflow.cn/v1",` +
+		`"api":"openai-completions","models":[{"id":"m","name":"M","contextWindow":128000,"maxTokens":8192,"input":["text"]}]}}}`
+	data, err := parseRegistryDocument(seed)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	rendered, err := marshalRegistryDocument(data)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	again, err := parseRegistryDocument(rendered)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if !reflect.DeepEqual(data, again) {
+		t.Errorf("registry changed across a write:\n before=%+v\n after=%+v", data, again)
+	}
+	model := again["siliconflow"].Models[0]
+	if model.Name != "M" || model.ContextWindow != 128000 || model.MaxTokens != 8192 || len(model.Input) != 1 {
+		t.Errorf("model = %+v, want every declared field preserved", model)
+	}
+}
+
+// TestLiveDiscoverModels is an OPT-IN check of the probe against a real
+// endpoint, so the tolerant listing reader is exercised on a gateway's actual
+// reply rather than on fixtures alone. Skipped unless pointed at one:
+//
+//	MFPI_LIVE_DISCOVER_URL  e.g. https://api.siliconflow.cn/v1
+//	MFPI_LIVE_DISCOVER_KEY  API key for that endpoint (optional)
+//	MFPI_LIVE_DISCOVER_API  protocol id (default openai-completions)
+func TestLiveDiscoverModels(t *testing.T) {
+	baseURL := os.Getenv("MFPI_LIVE_DISCOVER_URL")
+	if baseURL == "" {
+		t.Skip("set MFPI_LIVE_DISCOVER_URL to probe a real endpoint")
+	}
+	api := os.Getenv("MFPI_LIVE_DISCOVER_API")
+	if api == "" {
+		api = registryAPIDefault
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	models, err := probeModelListing(ctx, baseURL, api, os.Getenv("MFPI_LIVE_DISCOVER_KEY"))
+	if err != nil {
+		t.Fatalf("probe %s (%s): %v", baseURL, api, err)
+	}
+	if len(models) == 0 {
+		t.Fatalf("probe listed no models; the endpoint may need a key")
+	}
+	t.Logf("listed %d models; first: %+v", len(models), models[0])
+	for _, m := range models {
+		if m.ID == "" {
+			t.Fatalf("listed a model with no id: %+v", m)
 		}
 	}
 }

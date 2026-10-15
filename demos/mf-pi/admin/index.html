@@ -237,6 +237,115 @@
     padding: 1px 4px;
   }
   .endpoint-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
+  /* 模型设置对话框：标签页（模型端点 / 用户 API Key）。两个面板始终保留在 DOM 中，
+     切换只改 hidden —— 「模型端点」表单里已填的草稿不会因为切标签而丢失。 */
+  .tab-strip {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  .tab-strip .tab {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  .tab-strip .tab:hover { color: var(--text); }
+  .tab-strip .tab[aria-selected="true"] {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
+  .tab-panel[hidden] { display: none; }
+  .modal-hint code, .modal-note code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--gray-bg);
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  /* 模型目录：一行一个模型卡片，容量/输入类型可折叠；候选勾选对话框独立于管理器。 */
+  .endpoint-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .endpoint-section-head .modal-label { margin-bottom: 0; }
+  .endpoint-rows { margin-bottom: 8px; }
+  .endpoint-rows-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+  }
+  .endpoint-rows-actions .modal-hint { margin: 0; }
+  .model-row {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  .model-row-head { display: flex; align-items: center; gap: 6px; }
+  .modal .model-row-head input[type="text"] {
+    flex: 1 1 0;
+    min-width: 0;
+    margin-bottom: 0;
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+  .modal .model-row-body input[type="text"] {
+    margin-bottom: 0;
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+  .model-row-body { margin-top: 8px; }
+  .model-grid { display: flex; gap: 8px; margin-bottom: 8px; }
+  .model-grid > div { flex: 1 1 0; min-width: 0; }
+  .model-input-types { display: flex; gap: 16px; font-size: 13px; margin-bottom: 4px; }
+  .model-input-types label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .model-row .model-row-error { margin: 6px 0 0; }
+  .model-picker-modal { max-width: 520px; }
+  .model-picker-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px;
+    margin-bottom: 12px;
+  }
+  .model-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .model-picker-item:hover { background: var(--gray-bg); }
+  .model-picker-item.disabled { opacity: 0.55; cursor: not-allowed; }
+  .model-picker-item code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    word-break: break-all;
+  }
+  .model-picker-item .model-picker-name { color: var(--muted); }
+  .model-picker-item .model-picker-tag {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .model-picker-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .model-picker-toolbar .modal-hint { margin: 0; }
+  .model-picker-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
 </style>
 </head>
 <body>
@@ -246,8 +355,8 @@
     <div class="sub" id="atespace-info">正在加载 atespace 信息…</div>
   </div>
   <div class="toolbar" style="margin-bottom: 0">
-    <button class="secondary" id="providers-btn"
-            title="定义部署级的 OpenAI 兼容端点（Base URL + 模型名），所有用户都可在设置 Key 时选择">模型端点</button>
+    <button class="secondary" id="model-settings-btn"
+            title="模型设置的唯一入口：维护部署级端点（Base URL + 模型名）并为单个用户设置专属 API Key">模型设置</button>
     <button class="secondary" id="refresh-btn">刷新</button>
   </div>
 </header>
@@ -379,7 +488,7 @@
   // 覆盖它）；providersPromise 去重并发请求，避免对话框与页面加载各拉一次。
   var providersCache = null;
   var providersPromise = null;
-  // 拉取失败时的兜底 provider：至少让管理员仍能完成设置 Key 的操作。
+  // 拉取失败时的兜底 provider：至少让管理员仍能完成用户 API Key 的设置。
   var fallbackProviders = [{ id: "deepseek", name: "DeepSeek" }];
 
   // fetchProviders 返回 provider 列表（{id,name} 数组）的 Promise；成功后缓存，
@@ -412,7 +521,7 @@
   }
 
   // refreshProviders 主动失效 provider 缓存并重新拉取：新增/删除自定义端点后调用，
-  // 使端点管理器列表与"设置 Key"对话框的 provider 下拉立即看到变更。
+  // 使端点列表与「用户 API Key」标签页的 provider 下拉立即看到变更。
   function refreshProviders() {
     providersCache = null;
     providersPromise = null;
@@ -515,13 +624,6 @@
           "已为该用户存储专属 API Key") + '">' +
         esc(keyProviderName || "已设置") + "</span>" :
         '<span class="badge gray" title="未存储专属 Key，agent 将使用内置/环境变量凭据">未设置</span>';
-      // 操作菜单提示同样按该用户实际的 provider 命名，避免写死 DeepSeek。
-      var setKeyTitle = keyProviderName ?
-        "为运行中的 agent 写入专属 " + keyProviderName + " API Key（保存后退出旧 provider）" :
-        "为该用户设置专属 API Key（可选择 provider）";
-      var clearKeyTitle = keyProviderName ?
-        "退出登录并清除专属 " + keyProviderName + " API Key" :
-        "清除该用户的专属 API Key（当前未设置）";
       var expiryCell = expiryDisplayHtml(u);
       var tierBadge = u.tier ?
         '<span class="badge blue" title="该用户的资源档位（作用于新建/重建，存量用户不变）">' + esc(u.tier) + "</span>" :
@@ -542,8 +644,6 @@
         '<div class="dropdown-menu">' +
         '<button class="copy-pwd">复制密码</button>' +
         '<button class="reset-pwd">重置密码</button>' +
-        '<button class="set-key" title="' + esc(setKeyTitle) + '">设置 Key</button>' +
-        '<button class="clear-key" title="' + esc(clearKeyTitle) + '">清除 Key</button>' +
         '<button class="set-expiry" title="设置激活有效期，到期后自动挂起释放资源">设置有效期</button>' +
         '<button class="clear-expiry" title="撤销激活有效期，停止到期自动挂起">清除有效期</button>' +
         '<button class="set-tier" title="设置用户资源档位（新建/重建后生效）">设置资源档位</button>' +
@@ -568,12 +668,6 @@
       });
       tr.querySelector(".reset-pwd").addEventListener("click", function () {
         resetPassword(u.name);
-      });
-      tr.querySelector(".set-key").addEventListener("click", function () {
-        setUserAPIKey(u.name, keyProviderId);
-      });
-      tr.querySelector(".clear-key").addEventListener("click", function () {
-        clearUserAPIKey(u.name, keyProviderId);
       });
       tr.querySelector(".set-expiry").addEventListener("click", function () {
         setUserExpiry(u.name);
@@ -639,29 +733,9 @@
       });
   }
 
-  // keyDialogEl 记录当前打开的"设置 API Key"对话框根节点（含遮罩）。对话框每次打开
-  // 时新建、关闭时整体从 DOM 移除：既不会残留遮罩层，也不受 5 秒自动刷新重建用户表
-  // 的影响（用户表刷新只重建 <tbody>，与对话框互不干扰）。
-  var keyDialogEl = null;
-
-  // closeKeyDialog 关闭对话框（若已打开）并注销 Esc 监听。
-  function closeKeyDialog() {
-    if (keyDialogEl && keyDialogEl.parentNode) {
-      keyDialogEl.parentNode.removeChild(keyDialogEl);
-    }
-    keyDialogEl = null;
-    document.removeEventListener("keydown", onKeyDialogKeydown, true);
-  }
-
-  // onKeyDialogKeydown 支持 Esc 关闭对话框。
-  function onKeyDialogKeydown(e) {
-    if (e.key === "Escape" || e.keyCode === 27) {
-      closeKeyDialog();
-    }
-  }
-
-  // submitUserAPIKey 提交 {apiKey, providerId}，沿用原有的成功/失败提示。
-  function submitUserAPIKey(name, key, providerId) {
+  // submitUserAPIKey 提交 {apiKey, providerId}（「用户 API Key」标签页的唯一提交路径），
+  // 沿用原有的成功/失败提示。done 是可选回调：成功后调用，让标签页刷新用户下拉与提示。
+  function submitUserAPIKey(name, key, providerId, done) {
     clearMsg();
     fetch("api/users/" + encodeURIComponent(name) + "/apikey", {
       method: "POST",
@@ -677,148 +751,230 @@
       .then(function (j) {
         showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "API Key 已设置"));
         listUsers();
+        if (done) done();
       })
       .catch(function (err) {
         showMsg("设置 Key 失败：" + err.message, true);
       });
   }
 
-  // setUserAPIKey 为指定用户打开 provider + API Key 对话框：provider 下拉来自
-  // api/providers（首次成功后缓存，失败回退 DeepSeek），默认预选该用户已配置的
-  // provider；校验非空后 POST {apiKey, providerId}。
-  function setUserAPIKey(name, currentProvider) {
-    closeKeyDialog(); // 同一时间只保留一个对话框
-    var currentName = providerDisplayName(currentProvider) || currentProvider;
-    var root = document.createElement("div");
-    root.className = "modal-overlay";
-    root.innerHTML =
-      '<div class="modal" role="dialog" aria-modal="true" aria-label="设置 API Key">' +
-      '<div class="modal-title">为 "' + esc(name) + '" 设置专属 API Key</div>' +
-      '<label class="modal-label" for="key-provider-select">Provider</label>' +
-      '<select id="key-provider-select" disabled><option value="">加载中…</option></select>' +
-      '<div class="modal-note" id="key-provider-note"></div>' +
-      '<label class="modal-label" for="key-input">API Key</label>' +
-      '<input type="text" id="key-input" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
-      '<div class="modal-hint">Key 会写入 Secret 持久化并注入到该用户运行中的 agent；' +
-      "若 agent 尚未恢复将自动恢复。</div>" +
-      '<div class="modal-error" id="key-error"></div>' +
-      '<div class="modal-actions">' +
-      '<button class="secondary" id="key-cancel">取消</button>' +
-      '<button id="key-ok">确定</button>' +
-      "</div></div>";
+  // ---- 模型设置（唯一入口：标签页「模型端点」/「用户 API Key」） ----
 
-    var select = root.querySelector("#key-provider-select");
-    var note = root.querySelector("#key-provider-note");
-    var input = root.querySelector("#key-input");
-    var error = root.querySelector("#key-error");
+  // modelSettingsEl 记录当前打开的"模型设置"对话框根节点（含遮罩）。每次打开新建、
+  // 关闭时整体从 DOM 移除，因此 5 秒自动刷新（只重建用户表 <tbody>）既不会干扰它，
+  // 也不会把它重新"复活"。
+  var modelSettingsEl = null;
 
-    // updateNote 提示已配置的 provider：与所选一致时说明会覆盖，否则说明会切换。
-    function updateNote() {
-      if (!currentProvider) {
-        note.textContent = "";
-        return;
-      }
-      if (select.value === currentProvider) {
-        note.textContent = "当前已设置：" + currentName + "（保存后将覆盖现有 Key）";
-      } else {
-        note.textContent = "当前已设置：" + currentName + "（保存后将切换并退出旧 provider）";
-      }
-    }
-
-    // submit 做非空校验（内联提示），通过后关闭对话框并提交。
-    function submit() {
-      if (select.disabled) {
-        // provider 列表尚未就绪，避免把占位项当作 providerId 提交。
-        error.textContent = "Provider 列表加载中，请稍候…";
-        return;
-      }
-      var key = input.value.trim();
-      if (key === "") {
-        error.textContent = "API Key 不能为空";
-        input.focus();
-        return;
-      }
-      closeKeyDialog();
-      submitUserAPIKey(name, key, select.value);
-    }
-
-    root.querySelector("#key-cancel").addEventListener("click", closeKeyDialog);
-    root.querySelector("#key-ok").addEventListener("click", submit);
-    input.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.keyCode === 13) {
-        e.preventDefault();
-        submit();
-      }
-    });
-    select.addEventListener("change", updateNote);
-    // 仅在遮罩上按下并松开时才关闭，避免在输入框内选中文字后拖到遮罩上误关闭。
-    var overlayPressed = false;
-    root.addEventListener("mousedown", function (e) {
-      overlayPressed = e.target === root;
-    });
-    root.addEventListener("click", function (e) {
-      if (e.target === root && overlayPressed) closeKeyDialog();
-    });
-    document.addEventListener("keydown", onKeyDialogKeydown, true);
-
-    document.body.appendChild(root);
-    keyDialogEl = root;
-    input.focus();
-
-    // 异步填充 provider 列表；失败时 fetchProviders 已回退为 DeepSeek，仍可继续。
-    fetchProviders().then(function (list) {
-      if (keyDialogEl !== root) return; // 对话框已关闭，丢弃本次结果
-      select.innerHTML = "";
-      list.forEach(function (p) {
-        var opt = document.createElement("option");
-        opt.value = p.id;
-        // 管理员定义的自定义端点加"（自定义）"后缀，与内置 provider 区分。
-        opt.textContent = p.name + (p.custom ? "（自定义）" : "");
-        select.appendChild(opt);
-      });
-      // 预选该用户已配置的 provider；列表里没有该 id 时补一项，保证能选中。
-      select.value = currentProvider || "";
-      if (currentProvider && !select.value) {
-        var extra = document.createElement("option");
-        extra.value = currentProvider;
-        extra.textContent = currentName;
-        select.insertBefore(extra, select.firstChild);
-        select.value = currentProvider;
-      }
-      if (!select.value && list.length) {
-        select.value = list[0].id;
-      }
-      select.disabled = false;
-      updateNote();
-    });
-  }
-
-  // ---- 自定义模型端点（部署级，管理员维护） ----
-
-  // providerManagerEl 记录当前打开的"自定义模型端点"对话框根节点（含遮罩）。
-  // 与 keyDialogEl 同样的策略：每次打开新建、关闭时整体从 DOM 移除，因此 5 秒
-  // 自动刷新（只重建用户表 <tbody>）既不会干扰它，也不会把它重新"复活"。
-  var providerManagerEl = null;
+  // ENDPOINT_ID_HINT 是 Provider ID 的常驻提示；id 非法时会被同位置的内联错误替换。
+  var ENDPOINT_ID_HINT = "留空则由显示名自动生成；需匹配 ^[a-z0-9][a-z0-9._-]*$，不能与内置或已有端点重名。";
 
   // customEndpointDetails 记录本次会话内新增端点的 baseUrl/api/models 明细。
   // GET api/providers 对 custom 端点已返回 baseUrl/api/models；本地记录仅作为
   // 兜底（后端未返回时），让刚添加的端点在列表里立即显示完整信息。
   var customEndpointDetails = {};
 
-  // closeProviderManager 关闭对话框（若已打开）并注销 Esc 监听。
-  function closeProviderManager() {
-    if (providerManagerEl && providerManagerEl.parentNode) {
-      providerManagerEl.parentNode.removeChild(providerManagerEl);
+  // closeModelSettings 关闭对话框（若已打开）并注销 Esc 监听；叠在上面的"选择模型"
+  // 对话框一并关闭，避免留下孤立的遮罩层。
+  function closeModelSettings() {
+    closeModelPicker();
+    if (modelSettingsEl && modelSettingsEl.parentNode) {
+      modelSettingsEl.parentNode.removeChild(modelSettingsEl);
     }
-    providerManagerEl = null;
-    document.removeEventListener("keydown", onProviderManagerKeydown, true);
+    modelSettingsEl = null;
+    document.removeEventListener("keydown", onModelSettingsKeydown, true);
   }
 
-  // onProviderManagerKeydown 支持 Esc 关闭端点管理器。
-  function onProviderManagerKeydown(e) {
+  // onModelSettingsKeydown 支持 Esc 关闭模型设置对话框；若"选择模型"对话框正叠在上面，
+  // Esc 只关它，对话框与已填内容保持不变。
+  function onModelSettingsKeydown(e) {
     if (e.key === "Escape" || e.keyCode === 27) {
-      closeProviderManager();
+      if (modelPickerEl) {
+        closeModelPicker();
+        return;
+      }
+      closeModelSettings();
     }
+  }
+
+  // modelPickerEl 记录当前打开的"选择要添加的模型"对话框根节点（含遮罩）。与其它
+  // 对话框一样：每次打开新建、关闭时整体从 DOM 移除，5 秒自动刷新不会干扰它。
+  var modelPickerEl = null;
+
+  // closeModelPicker 关闭"选择模型"对话框（若已打开）并注销 Esc 监听。
+  function closeModelPicker() {
+    if (modelPickerEl && modelPickerEl.parentNode) {
+      modelPickerEl.parentNode.removeChild(modelPickerEl);
+    }
+    modelPickerEl = null;
+    document.removeEventListener("keydown", onModelPickerKeydown, true);
+  }
+
+  // onModelPickerKeydown 支持 Esc 关闭"选择模型"对话框。
+  function onModelPickerKeydown(e) {
+    if (e.key === "Escape" || e.keyCode === 27) {
+      closeModelPicker();
+    }
+  }
+
+  // openModelPicker 打开候选模型勾选对话框：搜索框按 id/name 忽略大小写过滤，全选 /
+  // 取消全选只作用于当前可见行；确认后回调 onAdd(selected) 由调用方追加表单行。
+  // existingIds 里的模型在表单里已存在，显示为不可勾选，避免"采纳"覆盖管理员调过的行。
+  function openModelPicker(candidates, existingIds, onAdd) {
+    closeModelPicker();
+    var root = document.createElement("div");
+    root.className = "modal-overlay";
+    root.innerHTML =
+      '<div class="modal model-picker-modal" role="dialog" aria-modal="true" aria-label="选择要添加的模型">' +
+      '<div class="modal-title">选择要添加的模型</div>' +
+      '<input type="text" id="model-picker-search" placeholder="搜索模型" autocomplete="off" spellcheck="false" />' +
+      '<div class="model-picker-toolbar">' +
+      '<button class="secondary mini" id="model-picker-all">全选</button>' +
+      '<button class="secondary mini" id="model-picker-none">取消全选</button>' +
+      '<span class="modal-hint" id="model-picker-count"></span>' +
+      "</div>" +
+      '<div class="model-picker-list" id="model-picker-list"></div>' +
+      '<div class="modal-actions">' +
+      '<button class="secondary" id="model-picker-cancel">取消</button>' +
+      '<button id="model-picker-ok">添加所选</button>' +
+      "</div></div>";
+
+    var list = root.querySelector("#model-picker-list");
+    var search = root.querySelector("#model-picker-search");
+    var countEl = root.querySelector("#model-picker-count");
+    var okBtn = root.querySelector("#model-picker-ok");
+
+    // 每个候选一行：原始 id 用等宽字体 + 展示名；候选对象按 id 存进 byId 供确认时取回。
+    var byId = {};
+    var items = [];
+    candidates.forEach(function (m) {
+      var id = m.id || "";
+      if (id === "") return;
+      byId[id] = m;
+      var item = document.createElement("label");
+      item.className = "model-picker-item";
+      item.setAttribute("data-search", (id + " " + (m.name || "")).toLowerCase());
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = id;
+      if (existingIds && existingIds[id]) {
+        cb.disabled = true; // 表单里已有该模型：不勾选，也不允许覆盖
+        item.className += " disabled";
+      }
+      item.appendChild(cb);
+      var code = document.createElement("code");
+      code.textContent = id;
+      item.appendChild(code);
+      var nameEl = document.createElement("span");
+      nameEl.className = "model-picker-name";
+      nameEl.textContent = m.name || id;
+      item.appendChild(nameEl);
+      if (cb.disabled) {
+        // 明确说明为何不能勾选，避免管理员以为是界面故障。
+        var tag = document.createElement("span");
+        tag.className = "model-picker-tag";
+        tag.textContent = "已在表单中";
+        item.appendChild(tag);
+      }
+      cb.addEventListener("change", updatePickerState);
+      list.appendChild(item);
+      items.push(item);
+    });
+
+    // 搜索无结果时的占位（放在行尾，不参与 items 统计）。
+    var emptyEl = document.createElement("div");
+    emptyEl.className = "model-picker-empty";
+    emptyEl.textContent = "没有匹配的模型";
+    emptyEl.style.display = "none";
+    list.appendChild(emptyEl);
+
+    function visibleItems() {
+      return items.filter(function (it) {
+        return it.style.display !== "none";
+      });
+    }
+
+    // updatePickerState 刷新候选计数与"添加所选"可用性（没勾选任何行时禁用）。
+    function updatePickerState() {
+      var checked = 0;
+      items.forEach(function (it) {
+        if (it.querySelector("input").checked) checked++;
+      });
+      emptyEl.style.display = visibleItems().length === 0 ? "block" : "none";
+      countEl.textContent = "候选 " + items.length + " 个 · 已选 " + checked + " 个";
+      okBtn.disabled = checked === 0;
+    }
+
+    // applyFilter 按搜索词过滤：匹配 id 或展示名，忽略大小写。
+    function applyFilter() {
+      var q = search.value.trim().toLowerCase();
+      items.forEach(function (it) {
+        var hay = it.getAttribute("data-search") || "";
+        it.style.display = (q === "" || hay.indexOf(q) >= 0) ? "flex" : "none";
+      });
+      updatePickerState();
+    }
+
+    search.addEventListener("input", applyFilter);
+    root.querySelector("#model-picker-all").addEventListener("click", function () {
+      visibleItems().forEach(function (it) {
+        var cb = it.querySelector("input");
+        if (!cb.disabled) cb.checked = true;
+      });
+      updatePickerState();
+    });
+    root.querySelector("#model-picker-none").addEventListener("click", function () {
+      visibleItems().forEach(function (it) {
+        it.querySelector("input").checked = false;
+      });
+      updatePickerState();
+    });
+    root.querySelector("#model-picker-cancel").addEventListener("click", closeModelPicker);
+    okBtn.addEventListener("click", function () {
+      var selected = [];
+      items.forEach(function (it) {
+        var cb = it.querySelector("input");
+        if (cb.checked && !cb.disabled) selected.push(byId[cb.value]);
+      });
+      closeModelPicker();
+      if (selected.length) onAdd(selected);
+    });
+    // 仅在遮罩上按下并松开时才关闭，避免在搜索框内选中文字后拖到遮罩上误关闭。
+    var overlayPressed = false;
+    root.addEventListener("mousedown", function (e) {
+      overlayPressed = e.target === root;
+    });
+    root.addEventListener("click", function (e) {
+      if (e.target === root && overlayPressed) closeModelPicker();
+    });
+    document.addEventListener("keydown", onModelPickerKeydown, true);
+
+    document.body.appendChild(root);
+    modelPickerEl = root;
+    applyFilter();
+    search.focus();
+  }
+
+  // endpointModels 归一化某个端点的模型条目：GET api/providers 返回的是对象数组
+  // （{id,name,...}），也兼容纯字符串；统一成 {id,name} 供列表展示。
+  function endpointModels(models) {
+    var out = [];
+    (models || []).forEach(function (m) {
+      var id = typeof m === "string" ? m : ((m && m.id) || "");
+      var name = typeof m === "string" ? m : ((m && (m.name || m.id)) || "");
+      if (id === "" && name === "") return;
+      out.push({ id: id || name, name: name || id });
+    });
+    return out;
+  }
+
+  // modelNamesHtml 渲染端点模型名：优先 name，回退 id；两者不同的用 title 提示原始 id。
+  function modelNamesHtml(models) {
+    return models.map(function (m) {
+      var name = m.name || m.id;
+      if (!name) return "";
+      if (name === m.id) return esc(name);
+      return '<span title="' + esc(m.id) + '">' + esc(name) + "</span>";
+    }).join(", ");
   }
 
   // endpointDetail 汇总某个端点的展示明细：优先用列表返回的字段，其次用本地记录；
@@ -826,15 +982,10 @@
   function endpointDetail(p) {
     var local = customEndpointDetails[p.id] || {};
     var models = (p.models && p.models.length) ? p.models : (local.models || []);
-    var modelIds = models.map(function (m) {
-      return typeof m === "string" ? m : ((m && m.id) || "");
-    }).filter(function (m) {
-      return m !== "";
-    });
     return {
       baseUrl: p.baseUrl || local.baseUrl || "",
       api: p.api || local.api || "",
-      models: modelIds
+      models: endpointModels(models)
     };
   }
 
@@ -843,10 +994,37 @@
     return '<span title="api/providers 列表未返回该字段；本次会话内新增的端点会显示完整明细">—</span>';
   }
 
+  // renderBuiltinProviders 渲染部署内置 provider（不带 custom 的条目）的只读列表：
+  // 一行一个显示名 + id，带「内置」标签，没有删除按钮；列表由部署的 KEY_PROVIDERS 决定。
+  function renderBuiltinProviders(list) {
+    if (!modelSettingsEl) return;
+    var box = modelSettingsEl.querySelector("#builtin-list");
+    if (!box) return;
+    var builtins = (list || []).filter(function (p) {
+      return p && !p.custom && p.id;
+    });
+    if (builtins.length === 0) {
+      box.innerHTML = '<div class="endpoint-empty">部署未配置内置 provider</div>';
+      return;
+    }
+    box.innerHTML = "";
+    builtins.forEach(function (p) {
+      var item = document.createElement("div");
+      item.className = "endpoint-item";
+      item.innerHTML =
+        '<div style="min-width:0">' +
+        '<div class="endpoint-name">' + esc(p.name || p.id) +
+          ' <span class="badge gray">内置</span></div>' +
+        '<div class="endpoint-meta">id：<code>' + esc(p.id) + "</code></div>" +
+        "</div>";
+      box.appendChild(item);
+    });
+  }
+
   // renderEndpointList 渲染自定义端点列表：只在对话框仍打开时写 DOM。
   function renderEndpointList(list) {
-    if (!providerManagerEl) return;
-    var box = providerManagerEl.querySelector("#endpoint-list");
+    if (!modelSettingsEl) return;
+    var box = modelSettingsEl.querySelector("#endpoint-list");
     if (!box) return;
     var customs = (list || []).filter(function (p) {
       return p && p.custom;
@@ -867,7 +1045,7 @@
         '<div class="endpoint-meta">Base URL：' +
           (d.baseUrl ? "<code>" + esc(d.baseUrl) + "</code>" : unknownDetailHtml()) + "</div>" +
         '<div class="endpoint-meta">模型：' +
-          (d.models.length ? esc(d.models.join(", ")) : unknownDetailHtml()) + "</div>" +
+          (d.models.length ? modelNamesHtml(d.models) : unknownDetailHtml()) + "</div>" +
         (d.api ? '<div class="endpoint-meta">API 类型：<code>' + esc(d.api) + "</code></div>" : "") +
         "</div>" +
         '<button class="danger mini endpoint-del" title="从注册表移除该端点">删除</button>';
@@ -878,10 +1056,13 @@
     });
   }
 
-  // loadEndpoints 拉取 provider 列表并渲染自定义端点行；refresh 为真时先失效缓存。
+  // loadEndpoints 拉取 provider 列表并渲染内置 / 自定义端点行，同时重填「用户 API Key」
+  // 的 provider 下拉；refresh 为真时先失效缓存（增删端点后调用，让两个标签页立即反映变更）。
   function loadEndpoints(refresh) {
     return (refresh ? refreshProviders() : fetchProviders()).then(function (list) {
+      renderBuiltinProviders(list);
       renderEndpointList(list);
+      fillKeyProviderSelect(list);
       return list;
     });
   }
@@ -910,62 +1091,354 @@
         });
       })
       .catch(function (err) {
-        var error = providerManagerEl && providerManagerEl.querySelector("#endpoint-error");
+        var error = modelSettingsEl && modelSettingsEl.querySelector("#endpoint-error");
         if (error) error.textContent = "删除失败：" + err.message;
         showMsg("删除模型端点失败：" + err.message, true);
       });
   }
 
-  // submitEndpoint 校验并 POST 新端点：显示名/Base URL/模型名必填，Base URL 必须是
-  // http(s):// 开头的完整地址（与服务端校验一致）；通过后刷新缓存与列表。
-  function submitEndpoint(root) {
-    var nameInput = root.querySelector("#endpoint-name");
-    var idInput = root.querySelector("#endpoint-id");
+  // isHTTPUrl 判断地址是否以 http:// 或 https:// 开头（与服务端校验保持一致）。
+  function isHTTPUrl(u) {
+    return u.indexOf("http://") === 0 || u.indexOf("https://") === 0;
+  }
+
+  // isPositiveInt 判断容量字段是否为正整数（占位符 256K/32K 只是提示，不接受 K 后缀）。
+  function isPositiveInt(s) {
+    return /^[0-9]+$/.test(s) && parseInt(s, 10) > 0;
+  }
+
+  // isBuiltinProviderId 判断 id 是否与内置 provider 冲突；缓存未就绪时不做本地判断，
+  // 交给服务端返回同样的错误文案。
+  function isBuiltinProviderId(id) {
+    if (!providersCache) return false;
+    for (var i = 0; i < providersCache.length; i++) {
+      var p = providersCache[i];
+      if (!p.custom && p.id === id) return true;
+    }
+    return false;
+  }
+
+  // apiBaseUrlPlaceholder 按协议给出占位地址：Anthropic Messages 的 SDK 会自行追加
+  // /v1/messages，因此占位符不带 /v1。
+  function apiBaseUrlPlaceholder(api) {
+    return api === "anthropic-messages" ? "https://gateway.example" : "https://gateway.example/v1";
+  }
+
+  // expandModelRow 展开/收起模型行的容量与输入类型区域。
+  function expandModelRow(row, expanded) {
+    row.querySelector(".model-row-body").style.display = expanded ? "block" : "none";
+    row.querySelector(".model-toggle").textContent = expanded ? "收起" : "展开";
+  }
+
+  // isModelRowExpanded 返回模型行当前是否处于展开状态。
+  function isModelRowExpanded(row) {
+    return row.querySelector(".model-row-body").style.display !== "none";
+  }
+
+  // addModelRow 在模型目录里追加一行：model 为空时是一张空行；来自「获取可用模型」的
+  // 候选则预填 id / 名称 / 容量 / 输入类型，带容量或输入类型的候选默认展开，便于确认。
+  function addModelRow(root, model) {
+    model = model || {};
+    var box = root.querySelector("#endpoint-rows");
+    var row = document.createElement("div");
+    row.className = "model-row";
+    row.innerHTML =
+      '<div class="model-row-head">' +
+      '<input type="text" class="model-id" aria-label="模型 ID" placeholder="模型 ID *" autocomplete="off" spellcheck="false" />' +
+      '<input type="text" class="model-name" aria-label="显示名称" placeholder="显示名称（可选）" autocomplete="off" spellcheck="false" />' +
+      '<button class="secondary mini model-toggle" title="展开/收起容量与输入类型">展开</button>' +
+      '<button class="danger mini model-del" title="移除该模型">删除</button>' +
+      "</div>" +
+      '<div class="model-row-body" style="display:none">' +
+      '<div class="model-grid">' +
+      '<div><label class="modal-label">上下文窗口</label>' +
+      '<input type="text" class="model-context" aria-label="上下文窗口" placeholder="256K" autocomplete="off" spellcheck="false" /></div>' +
+      '<div><label class="modal-label">最大输出 token 数</label>' +
+      '<input type="text" class="model-maxtokens" aria-label="最大输出 token 数" placeholder="32K" autocomplete="off" spellcheck="false" /></div>' +
+      "</div>" +
+      '<label class="modal-label">输入类型</label>' +
+      '<div class="model-input-types">' +
+      '<label><input type="checkbox" class="model-input-text" /> 文本</label>' +
+      '<label><input type="checkbox" class="model-input-image" /> 图片</label>' +
+      "</div>" +
+      "</div>" +
+      '<div class="modal-error model-row-error"></div>';
+
+    row.querySelector(".model-id").value = model.id ? String(model.id) : "";
+    row.querySelector(".model-name").value = model.name ? String(model.name) : "";
+    if (model.contextWindow != null) {
+      row.querySelector(".model-context").value = String(model.contextWindow);
+    }
+    if (model.maxTokens != null) {
+      row.querySelector(".model-maxtokens").value = String(model.maxTokens);
+    }
+    var types = model.input || [];
+    row.querySelector(".model-input-text").checked = types.indexOf("text") >= 0;
+    row.querySelector(".model-input-image").checked = types.indexOf("image") >= 0;
+    expandModelRow(row, types.length > 0 || model.contextWindow != null || model.maxTokens != null);
+
+    row.querySelector(".model-toggle").addEventListener("click", function () {
+      expandModelRow(row, !isModelRowExpanded(row));
+    });
+    row.querySelector(".model-del").addEventListener("click", function () {
+      // 允许删到一行不剩；保存按钮会被下面的刷新逻辑禁用并给出原因。
+      box.removeChild(row);
+      refreshEndpointForm(root);
+    });
+    // 行内任何改动都重算校验状态（逐行错误、目录下方原因、保存按钮可用性）。
+    row.addEventListener("input", function () {
+      refreshEndpointForm(root);
+    });
+    row.addEventListener("change", function () {
+      refreshEndpointForm(root);
+    });
+    box.appendChild(row);
+    return row;
+  }
+
+  // collectModelRows 读取并校验模型目录的每一行：模型 ID 必填且不重复、容量必须是正
+  // 整数；错误写到行内（容量错误同时自动展开该行），返回 {models, valid, message}。
+  // models 是可直接提交的对象数组：空的 name/容量省略；文本与图片都不勾选时省略
+  // input（交给 pi-web 沿用默认），只勾图片则下发 ["image"]。
+  function collectModelRows(root) {
+    var rows = Array.prototype.slice.call(root.querySelectorAll("#endpoint-rows .model-row"));
+    var counts = {};
+    var ids = rows.map(function (row) {
+      var id = row.querySelector(".model-id").value.trim();
+      if (id !== "") counts[id] = (counts[id] || 0) + 1;
+      return id;
+    });
+    var models = [];
+    var valid = true;
+    var message = "";
+    rows.forEach(function (row, i) {
+      var id = ids[i];
+      var contextWindow = row.querySelector(".model-context").value.trim();
+      var maxTokens = row.querySelector(".model-maxtokens").value.trim();
+      var msg = "";
+      if (id === "") {
+        msg = "模型 ID 不能为空";
+      } else if (counts[id] > 1) {
+        msg = '模型 "' + id + '" 重复';
+      } else if (contextWindow !== "" && !isPositiveInt(contextWindow)) {
+        msg = '模型 "' + id + '" 的上下文窗口必须是正整数';
+      } else if (maxTokens !== "" && !isPositiveInt(maxTokens)) {
+        msg = '模型 "' + id + '" 的最大输出 token 数必须是正整数';
+      }
+      row.querySelector(".model-row-error").textContent = msg;
+      if (msg !== "") {
+        valid = false;
+        if (message === "") message = msg;
+        if (msg.indexOf("正整数") >= 0) expandModelRow(row, true); // 收起时看不见，自动展开
+        return;
+      }
+      var m = { id: id };
+      var name = row.querySelector(".model-name").value.trim();
+      if (name !== "") m.name = name;
+      if (contextWindow !== "") m.contextWindow = parseInt(contextWindow, 10);
+      if (maxTokens !== "") m.maxTokens = parseInt(maxTokens, 10);
+      var types = [];
+      if (row.querySelector(".model-input-text").checked) types.push("text");
+      if (row.querySelector(".model-input-image").checked) types.push("image");
+      if (types.length) m.input = types;
+      models.push(m);
+    });
+    if (rows.length === 0) {
+      valid = false;
+      message = "至少要指定一个模型名";
+    }
+    return { models: models, valid: valid, message: message };
+  }
+
+  // existingModelIds 收集表单里已填的模型 ID，供"选择模型"对话框把它们标为已添加。
+  function existingModelIds(root) {
+    var out = {};
+    var rows = root.querySelectorAll("#endpoint-rows .model-row");
+    Array.prototype.forEach.call(rows, function (row) {
+      var id = row.querySelector(".model-id").value.trim();
+      if (id !== "") out[id] = true;
+    });
+    return out;
+  }
+
+  // clearDiscoverNote 清空模型目录下方的探测提示（候选信息 / 服务端错误）：地址或
+  // 协议变了，上一次探测结果就不再适用。
+  function clearDiscoverNote(root) {
+    var note = root.querySelector("#endpoint-catalog-note");
+    note.className = "modal-hint";
+    note.textContent = "";
+  }
+
+  // normalizeCandidates 归一化 api/providers/discover 返回的模型条目：兼容对象与纯
+  // 字符串，并补齐 name（服务端已保证有 name，这里再兜一层）。
+  function normalizeCandidates(models) {
+    var out = [];
+    (models || []).forEach(function (m) {
+      if (typeof m === "string") {
+        if (m.trim() !== "") out.push({ id: m.trim(), name: m.trim() });
+        return;
+      }
+      if (!m || !m.id) return;
+      var id = String(m.id);
+      var item = { id: id, name: m.name ? String(m.name) : id };
+      if (m.contextWindow != null) item.contextWindow = m.contextWindow;
+      if (m.maxTokens != null) item.maxTokens = m.maxTokens;
+      out.push(item);
+    });
+    return out;
+  }
+
+  // refreshEndpointForm 统一重算新增端点表单的状态：Provider ID / API 地址的内联错误、
+  // 显示名称占位符、「获取可用模型」的可用性与原因、逐行模型错误，以及保存按钮的可用性
+  // （模型列表为空或任一行非法时禁用，原因显示在模型目录下方）。
+  function refreshEndpointForm(root) {
+    if (!root || root !== modelSettingsEl) return { models: [], valid: false, message: "" };
+
+    var id = root.querySelector("#endpoint-id").value.trim();
+    var idHint = root.querySelector("#endpoint-id-hint");
+    var idError = "";
+    if (id !== "" && !/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
+      idError = 'provider id "' + id + '" 非法：需匹配 ^[a-z0-9][a-z0-9._-]*$';
+    } else if (isBuiltinProviderId(id)) {
+      idError = 'provider id "' + id + '" 与内置 provider 冲突，请换一个';
+    }
+    // 校验不通过时用内联错误替换常驻提示。
+    idHint.className = idError ? "modal-error" : "modal-hint";
+    idHint.textContent = idError || ENDPOINT_ID_HINT;
+
+    // 显示名称留空时，占位符回退到 Provider ID，再回退到"显示名称"。
+    root.querySelector("#endpoint-name").placeholder = id || "显示名称";
+
+    var url = root.querySelector("#endpoint-baseurl").value.trim();
+    var badUrl = url !== "" && !isHTTPUrl(url);
+    root.querySelector("#endpoint-url-error").textContent = badUrl ?
+      'API 地址 "' + url + '" 非法：需要 http:// 或 https:// 开头的完整地址' : "";
+
+    var state = collectModelRows(root);
+    root.querySelector("#endpoint-model-error").textContent = state.valid ? "" : state.message;
+
+    // 「获取可用模型」：地址为空或非法时禁用，并用 title 说明原因。
+    var urlReason = url === "" ? "请先填写 API 地址" :
+      (badUrl ? "API 地址需要以 http:// 或 https:// 开头" : "");
+    var busy = root._discovering === true;
+    var discoverBtn = root.querySelector("#endpoint-discover");
+    discoverBtn.disabled = busy || urlReason !== "";
+    discoverBtn.title = busy ? "正在询问提供商…" :
+      (urlReason || "向该地址请求模型列表，再勾选要添加的模型");
+
+    root.querySelector("#endpoint-ok").disabled = !state.valid;
+    return state;
+  }
+
+  // discoverModels 调用 api/providers/discover 探测该端点的模型列表：有候选时打开勾选
+  // 对话框，没有候选时只给内联提示；失败时保留全部已填字段，并把服务端 error 显示在
+  // 模型目录下方，管理员仍可手工添加模型行。探测用的 API Key 只存在于本次请求体里，
+  // 绝不进入保存端点的请求。
+  function discoverModels(root) {
     var urlInput = root.querySelector("#endpoint-baseurl");
-    var modelsInput = root.querySelector("#endpoint-models");
+    var apiSelect = root.querySelector("#endpoint-api");
+    var keyInput = root.querySelector("#endpoint-apikey");
+    var btn = root.querySelector("#endpoint-discover");
+    var note = root.querySelector("#endpoint-catalog-note");
+    var baseUrl = urlInput.value.trim();
+    if (baseUrl === "" || !isHTTPUrl(baseUrl)) {
+      refreshEndpointForm(root); // 兜底：按钮此时本应处于禁用状态
+      return;
+    }
+    var payload = { baseUrl: baseUrl, api: apiSelect.value };
+    var apiKey = keyInput.value.trim();
+    if (apiKey !== "") payload.apiKey = apiKey;
+
+    clearDiscoverNote(root);
+    root._discovering = true;
+    btn.disabled = true;
+    btn.textContent = "正在询问提供商…";
+    fetch("api/providers/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        if (root !== modelSettingsEl) return; // 对话框已关闭，丢弃本次结果
+        var candidates = normalizeCandidates(j.models);
+        if (candidates.length === 0) {
+          // 端点确实没列出模型：只是内联提示，不是页面级错误，表单保持可用。
+          note.textContent = "该端点没有列出任何模型，请手动添加";
+          return;
+        }
+        openModelPicker(candidates, existingModelIds(root), function (selected) {
+          // 二次确认已存在的 ID，保证采纳候选不会产生重复行。
+          var present = existingModelIds(root);
+          selected.forEach(function (m) {
+            if (present[m.id]) return;
+            present[m.id] = true;
+            addModelRow(root, m);
+          });
+          refreshEndpointForm(root);
+        });
+      })
+      .catch(function (err) {
+        if (root !== modelSettingsEl) return; // 对话框已关闭，无人可提示
+        note.className = "modal-error";
+        note.textContent = err.message;
+      })
+      .finally(function () {
+        root._discovering = false;
+        btn.textContent = "获取可用模型";
+        refreshEndpointForm(root);
+      });
+  }
+
+  // submitEndpoint 校验并 POST 新端点：模型目录必填且逐行合法，API 地址必须是
+  // http(s):// 开头的完整地址（与服务端校验一致）；通过后清空表单并刷新缓存与列表。
+  function submitEndpoint(root) {
+    var idInput = root.querySelector("#endpoint-id");
+    var nameInput = root.querySelector("#endpoint-name");
+    var urlInput = root.querySelector("#endpoint-baseurl");
     var apiSelect = root.querySelector("#endpoint-api");
     var error = root.querySelector("#endpoint-error");
     var okBtn = root.querySelector("#endpoint-ok");
 
+    var id = idInput.value.trim();
     var name = nameInput.value.trim();
     var baseUrl = urlInput.value.trim();
-    // 模型名支持逗号（中英文）或换行分隔，去掉空项后作为 models 数组提交。
-    var models = modelsInput.value.split(/[,，\n\r]+/).map(function (m) {
-      return m.trim();
-    }).filter(function (m) {
-      return m !== "";
-    });
 
     error.textContent = "";
-    if (name === "") {
-      error.textContent = "显示名不能为空";
-      nameInput.focus();
+    var state = refreshEndpointForm(root);
+    if (!state.valid) {
+      error.textContent = state.message; // 与模型目录下方的内联原因一致，便于定位
+      return;
+    }
+    if (id === "" && name === "") {
+      error.textContent = "请至少填写 Provider ID 或显示名称";
+      idInput.focus();
       return;
     }
     if (baseUrl === "") {
-      error.textContent = "Base URL 不能为空";
+      error.textContent = "baseUrl 不能为空";
       urlInput.focus();
       return;
     }
-    if (baseUrl.indexOf("http://") !== 0 && baseUrl.indexOf("https://") !== 0) {
-      error.textContent = "Base URL 需要以 http:// 或 https:// 开头";
+    if (!isHTTPUrl(baseUrl)) {
+      error.textContent = 'baseUrl "' + baseUrl + '" 非法：需要 http:// 或 https:// 开头的完整地址';
       urlInput.focus();
-      return;
-    }
-    if (models.length === 0) {
-      error.textContent = "至少要指定一个模型名";
-      modelsInput.focus();
       return;
     }
 
+    // 探测用的 API Key 绝不进入这里：下面的请求体里没有它。
     var payload = {
-      name: name,
       baseUrl: baseUrl,
       api: apiSelect.value,
-      models: models
+      models: state.models
     };
-    var id = idInput.value.trim();
     if (id !== "") payload.id = id; // 留空则由服务端根据显示名生成
+    if (name !== "") payload.name = name;
 
     okBtn.disabled = true;
     okBtn.textContent = "保存中…";
@@ -984,15 +1457,20 @@
       .then(function (j) {
         var saved = j.provider || {};
         if (saved.id) {
-          customEndpointDetails[saved.id] = { baseUrl: baseUrl, api: payload.api, models: models };
+          customEndpointDetails[saved.id] = { baseUrl: baseUrl, api: payload.api, models: state.models };
         }
-        // 清空表单便于连续添加；对话框保持打开，便于确认列表与用户表已更新。
-        nameInput.value = "";
+        // 清空表单（含探测用 Key）便于连续添加；对话框保持打开，便于确认列表与用户表已更新。
         idInput.value = "";
+        nameInput.value = "";
         urlInput.value = "";
-        modelsInput.value = "";
+        root.querySelector("#endpoint-apikey").value = "";
+        root.querySelector("#endpoint-rows").innerHTML = "";
+        apiSelect.value = "openai-completions";
+        urlInput.placeholder = apiBaseUrlPlaceholder(apiSelect.value);
+        clearDiscoverNote(root);
+        refreshEndpointForm(root);
         showMsg("自定义模型端点：" + (j.message || "已保存"));
-        // 失效并重取 provider 缓存：管理器列表与"设置 Key"下拉立即出现新端点。
+        // 失效并重取 provider 缓存：端点列表与「用户 API Key」下拉立即出现新端点。
         loadEndpoints(true).then(function () {
           listUsers();
         });
@@ -1000,75 +1478,391 @@
       .catch(function (err) {
         // 服务端错误同时给出对话框内联提示与页面级提示。
         error.textContent = err.message;
-        showMsg("添加模型端点失败：" + err.message, true);
+        showMsg("保存模型端点失败：" + err.message, true);
       })
       .finally(function () {
-        okBtn.disabled = false;
-        okBtn.textContent = "添加端点";
+        okBtn.textContent = "保存端点";
+        refreshEndpointForm(root);
       });
   }
 
-  // openProviderManager 打开自定义模型端点管理器：上方列出当前自定义端点（可删除），
-  // 下方为添加表单；取消 / Esc / 点击遮罩关闭，关闭时整体从 DOM 移除。
-  function openProviderManager() {
-    closeKeyDialog(); // 同一时间只保留一个对话框
-    closeProviderManager();
+  // showSettingsTab 切换「模型设置」的标签页：只改 hidden / aria-selected，两个面板始终
+  // 保留在 DOM 中（hide 而非 destroy），所以「模型端点」表单里已填的草稿不会因为切标签
+  // 而丢失。每次显示「用户 API Key」都重新拉取用户下拉并重填 provider 下拉。
+  function showSettingsTab(root, tabId) {
+    var tabs = root.querySelectorAll('[role="tab"]');
+    var panelId = "";
+    Array.prototype.forEach.call(tabs, function (t) {
+      var selected = t.id === tabId;
+      t.setAttribute("aria-selected", selected ? "true" : "false");
+      t.tabIndex = selected ? 0 : -1;
+      if (selected) panelId = t.getAttribute("aria-controls");
+    });
+    var panels = root.querySelectorAll('[role="tabpanel"]');
+    Array.prototype.forEach.call(panels, function (p) {
+      p.hidden = p.id !== panelId;
+    });
+    if (tabId === "settings-tab-userkey") {
+      loadKeyTabUsers();
+      fetchProviders().then(function (list) {
+        if (root === modelSettingsEl) fillKeyProviderSelect(list);
+      });
+    }
+  }
+
+  // openModelSettings 打开唯一的「模型设置」对话框：标签页「模型端点」（内置 provider
+  // 只读列表 + 自定义端点列表 + 新增端点表单）与「用户 API Key」（按用户设置/清除凭据）。
+  // 取消 / Esc / 点击遮罩关闭，关闭时整体从 DOM 移除。
+  function openModelSettings() {
+    closeModelSettings();
     var root = document.createElement("div");
     root.className = "modal-overlay";
     root.innerHTML =
-      '<div class="modal endpoint-modal" role="dialog" aria-modal="true" aria-label="自定义模型端点">' +
-      '<div class="modal-title">自定义模型端点（OpenAI 兼容）</div>' +
-      '<div class="modal-note">端点对部署内所有用户可见、可在"设置 Key"中选择；' +
-      "凭据（API Key）仍按用户各自存储。</div>" +
+      '<div class="modal endpoint-modal" role="dialog" aria-modal="true" aria-label="模型设置">' +
+      '<div class="modal-title">模型设置</div>' +
+      '<div class="tab-strip" role="tablist" aria-label="模型设置">' +
+      '<button class="tab" id="settings-tab-endpoints" role="tab" aria-selected="true"' +
+      ' aria-controls="settings-panel-endpoints" tabindex="0">模型端点</button>' +
+      '<button class="tab" id="settings-tab-userkey" role="tab" aria-selected="false"' +
+      ' aria-controls="settings-panel-userkey" tabindex="-1">用户 API Key</button>' +
+      "</div>" +
+      // 标签页 1：模型端点（部署级，所有用户可见）。
+      '<div class="tab-panel" id="settings-panel-endpoints" role="tabpanel" aria-labelledby="settings-tab-endpoints">' +
+      '<div class="modal-note">端点对部署内所有用户可见、可在「用户 API Key」中选择；' +
+      "每个用户的凭据（API Key）仍各自存储。</div>" +
+      '<label class="modal-label">内置 Provider</label>' +
+      '<div class="endpoint-list" id="builtin-list">' +
+      '<div class="endpoint-empty">正在加载…</div>' +
+      "</div>" +
+      '<div class="modal-hint">内置列表由部署的 <code>KEY_PROVIDERS</code> 决定，只读、不可编辑或删除。</div>' +
+      '<label class="modal-label">自定义端点</label>' +
       '<div class="endpoint-list" id="endpoint-list">' +
       '<div class="endpoint-empty">正在加载…</div>' +
       "</div>" +
-      '<label class="modal-label" for="endpoint-name">显示名 *</label>' +
-      '<input type="text" id="endpoint-name" placeholder="Internal Gateway" autocomplete="off" spellcheck="false" />' +
-      '<label class="modal-label" for="endpoint-id">id（可选）</label>' +
-      '<input type="text" id="endpoint-id" placeholder="留空则由显示名自动生成" autocomplete="off" spellcheck="false" />' +
-      '<div class="modal-hint">留空时服务端会依据显示名生成 id（如 internal-gateway）；' +
-      "自定义 id 需匹配 ^[a-z0-9][a-z0-9._-]*$，且不能与内置 provider 重名。</div>" +
-      '<label class="modal-label" for="endpoint-baseurl">Base URL *</label>' +
-      '<input type="text" id="endpoint-baseurl" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false" />' +
-      '<label class="modal-label" for="endpoint-models">模型名 *</label>' +
-      '<textarea id="endpoint-models" placeholder="qwen3-32b, llama-3.3-70b（逗号或换行分隔）" spellcheck="false"></textarea>' +
-      '<label class="modal-label" for="endpoint-api">API 类型</label>' +
+      '<label class="modal-label" for="endpoint-id">Provider ID（可选）</label>' +
+      '<input type="text" id="endpoint-id" placeholder="acme-gateway" autocomplete="off" spellcheck="false" />' +
+      '<div class="modal-hint" id="endpoint-id-hint"></div>' +
+      '<label class="modal-label" for="endpoint-name">显示名称</label>' +
+      '<input type="text" id="endpoint-name" placeholder="显示名称" autocomplete="off" spellcheck="false" />' +
+      '<label class="modal-label" for="endpoint-baseurl">API 地址</label>' +
+      '<input type="text" id="endpoint-baseurl" placeholder="https://gateway.example/v1" autocomplete="off" spellcheck="false" />' +
+      '<div class="modal-error" id="endpoint-url-error"></div>' +
+      '<label class="modal-label" for="endpoint-api">API 协议</label>' +
       '<select id="endpoint-api">' +
-      '<option value="openai-completions">openai-completions（Chat Completions）</option>' +
-      '<option value="openai-responses">openai-responses（Responses API）</option>' +
+      '<option value="openai-completions">OpenAI Chat Completions</option>' +
+      '<option value="openai-responses">OpenAI Responses</option>' +
+      '<option value="anthropic-messages">Anthropic Messages</option>' +
       "</select>" +
+      '<label class="modal-label" for="endpoint-apikey">API Key（仅用于探测，不会保存）</label>' +
+      '<input type="text" id="endpoint-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
+      '<div class="modal-hint">仅用于「获取可用模型」向该地址发起一次探测，不会写入任何 Secret；' +
+      "每个用户的凭据在「用户 API Key」标签页中配置。</div>" +
+      '<div class="endpoint-section-head">' +
+      '<span class="modal-label">模型目录 *</span>' +
+      '<button class="secondary mini" id="endpoint-discover">获取可用模型</button>' +
+      "</div>" +
+      '<div class="endpoint-rows" id="endpoint-rows"></div>' +
+      '<div class="endpoint-rows-actions">' +
+      '<button class="secondary mini" id="endpoint-add-model">添加模型</button>' +
+      '<span class="modal-hint" id="endpoint-catalog-note"></span>' +
+      "</div>" +
+      '<div class="modal-error" id="endpoint-model-error"></div>' +
       '<div class="modal-error" id="endpoint-error"></div>' +
       '<div class="modal-actions">' +
       '<button class="secondary" id="endpoint-cancel">取消</button>' +
-      '<button id="endpoint-ok">添加端点</button>' +
-      "</div></div>";
+      '<button id="endpoint-ok">保存端点</button>' +
+      "</div>" +
+      "</div>" +
+      // 标签页 2：用户 API Key（每用户凭据；用户与 provider 下拉每次显示都重填）。
+      '<div class="tab-panel" id="settings-panel-userkey" role="tabpanel" aria-labelledby="settings-tab-userkey" hidden>' +
+      '<label class="modal-label" for="key-user-select">用户</label>' +
+      '<select id="key-user-select"><option value="">请选择用户</option></select>' +
+      '<label class="modal-label" for="key-provider-select">Provider</label>' +
+      '<select id="key-provider-select"><option value="">加载中…</option></select>' +
+      '<label class="modal-label" for="key-input">API Key</label>' +
+      '<input type="text" id="key-input" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
+      '<div class="modal-note" id="key-provider-note"></div>' +
+      '<div class="modal-hint">Key 会写入 Secret 持久化并注入到该用户运行中的 agent；' +
+      "若 agent 尚未恢复将自动恢复。本页只设置该用户的凭据，端点由「模型端点」标签页维护。</div>" +
+      '<div class="modal-error" id="key-error"></div>' +
+      '<div class="modal-actions">' +
+      '<button class="secondary" id="key-cancel">关闭</button>' +
+      '<button class="danger" id="key-clear" disabled>清除 Key</button>' +
+      '<button id="key-ok">保存</button>' +
+      "</div>" +
+      "</div>" +
+      "</div>";
 
-    root.querySelector("#endpoint-cancel").addEventListener("click", closeProviderManager);
+    // 标签页切换（role=tablist / tab / tabpanel；左右方向键与 Home/End 也可切换）。
+    var tabs = root.querySelectorAll('[role="tab"]');
+    Array.prototype.forEach.call(tabs, function (t) {
+      t.addEventListener("click", function () {
+        showSettingsTab(root, t.id);
+      });
+      t.addEventListener("keydown", function (e) {
+        var key = e.key || "";
+        var idx = Array.prototype.indexOf.call(tabs, t);
+        var next = -1;
+        if (key === "ArrowRight" || e.keyCode === 39) next = (idx + 1) % tabs.length;
+        else if (key === "ArrowLeft" || e.keyCode === 37) next = (idx - 1 + tabs.length) % tabs.length;
+        else if (key === "Home" || e.keyCode === 36) next = 0;
+        else if (key === "End" || e.keyCode === 35) next = tabs.length - 1;
+        if (next < 0) return;
+        e.preventDefault();
+        showSettingsTab(root, tabs[next].id);
+        tabs[next].focus();
+      });
+    });
+
+    root.querySelector("#endpoint-cancel").addEventListener("click", closeModelSettings);
     root.querySelector("#endpoint-ok").addEventListener("click", function () {
       submitEndpoint(root);
     });
+    root.querySelector("#endpoint-add-model").addEventListener("click", function () {
+      var row = addModelRow(root, null);
+      refreshEndpointForm(root);
+      row.querySelector(".model-id").focus();
+    });
+    root.querySelector("#endpoint-discover").addEventListener("click", function () {
+      discoverModels(root);
+    });
+    root.querySelector("#endpoint-id").addEventListener("input", function () {
+      refreshEndpointForm(root);
+    });
+    root.querySelector("#endpoint-baseurl").addEventListener("input", function () {
+      clearDiscoverNote(root);
+      refreshEndpointForm(root);
+    });
+    root.querySelector("#endpoint-api").addEventListener("change", function () {
+      // 只更新占位地址，保留管理员已经输入的地址。
+      root.querySelector("#endpoint-baseurl").placeholder = apiBaseUrlPlaceholder(this.value);
+      clearDiscoverNote(root);
+      refreshEndpointForm(root);
+    });
+
+    // 用户 API Key 标签页：用户 / provider 变化都重算提示与「清除 Key」可用性。
+    root.querySelector("#key-user-select").addEventListener("change", function () {
+      root.querySelector("#key-error").textContent = "";
+      syncKeyProviderToUser();
+    });
+    root.querySelector("#key-provider-select").addEventListener("change", function () {
+      root.querySelector("#key-error").textContent = "";
+      refreshKeyTabState();
+    });
+    root.querySelector("#key-clear").addEventListener("click", clearKeyTab);
+    root.querySelector("#key-ok").addEventListener("click", saveKeyTab);
+    root.querySelector("#key-input").addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.keyCode === 13) {
+        e.preventDefault();
+        saveKeyTab();
+      }
+    });
+    root.querySelector("#key-cancel").addEventListener("click", closeModelSettings);
+
     // 仅在遮罩上按下并松开时才关闭，避免在输入框内选中文字后拖到遮罩上误关闭。
     var overlayPressed = false;
     root.addEventListener("mousedown", function (e) {
       overlayPressed = e.target === root;
     });
     root.addEventListener("click", function (e) {
-      if (e.target === root && overlayPressed) closeProviderManager();
+      if (e.target === root && overlayPressed) closeModelSettings();
     });
-    document.addEventListener("keydown", onProviderManagerKeydown, true);
+    document.addEventListener("keydown", onModelSettingsKeydown, true);
 
     document.body.appendChild(root);
-    providerManagerEl = root;
-    root.querySelector("#endpoint-name").focus();
-
-    // 填充已有自定义端点；fetchProviders 失败时回退列表不含 custom 项，显示空态。
+    modelSettingsEl = root;
+    root.querySelector("#endpoint-id").focus();
+    // 初始化状态：Provider ID 提示、显示名称占位符，模型目录为空时保存按钮禁用。
+    refreshEndpointForm(root);
+    // 填充内置 / 自定义端点列表与「用户 API Key」的 provider 下拉；fetchProviders 失败时
+    // 只用兜底列表，自定义端点列表显示空态。
     loadEndpoints(false);
   }
 
+  // ---- 标签页 2：用户 API Key（每用户凭据） ----
+
+  // keyTabUsers 缓存「用户 API Key」标签页的用户下拉数据（name -> 用户摘要），用于计算
+  // 提示文案与「清除 Key」的可用性；每次显示该标签页时重新拉取 api/users。
+  var keyTabUsers = {};
+
+  // loadKeyTabUsers 拉取 api/users 并重建用户下拉：保留已选用户，未选时保持「请选择用户」
+  // 占位项（保存时会拦住空值）。失败只写标签页内联错误，不影响页面其它部分。
+  function loadKeyTabUsers() {
+    var root = modelSettingsEl;
+    if (!root) return;
+    if (!root.querySelector("#key-user-select")) return;
+    fetch("api/users")
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (data) {
+        if (root !== modelSettingsEl) return; // 对话框已关闭或已重开，丢弃本次结果
+        var select = root.querySelector("#key-user-select");
+        if (!select) return;
+        var prev = select.value;
+        var users = (data && data.users) || [];
+        keyTabUsers = {};
+        select.innerHTML = '<option value="">请选择用户</option>';
+        users.forEach(function (u) {
+          keyTabUsers[u.name] = u;
+          var opt = document.createElement("option");
+          opt.value = u.name;
+          opt.textContent = u.name;
+          select.appendChild(opt);
+        });
+        if (prev && keyTabUsers[prev]) select.value = prev;
+        syncKeyProviderToUser();
+      })
+      .catch(function (err) {
+        if (root !== modelSettingsEl) return;
+        var error = root.querySelector("#key-error");
+        if (error) error.textContent = "读取用户列表失败：" + err.message;
+      });
+  }
+
+  // ensureKeyProviderOption 保证 provider 下拉里存在 id 选项：用户已存储的 provider 可能
+  // 已被删除、不在部署列表中，补一项以免选不中、无法按旧 provider 执行切换/清除。
+  function ensureKeyProviderOption(select, id) {
+    if (!id) return;
+    for (var i = 0; i < select.options.length; i++) {
+      if (select.options[i].value === id) return;
+    }
+    var opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = providerDisplayName(id);
+    select.insertBefore(opt, select.firstChild);
+  }
+
+  // keyTabStoredProvider 返回当前选中用户已存储的 provider id（未设置则为空串）。
+  function keyTabStoredProvider() {
+    if (!modelSettingsEl) return "";
+    var select = modelSettingsEl.querySelector("#key-user-select");
+    var u = select ? keyTabUsers[select.value] : null;
+    if (!u || !u.hasPersonalKey) return "";
+    return u.personalKeyProvider || "";
+  }
+
+  // syncKeyProviderToUser 把 provider 下拉切到所选用户已存储的 provider（与旧对话框一致）：
+  // 该 provider 已从部署列表删除时补一项，保证仍能显示提示并执行清除；随后重算提示文案。
+  function syncKeyProviderToUser() {
+    if (!modelSettingsEl) return;
+    var select = modelSettingsEl.querySelector("#key-provider-select");
+    if (!select) return;
+    var stored = keyTabStoredProvider();
+    if (stored) {
+      ensureKeyProviderOption(select, stored);
+      select.value = stored;
+    }
+    refreshKeyTabState();
+  }
+
+  // refreshKeyTabState 重算「用户 API Key」的提示与「清除 Key」可用性：未选用户 → 提示
+  // 清空、清除禁用；未设置 → 说明保存后会使用所选 provider；已设置 → 覆盖或切换提示。
+  function refreshKeyTabState() {
+    if (!modelSettingsEl) return;
+    var userSelect = modelSettingsEl.querySelector("#key-user-select");
+    var providerSelect = modelSettingsEl.querySelector("#key-provider-select");
+    var note = modelSettingsEl.querySelector("#key-provider-note");
+    var clearBtn = modelSettingsEl.querySelector("#key-clear");
+    if (!userSelect || !providerSelect || !note || !clearBtn) return;
+    var u = keyTabUsers[userSelect.value];
+    clearBtn.disabled = !(u && u.hasPersonalKey);
+    if (!u) {
+      note.textContent = "";
+      return;
+    }
+    var stored = u.hasPersonalKey ? (u.personalKeyProvider || "") : "";
+    if (!stored) {
+      note.textContent = "该用户当前未设置专属 Key；保存后将使用所选的 provider。";
+      return;
+    }
+    var storedName = providerDisplayName(stored);
+    if (providerSelect.value === stored) {
+      note.textContent = "当前已设置：" + storedName + "（保存后将覆盖现有 Key）";
+    } else {
+      note.textContent = "当前已设置：" + storedName + "（保存后将切换并退出旧 provider）";
+    }
+  }
+
+  // fillKeyProviderSelect 用 provider 列表重填「用户 API Key」的 provider 下拉：自定义端点加
+  // 「（自定义）」后缀；保留当前选择，用户已存储但已下架的 provider 会补一项。
+  function fillKeyProviderSelect(list) {
+    if (!modelSettingsEl) return;
+    var select = modelSettingsEl.querySelector("#key-provider-select");
+    if (!select) return;
+    var prev = select.value;
+    select.innerHTML = "";
+    (list || []).forEach(function (p) {
+      var opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.name + (p.custom ? "（自定义）" : "");
+      select.appendChild(opt);
+    });
+    var wanted = prev || keyTabStoredProvider() || "";
+    if (!wanted && select.options.length) wanted = select.options[0].value;
+    if (wanted) {
+      ensureKeyProviderOption(select, wanted);
+      select.value = wanted;
+    }
+    select.disabled = select.options.length === 0;
+    refreshKeyTabState();
+  }
+
+  // saveKeyTab 校验用户与非空 Key 后提交：成功后清空输入框并刷新用户摘要（提示与「清除
+  // Key」随之更新）；失败保留已输入的 Key，便于直接重试。
+  function saveKeyTab() {
+    var root = modelSettingsEl;
+    if (!root) return;
+    var userSelect = root.querySelector("#key-user-select");
+    var providerSelect = root.querySelector("#key-provider-select");
+    var input = root.querySelector("#key-input");
+    var error = root.querySelector("#key-error");
+    if (!userSelect || !providerSelect || !input || !error) return;
+    var name = userSelect.value;
+    if (name === "") {
+      error.textContent = "请先选择用户";
+      userSelect.focus();
+      return;
+    }
+    if (providerSelect.disabled || providerSelect.value === "") {
+      error.textContent = "Provider 列表加载中，请稍候…";
+      return;
+    }
+    var key = input.value.trim();
+    if (key === "") {
+      error.textContent = "API Key 不能为空";
+      input.focus();
+      return;
+    }
+    error.textContent = "";
+    submitUserAPIKey(name, key, providerSelect.value, function () {
+      if (root !== modelSettingsEl) return;
+      if (input.value.trim() === key) input.value = "";
+      loadKeyTabUsers(); // 刷新用户摘要，使提示与「清除 Key」反映新状态
+    });
+  }
+
+  // clearKeyTab 清除所选用户的专属 Key：确认文案由 clearUserAPIKey 按该用户实际存储的
+  // provider 生成；成功后刷新用户摘要（用户表的 Key 徽标由 clearUserAPIKey 内部 listUsers 更新）。
+  function clearKeyTab() {
+    var root = modelSettingsEl;
+    if (!root) return;
+    var userSelect = root.querySelector("#key-user-select");
+    if (!userSelect || userSelect.value === "") return;
+    var name = userSelect.value;
+    var u = keyTabUsers[name];
+    if (!u || !u.hasPersonalKey) return;
+    clearUserAPIKey(name, u.personalKeyProvider || "", function () {
+      loadKeyTabUsers();
+    });
+  }
+
   // clearUserAPIKey 清除该用户的专属 Key；确认文案按用户实际配置的 provider 命名，
-  // 未配置时使用通用文案。
-  function clearUserAPIKey(name, providerId) {
+  // 未配置时使用通用文案。done 是可选回调：成功后调用，让「用户 API Key」标签页刷新用户摘要。
+  function clearUserAPIKey(name, providerId, done) {
     var providerName = providerDisplayName(providerId) || providerId;
     var confirmText = providerName ?
       "确认清除 \"" + name + "\" 的 " + providerName + " 专属 API Key？\n" +
@@ -1089,6 +1883,7 @@
       .then(function (j) {
         showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "Key 已清除"));
         listUsers();
+        if (done) done();
       })
       .catch(function (err) {
         showMsg("清除 Key 失败：" + err.message, true);
@@ -1466,7 +2261,7 @@
   });
 
   document.getElementById("refresh-btn").addEventListener("click", listUsers);
-  document.getElementById("providers-btn").addEventListener("click", openProviderManager);
+  document.getElementById("model-settings-btn").addEventListener("click", openModelSettings);
 
   // 点击其他区域时关闭已打开的下拉菜单。
   document.addEventListener("click", function () {
