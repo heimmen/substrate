@@ -75,6 +75,27 @@ type registryProvider struct {
 	BaseURL string          `json:"baseUrl"`
 	API     string          `json:"api,omitempty"`
 	Models  []registryModel `json:"models"`
+	// Pinned marks the model list as a closed set: while it stays pinned the
+	// list cannot grow, and the console shows nothing outside it. It is an
+	// admin-only field — see actorWireProvider for why it must never be written
+	// into the document the actors read.
+	Pinned bool `json:"pinned,omitempty"`
+}
+
+// actorWireProvider is one provider as pi-web reads it. pi-web validates
+// models.json against a strict schema that rejects unknown provider keys, so an
+// admin-only field leaking in here would invalidate the file the actors merge —
+// hence a separate projection rather than sharing registryProvider.
+type actorWireProvider struct {
+	Name    string          `json:"name,omitempty"`
+	BaseURL string          `json:"baseUrl"`
+	API     string          `json:"api,omitempty"`
+	Models  []registryModel `json:"models"`
+}
+
+// actorWireDocument is the models.json document served to actors.
+type actorWireDocument struct {
+	Providers map[string]actorWireProvider `json:"providers"`
 }
 
 // registryDocument is the on-disk/wire shape of the registry (a models.json
@@ -144,6 +165,20 @@ func marshalRegistryDocument(data map[string]registryProvider) (string, error) {
 		data = map[string]registryProvider{}
 	}
 	b, err := json.MarshalIndent(registryDocument{Providers: data}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(b) + "\n", nil
+}
+
+// marshalActorRegistryDocument renders the document the actors pull: provider
+// definitions only, with every admin-only field projected away.
+func marshalActorRegistryDocument(data map[string]registryProvider) (string, error) {
+	wire := make(map[string]actorWireProvider, len(data))
+	for id, p := range data {
+		wire[id] = actorWireProvider{Name: p.Name, BaseURL: p.BaseURL, API: p.API, Models: p.Models}
+	}
+	b, err := json.MarshalIndent(actorWireDocument{Providers: wire}, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -294,6 +329,27 @@ func validateRegistryProvider(id string, p registryProvider, reserved map[string
 	return p, nil
 }
 
+// checkPinnedGrowth refuses a write that adds a model to an endpoint whose list
+// is still pinned. The point of the flag is that the set is closed, and the
+// console cannot be the only thing enforcing it: the API has to hold the line
+// too. Extending the list is a deliberate two-step — save it unpinned, edit,
+// pin it again — which is exactly the escape hatch the console documents.
+func checkPinnedGrowth(id string, existing, next registryProvider) error {
+	if !existing.Pinned || !next.Pinned {
+		return nil
+	}
+	allowed := make(map[string]bool, len(existing.Models))
+	for _, m := range existing.Models {
+		allowed[m.ID] = true
+	}
+	for _, m := range next.Models {
+		if !allowed[m.ID] {
+			return fmt.Errorf("该端点已锁定模型列表，只能使用白名单内的模型：%s", m.ID)
+		}
+	}
+	return nil
+}
+
 // modelCapacityError names the offending model in a capacity fault, so a form
 // with several rows points at the row to fix.
 func modelCapacityError(id string, contextWindow bool) error {
@@ -318,7 +374,7 @@ func (s *server) handleInternalProviderModels(w http.ResponseWriter, r *http.Req
 	if s.providerRegistry != nil {
 		data = s.providerRegistry.list()
 	}
-	raw, err := marshalRegistryDocument(data)
+	raw, err := marshalActorRegistryDocument(data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

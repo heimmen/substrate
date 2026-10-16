@@ -85,6 +85,10 @@ API 协议（OpenAI Chat Completions、OpenAI Responses、Anthropic Messages）/
 - 模型项可选 `contextWindow` / `maxTokens`（正整数，省略即不声明，由 pi-web 继承）与
   `input`（`text` / `image`；省略即不声明）。注册表只会保存这几个字段，因此清单 seed 也只写这几个
   ——手工往 ConfigMap 里塞管理面不认识的字段，会在下一次写入时被丢弃。
+- 可选 `pinned: true`：把该端点的模型列表锁成**封闭集合**。仍为 `pinned` 的写入不允许新增模型
+  （服务端校验，`该端点已锁定模型列表，只能使用白名单内的模型：<id>`，管理面前端同时把白名单外
+  的探测候选置灰、把白名单外的手工行标为非法）。扩展列表是**两步**：先以 `pinned:false` 保存，
+  改完再重新锁上。
 - `400` 错误（`{"error":...}`）：
   - `请求体不是合法 JSON`
   - `provider id "X" 非法：需匹配 ^[a-z0-9][a-z0-9._-]*$`
@@ -131,7 +135,9 @@ curl -sS -u admin:'mf@pass2026' -X DELETE \
 ## 5. 分发机制：admin 暴露 + Actor 拉取合并
 
 1. admin 把注册表渲染成 `models.json` 文档，经 `GET /internal/providers/models.json` 提供
-   （`Content-Type: application/json`、`Cache-Control: no-store`；仅接受 GET）。
+   （`Content-Type: application/json`、`Cache-Control: no-store`；仅接受 GET）。渲染时会**投影掉
+   管理面专有字段**（当前只有 `pinned`）：pi-web 用严格 schema 校验 `models.json`，多一个未知的
+   provider 键会让整份文件失效，所以存储形状与下发形状必须分开（`actorWireProvider`）。
 2. 每个 ActorTemplate 的 supervisor 每 60s 拉取一次
    `PI_WEB_MODELS_URL=http://mfpi-admin.<ns>.svc.cluster.local:8080/internal/providers/models.json`，
    把返回文档的 `providers` **合并**进 `$PI_CODING_AGENT_DIR/models.json`

@@ -247,6 +247,37 @@
     padding: 1px 4px;
   }
   .endpoint-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
+  /* 端点行的操作按钮（编辑 / 删除）：并排放在行尾，不随信息列换行。 */
+  .endpoint-item .endpoint-actions { display: flex; gap: 6px; flex: none; }
+  /* 「正在编辑」提示条：编辑已有端点时显示在表单顶部，旁边是退出编辑的按钮。 */
+  .endpoint-editing {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+    background: var(--gray-bg);
+  }
+  /* 类选择器上的 display:flex 会盖过 UA 的 [hidden]，这里显式补一条。 */
+  .endpoint-editing[hidden] { display: none; }
+  .endpoint-editing .endpoint-editing-note {
+    font-size: 13px;
+    min-width: 0;
+    word-break: break-all;
+  }
+  /* 锁定模型列表（白名单）复选框与说明。 */
+  .endpoint-pinned { margin-bottom: 12px; }
+  .endpoint-pinned .endpoint-pinned-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .endpoint-pinned .modal-hint { margin: 4px 0 0; }
   /* 模型设置对话框：标签页（模型端点 / 用户 API Key）。两个面板始终保留在 DOM 中，
      切换只改 hidden —— 「模型端点」表单里已填的草稿不会因为切标签而丢失。 */
   .tab-strip {
@@ -855,7 +886,9 @@
   // openModelPicker 打开候选模型勾选对话框：搜索框按 id/name 忽略大小写过滤，全选 /
   // 取消全选只作用于当前可见行；确认后回调 onAdd(selected) 由调用方追加表单行。
   // existingIds 里的模型在表单里已存在，显示为不可勾选，避免"采纳"覆盖管理员调过的行。
-  function openModelPicker(candidates, existingIds, onAdd) {
+  // lockedIds 非空时是当前锁定端点的白名单（id -> true）：不在其中的候选同样不可勾选，
+  // 因为勾选后会立刻被 collectModelRows 判为白名单外，禁用比事后报错更直观。
+  function openModelPicker(candidates, existingIds, lockedIds, onAdd) {
     closeModelPicker();
     var root = document.createElement("div");
     root.className = "modal-overlay";
@@ -892,10 +925,16 @@
       var cb = document.createElement("input");
       cb.type = "checkbox";
       cb.value = id;
+      // 禁用的原因只有一个：要么表单里已有，要么被白名单挡在外面。
+      var disabledTag = "";
       if (existingIds && existingIds[id]) {
         cb.disabled = true; // 表单里已有该模型：不勾选，也不允许覆盖
-        item.className += " disabled";
+        disabledTag = "已在表单中";
+      } else if (lockedIds && !lockedIds[id]) {
+        cb.disabled = true; // 白名单外的模型：采纳了也保存不了
+        disabledTag = "不在白名单";
       }
+      if (disabledTag !== "") item.className += " disabled";
       item.appendChild(cb);
       var code = document.createElement("code");
       code.textContent = id;
@@ -904,11 +943,11 @@
       nameEl.className = "model-picker-name";
       nameEl.textContent = m.name || id;
       item.appendChild(nameEl);
-      if (cb.disabled) {
+      if (disabledTag !== "") {
         // 明确说明为何不能勾选，避免管理员以为是界面故障。
         var tag = document.createElement("span");
         tag.className = "model-picker-tag";
-        tag.textContent = "已在表单中";
+        tag.textContent = disabledTag;
         item.appendChild(tag);
       }
       cb.addEventListener("change", updatePickerState);
@@ -1060,6 +1099,7 @@
   // renderEndpointList 渲染自定义端点列表：只在对话框仍打开时写 DOM。
   function renderEndpointList(list) {
     if (!modelSettingsEl) return;
+    var root = modelSettingsEl;
     var box = modelSettingsEl.querySelector("#endpoint-list");
     if (!box) return;
     var customs = (list || []).filter(function (p) {
@@ -1076,7 +1116,9 @@
       item.className = "endpoint-item";
       item.innerHTML =
         '<div style="min-width:0">' +
-        '<div class="endpoint-name">' + esc(p.name || p.id) + "</div>" +
+        '<div class="endpoint-name">' + esc(p.name || p.id) +
+          (p.pinned ? ' <span class="badge gray" title="模型列表已锁定为白名单：只能使用其中的模型">白名单</span>' : "") +
+          "</div>" +
         '<div class="endpoint-meta">id：<code>' + esc(p.id) + "</code></div>" +
         '<div class="endpoint-meta">Base URL：' +
           (d.baseUrl ? "<code>" + esc(d.baseUrl) + "</code>" : unknownDetailHtml()) + "</div>" +
@@ -1084,7 +1126,13 @@
           (d.models.length ? modelNamesHtml(d.models) : unknownDetailHtml()) + "</div>" +
         (d.api ? '<div class="endpoint-meta">API 类型：<code>' + esc(d.api) + "</code></div>" : "") +
         "</div>" +
-        '<button class="danger mini endpoint-del" title="从注册表移除该端点">删除</button>';
+        '<div class="endpoint-actions">' +
+        '<button class="secondary mini endpoint-edit" title="把该端点的配置载入下方表单进行修改">编辑</button>' +
+        '<button class="danger mini endpoint-del" title="从注册表移除该端点">删除</button>' +
+        "</div>";
+      item.querySelector(".endpoint-edit").addEventListener("click", function () {
+        beginEndpointEdit(root, p);
+      });
       item.querySelector(".endpoint-del").addEventListener("click", function () {
         deleteEndpoint(p.id, p.name || p.id);
       });
@@ -1122,6 +1170,11 @@
       .then(function (j) {
         delete customEndpointDetails[id];
         showMsg("已删除自定义端点：" + (j.message || id));
+        // 被删掉的正是表单正在编辑的端点：退出编辑模式，否则表单会继续编辑一个
+        // 已不存在的 id（再次保存就会把它重新创建出来，这不是删除的语义）。
+        if (modelSettingsEl && modelSettingsEl._editingId === id) {
+          resetEndpointForm(modelSettingsEl);
+        }
         loadEndpoints(true).then(function () {
           listUsers();
         });
@@ -1233,11 +1286,13 @@
   }
 
   // collectModelRows 读取并校验模型目录的每一行：模型 ID 必填且不重复、容量必须是正
-  // 整数；错误写到行内（容量错误同时自动展开该行），返回 {models, valid, message}。
+  // 整数；锁定的端点还要求模型在白名单内。错误写到行内（容量错误同时自动展开该行），
+  // 返回 {models, valid, message}。
   // models 是可直接提交的对象数组：空的 name/容量省略；文本与图片都不勾选时省略
   // input（交给 pi-web 沿用默认），只勾图片则下发 ["image"]。
   function collectModelRows(root) {
     var rows = Array.prototype.slice.call(root.querySelectorAll("#endpoint-rows .model-row"));
+    var lockedIds = pinnedAllowlist(root); // 非空时该端点的模型列表是封闭集合
     var counts = {};
     var ids = rows.map(function (row) {
       var id = row.querySelector(".model-id").value.trim();
@@ -1256,6 +1311,8 @@
         msg = "模型 ID 不能为空";
       } else if (counts[id] > 1) {
         msg = '模型 "' + id + '" 重复';
+      } else if (lockedIds && !lockedIds[id]) {
+        msg = "该端点已锁定模型列表，只能使用白名单内的模型";
       } else if (contextWindow !== "" && !isPositiveInt(contextWindow)) {
         msg = '模型 "' + id + '" 的上下文窗口必须是正整数';
       } else if (maxTokens !== "" && !isPositiveInt(maxTokens)) {
@@ -1295,6 +1352,51 @@
       if (id !== "") out[id] = true;
     });
     return out;
+  }
+
+  // endpointAllowlist 把端点的模型条目归一化成 id -> true 的集合（兼容对象与纯字符串），
+  // 用作"锁定白名单"的判定依据。
+  function endpointAllowlist(models) {
+    var out = {};
+    (models || []).forEach(function (m) {
+      var id = typeof m === "string" ? m : ((m && m.id) || "");
+      if (id !== "") out[String(id)] = true;
+    });
+    return out;
+  }
+
+  // endpointRawModels 取某个端点的原始模型条目数组：优先用列表返回的 models
+  // （GET api/providers 会带上 contextWindow / maxTokens / input），回退到本次会话内
+  // 记录的本地明细。保留原始形状，编辑预填时才能还原容量与输入类型。
+  function endpointRawModels(p) {
+    if (p && p.models && p.models.length) return p.models;
+    var local = customEndpointDetails[(p && p.id) || ""] || {};
+    return local.models || [];
+  }
+
+  // normalizeModelForRow 把原始模型条目转成 addModelRow 认识的形状：兼容纯字符串与
+  // 对象，保留容量与输入类型（input 统一成数组）。
+  function normalizeModelForRow(m) {
+    if (typeof m === "string") return { id: m, name: m };
+    m = m || {};
+    var id = m.id ? String(m.id) : "";
+    var out = { id: id, name: m.name ? String(m.name) : id };
+    if (m.contextWindow != null) out.contextWindow = m.contextWindow;
+    if (m.maxTokens != null) out.maxTokens = m.maxTokens;
+    var input = m.input;
+    if (typeof input === "string") input = [input];
+    if (input && input.length) out.input = Array.prototype.slice.call(input);
+    return out;
+  }
+
+  // pinnedAllowlist 返回当前生效的锁定白名单（id -> true），未锁定时返回 null。
+  // 只有「编辑已有端点」且勾选了锁定复选框时，该端点的原始模型列表才是封闭集合；
+  // 新建端点时勾选只是让管理员自己制定列表，不构成限制。
+  function pinnedAllowlist(root) {
+    if (!root || !root._editingId) return null;
+    var box = root.querySelector("#endpoint-pinned");
+    if (!box || !box.checked) return null;
+    return root._editingAllowlist || {};
   }
 
   // clearDiscoverNote 清空模型目录下方的探测提示（候选信息 / 服务端错误）：地址或
@@ -1338,9 +1440,11 @@
     } else if (isBuiltinProviderId(id)) {
       idError = 'provider id "' + id + '" 与内置 provider 冲突，请换一个';
     }
-    // 校验不通过时用内联错误替换常驻提示。
+    // 校验不通过时用内联错误替换常驻提示；编辑模式下说明 id 是存储键、不可修改。
+    var idHintText = root._editingId ?
+      "正在编辑已有端点：Provider ID 是存储键，编辑期间不可修改。" : ENDPOINT_ID_HINT;
     idHint.className = idError ? "modal-error" : "modal-hint";
-    idHint.textContent = idError || ENDPOINT_ID_HINT;
+    idHint.textContent = idError || idHintText;
 
     // 显示名称留空时，占位符回退到 Provider ID，再回退到"显示名称"。
     root.querySelector("#endpoint-name").placeholder = id || "显示名称";
@@ -1364,6 +1468,86 @@
 
     root.querySelector("#endpoint-ok").disabled = !state.valid;
     return state;
+  }
+
+  // setEndpointEditingIndicator 显示 / 隐藏「正在编辑」提示条：provider 为空表示退出
+  // 编辑模式。显示名与 id 都经 textContent 写入，天然转义。
+  function setEndpointEditingIndicator(root, provider) {
+    var box = root && root.querySelector("#endpoint-editing");
+    var note = root && root.querySelector("#endpoint-editing-note");
+    if (!box || !note) return;
+    if (!provider) {
+      box.hidden = true;
+      note.textContent = "";
+      return;
+    }
+    note.textContent = "正在编辑：" + (provider.name || provider.id) + "（" + provider.id + "）";
+    box.hidden = false;
+  }
+
+  // resetEndpointForm 把表单恢复成「新增端点」模式：清空所有字段（含只用于探测的
+  // API Key）、重新启用 Provider ID、取消勾选锁定、清空模型行与各处错误文本，并隐藏
+  // 「正在编辑」提示。取消编辑与保存成功后都走这里，保证两条路径结果一致。
+  function resetEndpointForm(root) {
+    if (!root) return;
+    root._editingId = "";
+    root._editingAllowlist = null;
+    var idInput = root.querySelector("#endpoint-id");
+    idInput.value = "";
+    idInput.disabled = false;
+    root.querySelector("#endpoint-name").value = "";
+    var apiSelect = root.querySelector("#endpoint-api");
+    apiSelect.value = "openai-completions";
+    var urlInput = root.querySelector("#endpoint-baseurl");
+    urlInput.value = "";
+    urlInput.placeholder = apiBaseUrlPlaceholder(apiSelect.value);
+    root.querySelector("#endpoint-apikey").value = "";
+    var pinned = root.querySelector("#endpoint-pinned");
+    if (pinned) pinned.checked = false;
+    root.querySelector("#endpoint-rows").innerHTML = "";
+    root.querySelector("#endpoint-url-error").textContent = "";
+    root.querySelector("#endpoint-model-error").textContent = "";
+    root.querySelector("#endpoint-error").textContent = "";
+    clearDiscoverNote(root);
+    setEndpointEditingIndicator(root, null);
+    refreshEndpointForm(root);
+  }
+
+  // beginEndpointEdit 用某个自定义端点预填表单并进入编辑模式（只对已有端点生效）：
+  // id 变成只读（它是存储键，改了就等于新建另一个端点），模型行还原容量与输入类型，
+  // 锁定复选框跟随 pinned。探测用的 API Key 始终留空：它从不被读取，只由管理员本次输入。
+  function beginEndpointEdit(root, p) {
+    if (!root || !root.querySelector || !p || !p.id) return;
+    resetEndpointForm(root); // 先清成空白表单，避免上一次编辑（或半填草稿）的痕迹混进来
+    var detail = endpointDetail(p);
+    var idInput = root.querySelector("#endpoint-id");
+    idInput.value = p.id;
+    idInput.disabled = true;
+    root.querySelector("#endpoint-name").value = p.name || "";
+    var apiSelect = root.querySelector("#endpoint-api");
+    apiSelect.value = detail.api || "openai-completions";
+    var urlInput = root.querySelector("#endpoint-baseurl");
+    urlInput.value = detail.baseUrl || "";
+    urlInput.placeholder = apiBaseUrlPlaceholder(apiSelect.value);
+    root.querySelector("#endpoint-apikey").value = ""; // 探测 Key 永不从任何地方回填
+    root.querySelector("#endpoint-pinned").checked = p.pinned === true;
+
+    var rawModels = endpointRawModels(p);
+    root._editingId = p.id;
+    root._editingAllowlist = endpointAllowlist(rawModels);
+    rawModels.forEach(function (m) {
+      addModelRow(root, normalizeModelForRow(m));
+    });
+    setEndpointEditingIndicator(root, p);
+    refreshEndpointForm(root);
+
+    // 把唯一的滚动区滚到表单，让管理员立刻看到载入的内容（不新开滚动条）。
+    var panel = root.querySelector("#settings-panel-endpoints");
+    var anchor = root.querySelector("#endpoint-editing");
+    if (panel && anchor) {
+      var delta = anchor.getBoundingClientRect().top - panel.getBoundingClientRect().top;
+      panel.scrollTop += delta - 8;
+    }
   }
 
   // discoverModels 调用 api/providers/discover 探测该端点的模型列表：有候选时打开勾选
@@ -1408,7 +1592,7 @@
           note.textContent = "该端点没有列出任何模型，请手动添加";
           return;
         }
-        openModelPicker(candidates, existingModelIds(root), function (selected) {
+        openModelPicker(candidates, existingModelIds(root), pinnedAllowlist(root), function (selected) {
           // 二次确认已存在的 ID，保证采纳候选不会产生重复行。
           var present = existingModelIds(root);
           selected.forEach(function (m) {
@@ -1473,8 +1657,11 @@
       api: apiSelect.value,
       models: state.models
     };
-    if (id !== "") payload.id = id; // 留空则由服务端根据显示名生成
+    if (id !== "") payload.id = id; // 留空则由服务端根据显示名生成；编辑时是同一个 id（覆盖保存）
     if (name !== "") payload.name = name;
+    // 白名单开关随保存一起下发：后端据此把该端点的模型列表视为封闭集合。
+    var pinnedBox = root.querySelector("#endpoint-pinned");
+    payload.pinned = !!(pinnedBox && pinnedBox.checked);
 
     okBtn.disabled = true;
     okBtn.textContent = "保存中…";
@@ -1493,18 +1680,16 @@
       .then(function (j) {
         var saved = j.provider || {};
         if (saved.id) {
-          customEndpointDetails[saved.id] = { baseUrl: baseUrl, api: payload.api, models: state.models };
+          customEndpointDetails[saved.id] = {
+            baseUrl: baseUrl,
+            api: payload.api,
+            models: state.models,
+            pinned: payload.pinned
+          };
         }
-        // 清空表单（含探测用 Key）便于连续添加；对话框保持打开，便于确认列表与用户表已更新。
-        idInput.value = "";
-        nameInput.value = "";
-        urlInput.value = "";
-        root.querySelector("#endpoint-apikey").value = "";
-        root.querySelector("#endpoint-rows").innerHTML = "";
-        apiSelect.value = "openai-completions";
-        urlInput.placeholder = apiBaseUrlPlaceholder(apiSelect.value);
-        clearDiscoverNote(root);
-        refreshEndpointForm(root);
+        // 清空表单（含探测用 Key、编辑模式）便于连续操作；对话框保持打开，便于确认
+        // 列表与用户表已更新。编辑保存后也就此退出编辑模式。
+        resetEndpointForm(root);
         showMsg("自定义模型端点：" + (j.message || "已保存"));
         // 失效并重取 provider 缓存：端点列表与「用户 API Key」下拉立即出现新端点。
         loadEndpoints(true).then(function () {
@@ -1575,6 +1760,11 @@
       '<div class="endpoint-list" id="endpoint-list">' +
       '<div class="endpoint-empty">正在加载…</div>' +
       "</div>" +
+      // 「正在编辑」提示条：默认隐藏，点列表里的「编辑」后显示，旁边是退出编辑的按钮。
+      '<div class="endpoint-editing" id="endpoint-editing" hidden>' +
+      '<span class="endpoint-editing-note" id="endpoint-editing-note"></span>' +
+      '<button class="secondary mini" id="endpoint-edit-cancel" title="放弃编辑，回到空白的新增端点表单">取消编辑</button>' +
+      "</div>" +
       '<label class="modal-label" for="endpoint-id">Provider ID（可选）</label>' +
       '<input type="text" id="endpoint-id" placeholder="acme-gateway" autocomplete="off" spellcheck="false" />' +
       '<div class="modal-hint" id="endpoint-id-hint"></div>' +
@@ -1593,6 +1783,14 @@
       '<input type="text" id="endpoint-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
       '<div class="modal-hint">仅用于「获取可用模型」向该地址发起一次探测，不会写入任何 Secret；' +
       "每个用户的凭据在「用户 API Key」标签页中配置。</div>" +
+      // 锁定白名单：勾选后该端点的模型列表成为封闭集合；取消勾选是唯一的解锁路径。
+      '<div class="endpoint-pinned">' +
+      '<label class="endpoint-pinned-label" for="endpoint-pinned">' +
+      '<input type="checkbox" id="endpoint-pinned" /> 锁定模型列表（白名单）</label>' +
+      '<div class="modal-hint" id="endpoint-pinned-hint">勾选后该端点的模型列表视为封闭集合：' +
+      "探测结果里不在其中的模型不可选，编辑时也无法手工加入白名单之外的模型。" +
+      "要扩展列表，请先取消勾选并保存，再重新勾选。</div>" +
+      "</div>" +
       '<div class="endpoint-section-head">' +
       '<span class="modal-label">模型目录 *</span>' +
       '<button class="secondary mini" id="endpoint-discover">获取可用模型</button>' +
@@ -1653,6 +1851,14 @@
     root.querySelector("#endpoint-cancel").addEventListener("click", closeModelSettings);
     root.querySelector("#endpoint-ok").addEventListener("click", function () {
       submitEndpoint(root);
+    });
+    // 取消编辑：退回空白的新增端点表单（重新启用 Provider ID、清空各行与错误）。
+    root.querySelector("#endpoint-edit-cancel").addEventListener("click", function () {
+      resetEndpointForm(root);
+    });
+    // 锁定复选框：勾选 / 取消勾选会改变逐行校验结果（取消勾选即解锁），立刻重算。
+    root.querySelector("#endpoint-pinned").addEventListener("change", function () {
+      refreshEndpointForm(root);
     });
     root.querySelector("#endpoint-add-model").addEventListener("click", function () {
       var row = addModelRow(root, null);

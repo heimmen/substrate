@@ -512,6 +512,7 @@ provider 对象字段（`custom:true` 的项额外带 `baseUrl` / `api` / `model
 | `baseUrl` | string | 端点地址；**仅**自定义端点带，内置项省略 |
 | `api` | string | pi-ai 的 API 实现（如 `openai-completions`）；**仅**自定义端点带，内置项省略 |
 | `models` | object[] | 模型列表；**仅**自定义端点带，内置项省略。每项见下表 |
+| `pinned` | bool | `true` 表示该端点的模型列表是**封闭集合**（白名单）；**仅**自定义端点可能带 |
 
 **覆盖内置列表**：`KEY_PROVIDERS` 为逗号分隔的列表，每项为 `id` 或 `id=显示名`（留空或无法解析时回退到内置默认值），例如：
 
@@ -539,6 +540,7 @@ KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 | `baseUrl` | string | 是 | 须为 `http://` 或 `https://` 开头的完整地址 |
 | `api` | string | 否 | pi-ai API 实现；缺省 `openai-completions` |
 | `models` | object[]（也接受 string[]） | 是 | 模型列表，至少一个非空项；重名去重。对象项见下表，字符串项等价于只填 `id` |
+| `pinned` | bool | 否 | 缺省 `false`。`true` 表示把该端点的模型列表**锁定为封闭集合**：在仍为 `pinned` 的写入里**不允许新增**模型（只能删除/改名/改容量）；要扩展列表必须先以 `pinned:false` 保存一次 |
 | `id` | string | 否 | provider id；缺省由 `name` 推导：转小写，`-` / `_` / `.` / 空格折叠为 `-` 并去首尾，**其它非字母数字字符直接丢弃**（如 `Z.AI  GLM` → `z-ai-glm`），推不出字符时回退 `custom`。须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不得与内置 provider 同名 |
 
 `models[]` 项字段：
@@ -595,6 +597,7 @@ KEY_PROVIDERS="deepseek=DeepSeek,openai=OpenAI"
 | `400` | `{"error":"模型 \"X\" 的上下文窗口必须是正整数"}` | `contextWindow` 为 0/负数/非整数 |
 | `400` | `{"error":"模型 \"X\" 的最大输出 token 数必须是正整数"}` | `maxTokens` 为 0/负数/非整数 |
 | `400` | `{"error":"模型 \"X\" 的输入类型只能是 text 或 image"}` | `input` 含其它取值 |
+| `400` | `{"error":"该端点已锁定模型列表，只能使用白名单内的模型：X"}` | 端点仍为 `pinned`，而本次写入新增了白名单外的模型 `X` |
 | `500` | `{"error":"保存 provider 失败: ..."}` | 写 ConfigMap 失败 |
 
 ```bash
@@ -1046,6 +1049,11 @@ admin **不再**使用 `PROVIDER_MODELS_FILE`，也没有把 ConfigMap 挂进 ad
 **空注册表**：ConfigMap 不存在或没有任何端点时返回 `200` + `{"providers":{}}`，**不是**错误
 响应——空注册表让 Actor 能把它与拉取失败区分开，也避免缺失的 ConfigMap 卡死 Actor 的拉取
 循环。注册表 JSON 在 admin 启动时若无法解析会直接 fatal（运维 typo 立即暴露）。
+
+**管理面专有字段不会下发**：`pinned`（白名单开关，见上）只存在于 ConfigMap 与管理面 API；
+本端点返回的文档只含 `name` / `baseUrl` / `api` / `models`。这是刻意的投影——pi-web 以**严格
+schema** 校验 `models.json`，多出一个未知的 provider 键会让整份文件失效，从而把该 Actor 的模型
+配置清空（`providermodels.go` 的 `actorWireProvider`）。
 
 **方法限制**：仅接受 `GET`，其它方法返回 `404`（`providermodels.go:285-289`）。
 

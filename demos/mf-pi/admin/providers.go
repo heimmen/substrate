@@ -35,6 +35,8 @@ type providerOption struct {
 	BaseURL string          `json:"baseUrl,omitempty"`
 	API     string          `json:"api,omitempty"`
 	Models  []registryModel `json:"models,omitempty"`
+	// Pinned reports that the endpoint's model list is a closed set.
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // defaultProviderID is the provider assumed when a request omits providerId and
@@ -134,7 +136,7 @@ func (s *server) providerOptionFor(id string, p registryProvider) providerOption
 	if name == "" {
 		name = id
 	}
-	return providerOption{ID: id, Name: name, Custom: true, BaseURL: p.BaseURL, API: p.API, Models: p.Models}
+	return providerOption{ID: id, Name: name, Custom: true, BaseURL: p.BaseURL, API: p.API, Models: p.Models, Pinned: p.Pinned}
 }
 
 // lookupProvider returns the curated option for id, if it is selectable.

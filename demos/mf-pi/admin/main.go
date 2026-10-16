@@ -522,6 +522,7 @@ func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		BaseURL string            `json:"baseUrl"`
 		API     string            `json:"api"`
 		Models  []json.RawMessage `json:"models"`
+		Pinned  bool              `json:"pinned"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
@@ -541,10 +542,18 @@ func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		BaseURL: strings.TrimSpace(req.BaseURL),
 		API:     strings.TrimSpace(req.API),
 		Models:  models,
+		Pinned:  req.Pinned,
 	}, builtinProviderIndex())
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	// A pinned list is closed: adding a model requires unpinning it first.
+	if existing, ok := s.providerRegistry.list()[id]; ok {
+		if err := checkPinnedGrowth(id, existing, def); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)

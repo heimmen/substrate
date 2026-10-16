@@ -2816,3 +2816,108 @@ func TestLiveDiscoverModels(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Pinned (closed) model lists.
+// ---------------------------------------------------------------------------
+
+// The admin-only `pinned` flag must never reach the document the actors merge:
+// pi-web validates models.json against a strict schema that rejects unknown
+// provider keys, so a leak here would invalidate every actor's model config.
+func TestActorDocumentOmitsAdminOnlyFields(t *testing.T) {
+	s := newTestServer(newFake())
+	reg := s.providerRegistry.(*fakeProviderRegistry)
+	reg.data["sf"] = registryProvider{
+		Name: "SF", BaseURL: "https://api.siliconflow.cn/v1", API: "openai-completions",
+		Models: []registryModel{{ID: "m-one", Name: "M One", ContextWindow: 128000}}, Pinned: true,
+	}
+
+	rec := doRequest(s, http.MethodGet, "/internal/providers/models.json", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "pinned") {
+		t.Errorf("actor document leaked the admin-only field:\n%s", body)
+	}
+	var doc actorWireDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, body)
+	}
+	got, ok := doc.Providers["sf"]
+	if !ok || got.BaseURL != "https://api.siliconflow.cn/v1" || len(got.Models) != 1 || got.Models[0].ID != "m-one" {
+		t.Errorf("actor document lost provider content: %+v", doc.Providers)
+	}
+}
+
+// A pinned endpoint's model list can shrink or be renamed but not grow until it
+// is saved unpinned — the escape hatch the console documents.
+func TestPinnedEndpointRefusesNewModels(t *testing.T) {
+	s := newTestServer(newFake())
+	reg := s.providerRegistry.(*fakeProviderRegistry)
+
+	rec := doRequest(s, http.MethodPost, "/api/providers",
+		`{"id":"sf","name":"SF","baseUrl":"https://api.siliconflow.cn/v1","pinned":true,
+		  "models":[{"id":"m-one"},{"id":"m-two"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !reg.data["sf"].Pinned {
+		t.Fatalf("pinned was not stored: %+v", reg.data["sf"])
+	}
+	// The list is echoed to the console with the flag.
+	list := decode[struct {
+		Providers []providerOption `json:"providers"`
+	}](t, doRequest(s, http.MethodGet, "/api/providers", ""))
+	for _, p := range list.Providers {
+		if p.ID == "sf" && !p.Pinned {
+			t.Errorf("provider list dropped pinned: %+v", p)
+		}
+	}
+
+	// Growing the list while still pinned is refused, naming the model.
+	grow := doRequest(s, http.MethodPost, "/api/providers",
+		`{"id":"sf","name":"SF","baseUrl":"https://api.siliconflow.cn/v1","pinned":true,
+		  "models":[{"id":"m-one"},{"id":"m-two"},{"id":"m-three"}]}`)
+	if grow.Code != http.StatusBadRequest {
+		t.Fatalf("grow: status = %d, want 400; body=%s", grow.Code, grow.Body.String())
+	}
+	if !strings.Contains(grow.Body.String(), "只能使用白名单内的模型") || !strings.Contains(grow.Body.String(), "m-three") {
+		t.Errorf("grow: body = %s, want it to name the offending model", grow.Body.String())
+	}
+	if len(reg.data["sf"].Models) != 2 {
+		t.Errorf("refused write still mutated the registry: %+v", reg.data["sf"].Models)
+	}
+
+	// Shrinking and renaming stay allowed.
+	shrink := doRequest(s, http.MethodPost, "/api/providers",
+		`{"id":"sf","name":"SF renamed","baseUrl":"https://api.siliconflow.cn/v1","pinned":true,
+		  "models":[{"id":"m-two","name":"M Two"}]}`)
+	if shrink.Code != http.StatusOK {
+		t.Errorf("shrink: status = %d, want 200; body=%s", shrink.Code, shrink.Body.String())
+	}
+
+	// Unpinning in the same write lets the list grow again.
+	unpin := doRequest(s, http.MethodPost, "/api/providers",
+		`{"id":"sf","name":"SF","baseUrl":"https://api.siliconflow.cn/v1","pinned":false,
+		  "models":[{"id":"m-two"},{"id":"m-three"}]}`)
+	if unpin.Code != http.StatusOK {
+		t.Fatalf("unpin+grow: status = %d, want 200; body=%s", unpin.Code, unpin.Body.String())
+	}
+	if reg.data["sf"].Pinned {
+		t.Errorf("unpin did not clear the flag")
+	}
+}
+
+// An endpoint that is not pinned keeps growing freely.
+func TestUnpinnedEndpointGrows(t *testing.T) {
+	s := newTestServer(newFake())
+	body := `{"id":"gw","name":"GW","baseUrl":"https://h/v1","models":[{"id":"a"}]}`
+	if rec := doRequest(s, http.MethodPost, "/api/providers", body); rec.Code != http.StatusOK {
+		t.Fatalf("create: %d", rec.Code)
+	}
+	body = `{"id":"gw","name":"GW","baseUrl":"https://h/v1","models":[{"id":"a"},{"id":"b"}]}`
+	if rec := doRequest(s, http.MethodPost, "/api/providers", body); rec.Code != http.StatusOK {
+		t.Errorf("unpinned grow: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
