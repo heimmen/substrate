@@ -55,7 +55,10 @@
 **生命周期**：`STATUS_SUSPENDED`（不占 worker）⇄ `STATUS_RUNNING`（占用一个 worker）；另有 `PAUSED`（进程留在节点 VM，快照在本地）。
 
 **一次 resume 内部发生什么**：
-1. 控制面从 **golden base 快照**（模板首次部署时生成）或上次**挂起检查点**恢复进程状态。
+1. 控制面从上次**挂起检查点**恢复进程状态；没有检查点时冷启动。
+   > **注意**：mf-pi **不使用**模板的 golden base 快照。deploy 会自动清空它
+   > （`ensure-no-golden.sh`），因为该快照记录的是 golden actor 自己那份
+   > `userdata` 卷的挂载树，无法对每用户卷恢复（详见 `persistence_gaps.md`）。
 2. atelet 把该 Actor 的 **PV 目录 symlink** 进沙箱挂载点 `/data/pi-agent`。
 3. 沙箱入口 `tini -- pi-web-bootstrap sh -c '...'` 先装内置 skills，再拉起
    `pi-web-sessiond` + `pi-web-server`，监听 80 端口。
@@ -90,11 +93,22 @@ kubectl ate get actor   alice -a mfpi                                     # 查�
   `/var/lib/ateom-gvisor/stickyvolumes/<卷ID>`。
 - 挂载时（atelet 侧）把该目录 **symlink** 到沙箱里的 `/data/pi-agent`。
 - 于是 `/data/pi-agent` **就是** PV 本身——actor 直接读写，无同步代理、无凭据。
+- 模板还把 `HOME` 指到 `/data/pi-agent/home`、`XDG_CONFIG_HOME` 指到
+  `/data/pi-agent/config`：pi-web 把用户自己安装的 Pi 包/skill 放在
+  `$HOME/.pi/packages`，这样它们也在 PV 上，镜像更新不丢。
 
-**哪些数据自动恢复**（删除重建后）：
+> [!WARNING]
+> **PV 是 worker 节点本地目录，不是 CSI/网络存储。** 它没有卷亲和：多节点集群
+> 下把 actor 恢复到别的节点会得到一个空卷。因此 `deploy.sh` / `deploy-test.sh`
+> 默认拒绝在多节点集群上部署（`MFPI_ALLOW_MULTI_NODE=1` 可覆盖）；节点被替换或
+> `kind delete cluster` 也会丢数据。详见 `persistence_gaps.md`。
+
+**哪些数据自动恢复**（删除重建 / 镜像更新后）：
 | 数据 | 位置 | 结果 |
 |---|---|---|
 | 会话历史、`auth.json`、`settings.json`、models | PV | ✅ 原样 |
+| `$HOME`（含用户安装的 `.pi/packages`、`.npm`） | PV（`/data/pi-agent/home`） | ✅ 原样 |
+| `$XDG_CONFIG_HOME` | PV（`/data/pi-agent/config`） | ✅ 原样 |
 | 内置 skills | 镜像 → supervisor 循环补装 | ✅ 补齐 |
 | project 工作目录（如 `/dtom2`，在 PV 外） | 沙箱临时层 | ⚠️ 目录重建（历史内容不恢复） |
 
@@ -115,13 +129,19 @@ kubectl ate purge volumes alice -a mfpi -t ate-demo-mf-pi/mf-pi   # 等价 CLI
 
 ---
 
-## 5. 一张表看懂三种「重置」
+## 5. 一张表看懂四种「重置」
 
-| 操作 | 入口 | 沙箱 | PV 数据 | skills | 备注 |
+| 操作 | 入口 | 沙箱 | PV 数据（含 HOME） | skills | 备注 |
 |---|---|---|---|---|---|
 | **suspend / resume** | `kubectl ate suspend/resume` | 同一实例现场还原 | 原样（同一沙箱） | 原样 | 快照恢复；WebSocket 需刷新 |
-| **refresh**（删+建+恢复） | `refresh-actor.sh` | 新沙箱 | ✅ 重新挂载同一目录 | ✅ 循环补齐 | 镜像可升级，数据不丢 |
+| **refresh**（删+建+恢复，同镜像） | `refresh-actor.sh` | 新沙箱（`--boot` 冷启动） | ✅ 重新挂载同一目录 | ✅ 循环补齐 | 数据不丢 |
+| **镜像更新**（换 digest / 改模板） | `deploy.sh` / `deploy-test.sh` | 新沙箱 + 新镜像（`--boot` 冷启动），deploy 自动清 golden | ✅ 重新挂载同一目录 | ✅ 循环补齐 | 用户安装的包在 `$HOME`（PV）里，保留 |
 | **删除用户** | admin / `remove-pv.sh` | 销毁 | ❌ 已 purge | ❌ 已删 | 彻底清账号 |
+
+> 冷启动代价：首次 resume 约 25–40s（镜像更新后每个用户一次），期间浏览器看到
+> 「Agent 正在载入」提示页；之后 suspend/resume 仍走 actor 自己的快照，速度快。
+> 项目工作目录请放在 `$HOME`（`/data/pi-agent/home`）或 `/data/pi-agent` 下，否则
+> 只会被重建为空目录。
 
 ---
 

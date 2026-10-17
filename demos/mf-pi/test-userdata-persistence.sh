@@ -6,10 +6,16 @@
 # ----------------
 # The mf-pi test ActorTemplate mounts a sticky userdata ExternalVolumeTemplate
 # at /data/pi-agent and (since the PI_WEB_DATA_DIR=/data/pi-agent fix) pi-web
-# stores its real data there. The sticky volume plugin keeps the backing
-# directory on actor delete (DeleteVolume is a no-op) and re-attaches the same
-# directory on recreate (volumeID is actor-stable), so user data survives a
-# delete+recreate redeploy (image refresh).
+# stores its real data there. The template also redirects HOME and
+# XDG_CONFIG_HOME onto that volume, so user-scope Pi packages/skills under
+# $HOME/.pi/packages are durable too. The sticky volume plugin keeps the
+# backing directory on actor delete (DeleteVolume is a no-op) and re-attaches
+# the same directory on recreate (volumeID is actor-stable), so user data
+# survives a delete+recreate redeploy (image refresh).
+#
+# This script covers the delete+recreate path for the SAME image. The
+# IMAGE-UPDATE path (template/digest change, golden-snapshot interaction) is
+# covered by test-image-update-persistence.sh.
 #
 # The test asserts BOTH axes of recovery after a refresh:
 #   * Data recovery: a sentinel written to /data/pi-agent (via the pi-web
@@ -204,7 +210,7 @@ wait_for_running() {
     # a short grace period, and again later, to cover transient scheduling races.
     # Resume is a no-op on an already-running actor.
     if (( i == 10 || i == 60 )); then
-      "${KUBECTL_ATE_CMD[@]}" resume actor "${TEST_USER}" -a "${ATESPACE}" >/dev/null 2>&1 || true
+      "${KUBECTL_ATE_CMD[@]}" resume actor "${TEST_USER}" -a "${ATESPACE}" --boot >/dev/null 2>&1 || true
     fi
     sleep 2
     i=$((i+2))
@@ -289,6 +295,24 @@ verify_in_actor_data_dir() {
     ok "live actor /data/pi-agent contains the recovered sentinel after refresh"
   else
     log "WARN in-actor sentinel not readable via runsc (got: ${marker:-<none>}) — relying on API-level recovery check"
+  fi
+
+  # $HOME must be on the PV: pi-web installs user-scope packages/skills under
+  # $HOME/.pi/packages, so a rootfs HOME would silently lose them on any image
+  # update. This guards the HOME=/data/pi-agent/home redirect. Read the env of
+  # the sandbox's PID 1 (/proc/1/environ) so we assert the container's own
+  # environment, not whatever `runsc exec` happens to pass down.
+  local home_out home_entries
+  home_out="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec mf-agent sh -c 'tr "\0" "\n" < /proc/1/environ 2>/dev/null | grep "^HOME="; ls -d /data/pi-agent/home 2>/dev/null' 2>&1 || true)"
+  home_entries="$(printf '%s\n' "$home_out" | grep -vE '^(waiting on|$)' || true)"
+  if printf '%s\n' "$home_entries" | grep -qx 'HOME=/data/pi-agent/home'; then
+    ok "live actor HOME is on the PV (/data/pi-agent/home)"
+  elif printf '%s\n' "$home_entries" | grep -q '^HOME='; then
+    bad "live actor HOME is not /data/pi-agent/home (got: $(printf '%s' "$home_entries" | grep '^HOME='))"
+  elif [[ -n "$home_entries" ]]; then
+    log "WARN in-actor HOME env not readable via /proc/1/environ; /data/pi-agent/home exists (output: ${home_entries})"
+  else
+    log "WARN in-actor HOME check skipped: runsc exec inconclusive (output: ${home_out:-<none>})"
   fi
 }
 
@@ -375,8 +399,10 @@ if ! wait_for_suspended; then
 fi
 "${KUBECTL_ATE_CMD[@]}" delete actor "${TEST_USER}" -a "${ATESPACE}" >/dev/null
 "${KUBECTL_ATE_CMD[@]}" create actor "${TEST_USER}" -a "${ATESPACE}" --template "${TEMPLATE}" >/dev/null
-# `create actor` does NOT auto-resume; resume explicitly so the new instance boots.
-"${KUBECTL_ATE_CMD[@]}" resume actor "${TEST_USER}" -a "${ATESPACE}" >/dev/null 2>&1 || true
+# `create actor` does NOT auto-resume; resume explicitly so the new instance
+# boots. --boot keeps it off the (demo-cleared) golden base snapshot, which is
+# not restorable against a per-user volume (docs/persistence_gaps.md).
+"${KUBECTL_ATE_CMD[@]}" resume actor "${TEST_USER}" -a "${ATESPACE}" --boot >/dev/null 2>&1 || true
 if ! wait_for_running; then
   bad "actor '${TEST_USER}' did not reach STATUS_RUNNING after recreate"
   exit 1

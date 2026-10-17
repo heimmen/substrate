@@ -14,15 +14,19 @@
 # redeploy. Use it to inspect or hand-edit the actor's on-disk state.
 #
 # IMPORTANT: the sticky volume directory IS /data/pi-agent. The PV holds the
-# CONTENTS of that path (auth.json, sessions/, …) directly — there is no
-# nested pi-agent/ folder inside the PV, and the node path contains no /data
+# CONTENTS of that path (auth.json, sessions/, skills/, projects.json, plus the
+# redirected $HOME in home/ and $XDG_CONFIG_HOME in config/) directly — there is
+# no nested pi-agent/ folder inside the PV, and the node path contains no /data
 # prefix. To make that explicit, the shell by default starts in a small view
 # that mirrors the actor layout:
 #
 #   data/pi-agent/...   -> the sticky PV (what the actor sees at /data/pi-agent)
 #
-# The other /data dirs inside the actor (config, home, npm-cache, pi-web) are
-# ephemeral sandbox overlay and are not visible from the node.
+# In particular data/pi-agent/home/.pi/packages/... is where pi-web installs
+# user-scope Pi packages/skills (POST /api/pi-packages/install), so it survives
+# an actor image update. The image's own /data/home is only a seed source now;
+# any other actor path (e.g. /usr, /opt, /tmp, /data/npm-cache) is ephemeral
+# sandbox overlay and is not visible from the node.
 #
 # Usage:
 #   ./exec-actor.sh <actor> [--test] [--print] [--raw]
@@ -103,7 +107,7 @@ if [ "$RAW" = 1 ]; then
 else
   echo "Entering a shell in the actor-style view:"
   echo "  $VIEW/data/pi-agent/  ->  the PV  (= actor /data/pi-agent)"
-  echo "Example: cd data/pi-agent && ls    # auth.json, sessions/, skills/, ..."
+  echo "Example: cd data/pi-agent && ls    # auth.json, sessions/, skills/, home/, config/, ..."
 fi
 echo "(Substrate workers are gVisor/distroless with no exec endpoint;"
 echo " this is the persisted pod filesystem, not a live process shell.)"

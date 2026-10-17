@@ -8,9 +8,15 @@
 # userdata ExternalVolume is mount-type "sticky" (see internal/volume/sticky):
 # DeleteVolume keeps the backing directory on disk and a recreate of the same
 # actor re-attaches the same directory, so whatever the user wrote under
-# /data/pi-agent survives the refresh. The actor is re-attached to the SAME
+# /data/pi-agent (including $HOME=/data/pi-agent/home and the skills/packages
+# installed there) survives the refresh. The actor is re-attached to the SAME
 # user/volume, so they can log back in with their existing password and their
 # projects / saved files / session are intact.
+#
+# A new instance is resumed with --boot: it must NOT restore the template's
+# golden base snapshot, whose mount tree belongs to the golden actor's volume
+# and is not restorable against this user's volume (see
+# docs/persistence_gaps.md and ./ensure-no-golden.sh).
 #
 # PRODUCTION SAFETY:
 #   * A refresh interrupts the user's running instance. Their data is
@@ -160,7 +166,7 @@ wait_for_status() {
     if [[ "$st" == "${target}" ]]; then return 0; fi
     # Optionally nudge resume at i==10 and i==60 to cover scheduling races.
     if (( nudge )) && { [[ $i -eq 10 ]] || [[ $i -eq 60 ]]; }; then
-      "${KUBECTL_ATE_CMD[@]}" resume actor "${user}" -a "${ATESPACE}" >/dev/null 2>&1 || true
+      "${KUBECTL_ATE_CMD[@]}" resume actor "${user}" -a "${ATESPACE}" --boot >/dev/null 2>&1 || true
     fi
     sleep 2
     i=$((i+2))
@@ -228,8 +234,11 @@ refresh_one() {
 
   "${KUBECTL_ATE_CMD[@]}" delete actor "${user}" -a "${ATESPACE}" >/dev/null
   "${KUBECTL_ATE_CMD[@]}" create actor "${user}" -a "${ATESPACE}" --template "${tpl}" >/dev/null
-  # create actor does NOT auto-resume; resume explicitly so the new instance boots.
-  "${KUBECTL_ATE_CMD[@]}" resume actor "${user}" -a "${ATESPACE}" >/dev/null 2>&1 || true
+  # create actor does NOT auto-resume; resume explicitly so the new instance
+  # boots. --boot skips the ActorTemplate golden base snapshot, whose mount
+  # tree belongs to the golden actor's volume and is not restorable against
+  # this user's volume (docs/persistence_gaps.md).
+  "${KUBECTL_ATE_CMD[@]}" resume actor "${user}" -a "${ATESPACE}" --boot >/dev/null 2>&1 || true
 
   if ! wait_for_status "${user}" "STATUS_RUNNING" 300 1; then
     bad "actor '${user}' did not reach STATUS_RUNNING after recreate"

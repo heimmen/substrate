@@ -250,8 +250,9 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
   但进程内存快照比 mf-cc（Bun）更大，挂起略慢，属预期。
 - 单容器双进程（sessiond+web）通过 unix socket 通信；Actor 恢复后 socket 需重新
   建立，web 可能短暂 503，等几秒重试（同 mf-cc 首访语义）。
-- gVisor 下 `/data` 为容器文件系统（无 durableDir），skills/sessions 依赖 Full
-  快照持久化，与 mf-cc 一致。
+- 用户数据（`/data/pi-agent`，含 `$HOME=/data/pi-agent/home`）持久化在 sticky
+  外部卷上，跨挂起/恢复、删除重建与**镜像更新**都保留；详见
+  `perUserDataVolume.md` 与 `persistence_gaps.md`。
 
 ---
 

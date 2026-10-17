@@ -19,6 +19,14 @@
 #   MFPI_SKIP_REFRESH     (set 1 to skip refreshing existing users after an
 #                          ActorTemplate spec change; default is to refresh)
 #   KO_DEFAULTBASEIMAGE   (default localhost:5001/distroless-static-debian13)
+#   MFPI_DEPLOY_REV       (default 0) rendered into PI_WEB_DEPLOY_REV; bump it
+#                          to force a real ActorTemplate change/roll-out (used
+#                          by test-image-update-persistence.sh)
+#   MFPI_KEEP_GOLDEN      (set 1 to keep the controller's golden base snapshot;
+#                          not recommended: it is not restorable against the
+#                          per-user volumes — docs/persistence_gaps.md)
+#   MFPI_ALLOW_MULTI_NODE (set 1 to allow a cluster with more than one node;
+#                          sticky userdata volumes are node-local)
 #
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
@@ -65,6 +73,7 @@ render() {
       -e "s|\${MF_PI_DIGEST}|$(esc_repl "${MF_PI_DIGEST}")|g" \
       -e "s|\${PAUSE_DIGEST}|$(esc_repl "${PAUSE_DIGEST}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|$(esc_repl "${MFPI_WORKER_REPLICAS:-2}")|g" \
+      -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
       "${TEMPLATE}"
 }
 
@@ -82,6 +91,47 @@ resolve_images() {
   fi
   MF_PI_DIGEST="${piweb##*@}"
   PAUSE_DIGEST="${pause##*@}"
+}
+
+# check_cluster_nodes refuses to deploy onto a multi-node cluster by default.
+# mf-pi user data lives on node-local sticky volumes
+# (/var/lib/ateom-gvisor/stickyvolumes, no CSI/PV, no volume affinity), so an
+# actor resumed on another node silently gets an empty /data/pi-agent (and its
+# snapshot restore fails). See docs/persistence_gaps.md.
+check_cluster_nodes() {
+  if [[ "${MFPI_ALLOW_MULTI_NODE:-0}" == "1" ]]; then
+    return 0
+  fi
+  local count
+  count="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ -n "${count}" && "${count}" -gt 1 ]]; then
+    echo "ERROR: this cluster has ${count} nodes, but mf-pi user data lives on" >&2
+    echo "  node-local sticky volumes (no CSI, no volume affinity). An actor" >&2
+    echo "  resumed on another node loses its /data/pi-agent contents." >&2
+    echo "  See docs/persistence_gaps.md. Refusing to deploy." >&2
+    echo "  Set MFPI_ALLOW_MULTI_NODE=1 to override (accepting the risk)." >&2
+    return 1
+  fi
+  return 0
+}
+
+# ensure_no_golden clears the controller-generated golden base snapshot on the
+# mf-pi ActorTemplates. The golden snapshot records the mount tree of the
+# GOLDEN actor's own external volume and is therefore not restorable against a
+# per-user volume (runsc: `failed to walk "skills" ... no such file`), so the
+# demo boots actors from scratch instead. Idempotent; see
+# ./ensure-no-golden.sh and docs/persistence_gaps.md.
+ensure_no_golden() {
+  if [[ "${MFPI_KEEP_GOLDEN:-0}" == "1" ]]; then
+    echo "  MFPI_KEEP_GOLDEN=1; leaving the golden base snapshot untouched."
+    return 0
+  fi
+  if ! MFPI_NAMESPACE="${NAMESPACE}" ./ensure-no-golden.sh; then
+    echo "WARNING: could not clear every golden base snapshot (see above)." >&2
+    echo "  An actor may wedge in STATUS_RESUMING on restore; run" >&2
+    echo "  MFPI_ATESPACE=mfpi-test MFPI_NAMESPACE=${NAMESPACE} ./recover-actors.sh --test -y" >&2
+    echo "  to recover it." >&2
+  fi
 }
 
 # ensure_at_recreate_if_changed <rendered-manifest> <namespace> <at-name>
@@ -126,7 +176,9 @@ PYEOF
   if [[ "${change}" == "1" ]]; then
     CHANGED_ATS+=("${at}")
     echo "  ActorTemplate '${at}' spec changed; replacing it (immutable spec)."
-    echo "  This regenerates the golden base snapshot; existing actors and their snapshots are unaffected."
+    echo "  This regenerates the golden base snapshot (cleared again below: it is"
+    echo "  not restorable against per-user volumes); existing actors and their"
+    echo "  own snapshots are unaffected."
     kubectl delete actortemplate "${at}" -n "${ns}"
   fi
 }
@@ -213,6 +265,10 @@ cmd_deploy() {
     exit 1
   fi
 
+  if ! check_cluster_nodes; then
+    exit 1
+  fi
+
   if ! resolve_images; then
     exit 1
   fi
@@ -232,10 +288,20 @@ cmd_deploy() {
   ko apply -f "${manifest}"
   rm -f "${manifest}"
 
+  # Clear the freshly regenerated golden base snapshot before touching users:
+  # it is not restorable against a per-user volume, so a refreshed actor must
+  # boot from scratch instead (docs/persistence_gaps.md).
+  ensure_no_golden
+
   echo "Waiting for mfpi-admin to be ready..."
   kubectl rollout status deployment/mfpi-admin -n "${NAMESPACE}" --timeout=120s
 
   refresh_existing_users
+
+  # Second pass: on a slow cluster the controller may only reach phase=Ready
+  # (and publish the golden snapshot) after the first pass timed out. This is a
+  # cheap no-op when every template's goldenSnapshot is already empty.
+  ensure_no_golden
 
   echo "mf-pi test environment deployed."
   echo "  management UI: run ./run-nginx-test.sh, then open http://localhost:59681/usermanagement/"

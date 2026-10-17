@@ -12,6 +12,7 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${MF_PI_DIGEST}|${DIGEST}|g" \
       -e "s|\${PAUSE_DIGEST}|sha256:placeholder|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|2|g" \
+      -e "s|\${MFPI_DEPLOY_REV}|0|g" \
       "$t" > /tmp/mfpi-render-check.yaml
   python3 - /tmp/mfpi-render-check.yaml "$t" <<'PYEOF'
 import sys, json, yaml
@@ -73,6 +74,21 @@ for at in atl_all:
     assert env["PI_WEB_PORT"].get("value") == "80", (at["metadata"]["name"], env)
     assert env["HOSTEXEC_MODE"].get("value") == "disabled", (at["metadata"]["name"], env)
     assert not any(k.startswith("MFPI_") for k in env), (at["metadata"]["name"], sorted(env))
+    # Durable user state: HOME and XDG_CONFIG_HOME must live on the userdata
+    # volume, because pi-web installs user-scope packages/skills under
+    # $HOME/.pi/packages; anything outside /data/pi-agent is ephemeral.
+    assert env["HOME"].get("value") == "/data/pi-agent/home", (at["metadata"]["name"], env.get("HOME"))
+    assert env["XDG_CONFIG_HOME"].get("value") == "/data/pi-agent/config", \
+        (at["metadata"]["name"], env.get("XDG_CONFIG_HOME"))
+    # Deploy revision stamp (forces a real template change for the E2E test).
+    assert env["PI_WEB_DEPLOY_REV"].get("value") == "0", (at["metadata"]["name"], env.get("PI_WEB_DEPLOY_REV"))
+    # The supervisor must create the durable dirs and seed any build-time
+    # dotfiles from the image's /data/home, plus a durable projects root.
+    assert 'mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"' in script, \
+        (at["metadata"]["name"], "durable HOME mkdir missing")
+    assert 'cp -an /data/home/. "$HOME"/' in script, (at["metadata"]["name"], "HOME seed missing")
+    assert "mkdir -p /data/pi-agent/projects" in script, (at["metadata"]["name"], "projects dir missing")
+    assert "outside the durable volume" in script, (at["metadata"]["name"], "project cwd warning missing")
     # Managed-skills pull loop: PI_WEB_SKILLS_URL set (pointing at the admin's
     # /internal/skills base) and the supervisor script contains the 10s loop.
     url = env["PI_WEB_SKILLS_URL"].get("value") or ""
@@ -155,7 +171,7 @@ assert pvc["spec"]["resources"]["requests"]["storage"] == "1Gi", pvc
 env_role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "ate-api-server-env-sources")
 assert len(env_role["rules"]) == 1, env_role
 assert env_role["rules"][0]["resourceNames"] == ["mf-pi-provider-config"], env_role
-print(name, "OK:", len(docs), "docs; sticky userdata volume wired, tiers wired, MinIO gone")
+print(name, "OK:", len(docs), "docs; sticky userdata volume wired (HOME/XDG on PV), tiers wired, MinIO gone")
 PYEOF
   rm -f /tmp/mfpi-render-check.yaml
 done

@@ -173,6 +173,19 @@ spec:
     - -c
     - |
       set -eu
+      # Put the user's home (and XDG config) on the userdata volume, which is
+      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
+      # without this redirection a user-installed skill lives on the ephemeral
+      # sandbox rootfs and disappears on every image update (delete +
+      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
+      # used only as a non-destructive seed source, so any build-time dotfiles
+      # there are preserved.
+      mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
+        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
+      fi
+
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
@@ -388,13 +401,29 @@ spec:
       # every resume and re-creates any project directory that went missing.
       (
         while true; do
+          # Durable default location for project workspaces: users who create
+          # projects there (or under $HOME, now on the volume) keep their files
+          # across an image update.
+          mkdir -p /data/pi-agent/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
+              const durableRoots = [
+                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
+                process.env.HOME || "/data/pi-agent/home",
+              ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  const durable = durableRoots.some(
+                    (root) => p.path === root || p.path.startsWith(root + "/"),
+                  );
+                  if (!durable) {
+                    console.error(
+                      "mf-pi: project cwd is outside the durable volume and will not survive an image update: " + p.path,
+                    );
+                  }
                   try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
                     console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
                   }
@@ -451,6 +480,21 @@ spec:
       value: /data/pi-agent
     - name: PI_WEB_SESSIOND_SOCKET
       value: /data/pi-agent/sessiond.sock
+    # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
+    # userdata PV so that everything pi-web installs into the user's home —
+    # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
+    # (POST /api/pi-packages/install) — survives an actor image update
+    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    - name: HOME
+      value: /data/pi-agent/home
+    - name: XDG_CONFIG_HOME
+      value: /data/pi-agent/config
+    # Deploy revision stamp (harmless to the app). deploy-test.sh renders it
+    # from MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh
+    # bumps it to force a real ActorTemplate spec change, exercising the
+    # template-replace -> refresh-existing-users -> golden-snapshot path.
+    - name: PI_WEB_DEPLOY_REV
+      value: "${MFPI_DEPLOY_REV}"
     # Base of the admin's read-only /internal/skills API. The supervisor's
     # managed-skills loop syncs administrator-provisioned skills from here.
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
@@ -504,6 +548,19 @@ spec:
     - -c
     - |
       set -eu
+      # Put the user's home (and XDG config) on the userdata volume, which is
+      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
+      # without this redirection a user-installed skill lives on the ephemeral
+      # sandbox rootfs and disappears on every image update (delete +
+      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
+      # used only as a non-destructive seed source, so any build-time dotfiles
+      # there are preserved.
+      mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
+        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
+      fi
+
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
@@ -719,13 +776,29 @@ spec:
       # every resume and re-creates any project directory that went missing.
       (
         while true; do
+          # Durable default location for project workspaces: users who create
+          # projects there (or under $HOME, now on the volume) keep their files
+          # across an image update.
+          mkdir -p /data/pi-agent/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
+              const durableRoots = [
+                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
+                process.env.HOME || "/data/pi-agent/home",
+              ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  const durable = durableRoots.some(
+                    (root) => p.path === root || p.path.startsWith(root + "/"),
+                  );
+                  if (!durable) {
+                    console.error(
+                      "mf-pi: project cwd is outside the durable volume and will not survive an image update: " + p.path,
+                    );
+                  }
                   try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
                     console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
                   }
@@ -782,6 +855,21 @@ spec:
       value: /data/pi-agent
     - name: PI_WEB_SESSIOND_SOCKET
       value: /data/pi-agent/sessiond.sock
+    # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
+    # userdata PV so that everything pi-web installs into the user's home —
+    # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
+    # (POST /api/pi-packages/install) — survives an actor image update
+    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    - name: HOME
+      value: /data/pi-agent/home
+    - name: XDG_CONFIG_HOME
+      value: /data/pi-agent/config
+    # Deploy revision stamp (harmless to the app). deploy-test.sh renders it
+    # from MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh
+    # bumps it to force a real ActorTemplate spec change, exercising the
+    # template-replace -> refresh-existing-users -> golden-snapshot path.
+    - name: PI_WEB_DEPLOY_REV
+      value: "${MFPI_DEPLOY_REV}"
     # Base of the admin's read-only /internal/skills API. The supervisor's
     # managed-skills loop syncs administrator-provisioned skills from here.
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
@@ -836,6 +924,19 @@ spec:
     - -c
     - |
       set -eu
+      # Put the user's home (and XDG config) on the userdata volume, which is
+      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
+      # without this redirection a user-installed skill lives on the ephemeral
+      # sandbox rootfs and disappears on every image update (delete +
+      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
+      # used only as a non-destructive seed source, so any build-time dotfiles
+      # there are preserved.
+      mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
+        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
+      fi
+
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
@@ -1051,13 +1152,29 @@ spec:
       # every resume and re-creates any project directory that went missing.
       (
         while true; do
+          # Durable default location for project workspaces: users who create
+          # projects there (or under $HOME, now on the volume) keep their files
+          # across an image update.
+          mkdir -p /data/pi-agent/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
+              const durableRoots = [
+                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
+                process.env.HOME || "/data/pi-agent/home",
+              ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  const durable = durableRoots.some(
+                    (root) => p.path === root || p.path.startsWith(root + "/"),
+                  );
+                  if (!durable) {
+                    console.error(
+                      "mf-pi: project cwd is outside the durable volume and will not survive an image update: " + p.path,
+                    );
+                  }
                   try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
                     console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
                   }
@@ -1114,6 +1231,21 @@ spec:
       value: /data/pi-agent
     - name: PI_WEB_SESSIOND_SOCKET
       value: /data/pi-agent/sessiond.sock
+    # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
+    # userdata PV so that everything pi-web installs into the user's home —
+    # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
+    # (POST /api/pi-packages/install) — survives an actor image update
+    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    - name: HOME
+      value: /data/pi-agent/home
+    - name: XDG_CONFIG_HOME
+      value: /data/pi-agent/config
+    # Deploy revision stamp (harmless to the app). deploy-test.sh renders it
+    # from MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh
+    # bumps it to force a real ActorTemplate spec change, exercising the
+    # template-replace -> refresh-existing-users -> golden-snapshot path.
+    - name: PI_WEB_DEPLOY_REV
+      value: "${MFPI_DEPLOY_REV}"
     # Base of the admin's read-only /internal/skills API. The supervisor's
     # managed-skills loop syncs administrator-provisioned skills from here.
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).
@@ -1168,6 +1300,19 @@ spec:
     - -c
     - |
       set -eu
+      # Put the user's home (and XDG config) on the userdata volume, which is
+      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
+      # without this redirection a user-installed skill lives on the ephemeral
+      # sandbox rootfs and disappears on every image update (delete +
+      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
+      # used only as a non-destructive seed source, so any build-time dotfiles
+      # there are preserved.
+      mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
+        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
+      fi
+
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
@@ -1383,13 +1528,29 @@ spec:
       # every resume and re-creates any project directory that went missing.
       (
         while true; do
+          # Durable default location for project workspaces: users who create
+          # projects there (or under $HOME, now on the volume) keep their files
+          # across an image update.
+          mkdir -p /data/pi-agent/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
+              const durableRoots = [
+                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
+                process.env.HOME || "/data/pi-agent/home",
+              ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
+                  const durable = durableRoots.some(
+                    (root) => p.path === root || p.path.startsWith(root + "/"),
+                  );
+                  if (!durable) {
+                    console.error(
+                      "mf-pi: project cwd is outside the durable volume and will not survive an image update: " + p.path,
+                    );
+                  }
                   try { fs.mkdirSync(p.path, { recursive: true }); } catch (e) {
                     console.error("mf-pi: could not recreate project dir " + p.path + ": " + e.message);
                   }
@@ -1446,6 +1607,21 @@ spec:
       value: /data/pi-agent
     - name: PI_WEB_SESSIOND_SOCKET
       value: /data/pi-agent/sessiond.sock
+    # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
+    # userdata PV so that everything pi-web installs into the user's home —
+    # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
+    # (POST /api/pi-packages/install) — survives an actor image update
+    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    - name: HOME
+      value: /data/pi-agent/home
+    - name: XDG_CONFIG_HOME
+      value: /data/pi-agent/config
+    # Deploy revision stamp (harmless to the app). deploy-test.sh renders it
+    # from MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh
+    # bumps it to force a real ActorTemplate spec change, exercising the
+    # template-replace -> refresh-existing-users -> golden-snapshot path.
+    - name: PI_WEB_DEPLOY_REV
+      value: "${MFPI_DEPLOY_REV}"
     # Base of the admin's read-only /internal/skills API. The supervisor's
     # managed-skills loop syncs administrator-provisioned skills from here.
     # Do NOT prefix with MFPI_ (validate-templates.sh asserts on that).

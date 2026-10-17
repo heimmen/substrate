@@ -12,6 +12,10 @@
 # user/volume, so you can log in with the user's existing password and check
 # that their data (projects, saved files, session, ...) is intact.
 #
+# The resume uses --boot: a refreshed actor must not restore the template's
+# golden base snapshot, whose mount tree belongs to the golden actor's volume
+# and is not restorable against this user's volume (docs/persistence_gaps.md).
+#
 # Usage:
 #   ./refresh-actor.sh <username>
 #   MFPI_ATESPACE=mfpi-test MFPI_TEMPLATE=ate-demo-mf-pi-test/mf-pi \
@@ -106,7 +110,7 @@ wait_for_running() {
     # `kubectl ate create actor` does not auto-resume; nudge once after a short
     # grace period and again later to cover transient scheduling races.
     if (( i == 10 || i == 60 )); then
-      "${KUBECTL_ATE_CMD[@]}" resume actor "${USER}" -a "${ATESPACE}" >/dev/null 2>&1 || true
+      "${KUBECTL_ATE_CMD[@]}" resume actor "${USER}" -a "${ATESPACE}" --boot >/dev/null 2>&1 || true
     fi
     sleep 2
     i=$((i+2))
@@ -144,7 +148,7 @@ fi
 "${KUBECTL_ATE_CMD[@]}" delete actor "${USER}" -a "${ATESPACE}" >/dev/null
 "${KUBECTL_ATE_CMD[@]}" create actor "${USER}" -a "${ATESPACE}" --template "${TEMPLATE}" >/dev/null
 # create actor does NOT auto-resume; resume explicitly so the new instance boots.
-"${KUBECTL_ATE_CMD[@]}" resume actor "${USER}" -a "${ATESPACE}" >/dev/null 2>&1 || true
+"${KUBECTL_ATE_CMD[@]}" resume actor "${USER}" -a "${ATESPACE}" --boot >/dev/null 2>&1 || true
 
 if ! wait_for_running; then
   bad "actor '${USER}' did not reach STATUS_RUNNING after recreate"

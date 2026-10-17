@@ -26,6 +26,12 @@
 #   against a freshly provisioned, empty user volume. Restoring it is reported
 #   as success for existing actors while leaving their app container down.
 #
+# NOTE (2026): deploy.sh / deploy-test.sh now clear the golden base snapshot
+#   automatically after every apply (see ./ensure-no-golden.sh), and actor
+#   refreshes resume with --boot, so a fresh deployment should not need this
+#   script. It remains as the emergency path for older deployments and for
+#   actors that were already wedged before the fix. See docs/persistence_gaps.md.
+#
 # RECOVERY (what this script does)
 #   1. Clear status.goldenSnapshot on every ActorTemplate in the namespace.
 #      The controller treats phase=Ready as a no-op, so nothing regenerates it,

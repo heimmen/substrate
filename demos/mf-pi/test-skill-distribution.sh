@@ -128,7 +128,7 @@ wait_for_running() {
     status="$(actor_status)"
     if [[ "$status" == "STATUS_RUNNING" ]]; then return 0; fi
     if (( i == 10 || i == 60 )); then
-      "${KUBECTL_ATE_CMD[@]}" resume actor "$TEST_USER" -a "$ATESPACE" >/dev/null 2>&1 || true
+      "${KUBECTL_ATE_CMD[@]}" resume actor "$TEST_USER" -a "$ATESPACE" --boot >/dev/null 2>&1 || true
     fi
     sleep 2; i=$((i+2))
   done

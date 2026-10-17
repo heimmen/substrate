@@ -7,7 +7,11 @@
 # /var/lib/ateom-gvisor/stickyvolumes/<prefix>-<actor>-userdata and mounts it
 # at /data/pi-agent inside the actor. That directory holds everything pi-web
 # persists for the user: auth.json (provider credentials), projects.json,
-# sessions/ (chat history), skills/, settings.json, ...
+# sessions/ (chat history), skills/, settings.json, plus the redirected
+# $HOME in home/ (including user-installed Pi packages/skills under
+# home/.pi/packages) and $XDG_CONFIG_HOME in config/. Anything outside
+# /data/pi-agent is ephemeral sandbox overlay and does not survive an actor
+# image update (see docs/persistence_gaps.md).
 #
 # Usage:
 #   ./list-pvs.sh [--test] [--all] [--detail] [--show-auth] [user ...]

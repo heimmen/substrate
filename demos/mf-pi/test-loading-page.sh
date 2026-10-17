@@ -214,7 +214,7 @@ while (( SECONDS < deadline )); do
   if [[ "$code" == "200" ]] && grep -qF "$APP_MARKER" "$BODY"; then app_ok=1; break; fi
   # Nudge a resume in case the gate's background attempt failed (e.g. the pool
   # was momentarily full).
-  "${KUBECTL_ATE_CMD[@]}" resume actor "$TEST_USER" -a "$ATESPACE" >/dev/null 2>&1 || true
+  "${KUBECTL_ATE_CMD[@]}" resume actor "$TEST_USER" -a "$ATESPACE" --boot >/dev/null 2>&1 || true
   sleep 3
 done
 if (( app_ok )); then

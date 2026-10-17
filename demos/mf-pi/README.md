@@ -445,13 +445,17 @@ tar/zip 解包拒绝 `../` 与绝对路径条目（zip-slip），单文件大小
 64 MiB。管理端 `GET /internal/skills/*` 不做鉴权（actor 侧 env 冻结进 golden 快
 照，token 轮换对已恢复的 actor 不生效），如需要可用 NetworkPolicy 限制来源。
 
-### 用户数据持久化（重置后自动恢复）
+### 用户数据持久化（重置 / 镜像更新后自动恢复）
 
 每个用户的数据（`/data/pi-agent` 下的 `auth.json`、skills、`sessions/`、
-`models.json`、`settings.json`）保存在一个 **sticky 的 per-actor 持久卷**上
+`models.json`、`settings.json`，以及 `$HOME` 下用户自己安装的 Pi 包
+`$HOME/.pi/packages`）保存在一个 **sticky 的 per-actor 持久卷**上
 （ActorTemplate 声明的 `externalVolumeTemplate` 卷 `userdata`，挂载到
-`/data/pi-agent`），使「删除并重建」式的实例重置（例如刷新 actor 镜像后重新部
-署）**不再丢失用户数据**。
+`/data/pi-agent`；`HOME` 与 `XDG_CONFIG_HOME` 也指向该卷），使「删除并重建」式的
+实例重置（包括**更新 actor 镜像**后重新部署）**不再丢失用户数据**。
+
+> 根因分析（为什么以前会丢、为什么这样绕开平台的 golden 快照）见
+> [`docs/persistence_gaps.md`](./docs/persistence_gaps.md)。
 
 #### PV 如何挂载到 actor
 
@@ -465,32 +469,53 @@ tar/zip 解包拒绝 `../` 与绝对路径条目（zip-slip），单文件大小
 - actor 启动 / 恢复时，节点侧（ateom）把 backing 目录 symlink 到沙箱挂载点。
   因此 `/data/pi-agent` **就是**持久卷本身：actor 直接读写，无需 supervisor 同
   步、broker 或 token，actor 内不持有任何存储凭据。
+- 模板把 `HOME` 指到 `/data/pi-agent/home`、`XDG_CONFIG_HOME` 指到
+  `/data/pi-agent/config`：pi-web 把**用户自己安装**的 Pi 包/skill 放在
+  `$HOME/.pi/packages`，这样它们也在 PV 上，镜像更新不会丢。supervisor 启动时
+  会用镜像里的 `/data/home` 做一次非破坏播种（`cp -an`）。
+
+> [!WARNING]
+> **PV 是 worker 节点本地目录（不是 CSI/网络存储），没有卷亲和。** 多节点集群下
+> 把 actor 恢复到别的节点会得到一个空卷；节点被替换 / `kind delete cluster` 也会
+> 丢数据。因此 `deploy.sh` / `deploy-test.sh` 默认**拒绝多节点**部署（可用
+> `MFPI_ALLOW_MULTI_NODE=1` 覆盖，风险自担）。
 
 #### 哪些数据会自动恢复
 
-| 数据 | 存放位置 | 删除重建（refresh）后 |
+| 数据 | 存放位置 | 删除重建 / **镜像更新**后 |
 |---|---|---|
 | 会话历史、`auth.json`、`settings.json`、models 等 | PV（`/data/pi-agent`） | ✅ 原样恢复 |
+| `$HOME`（含用户安装的 `.pi/packages`、`.npm` 等） | PV（`/data/pi-agent/home`） | ✅ 原样恢复 |
+| `$XDG_CONFIG_HOME` | PV（`/data/pi-agent/config`） | ✅ 原样恢复 |
 | skills（镜像内置） | 镜像 `/opt/pi-web/skills` → supervisor 恢复循环补装 | ✅ 自动补齐 |
 | project 工作目录（PV 外，如 `/dtom2`） | 沙箱临时层 | ⚠️ 目录自动重建（历史内容不恢复） |
 
 后两项由 actor supervisor 内的两个**后台恢复循环**（每 10s）处理：
 
 - **skills 恢复**：镜像内置 skills 由 `pi-web-bootstrap` 只在**首次启动**时装
-  入；而新用户的沙箱是从 golden base 快照**恢复**的（bootstrap 已在 golden
-  actor 里跑过、装到了 golden 卷上），不会再执行，新用户会「没有 skill」。
-  supervisor 循环按 bootstrap 相同的**不覆盖**语义，把缺失的 skill 从镜像补装
-  到用户 PV；用户已有的 skill（可能被修改）一律不动。
+  入；而 actor 恢复自快照（挂起 checkpoint）时 bootstrap 不会重跑，可能「没有
+  skill」。supervisor 循环按 bootstrap 相同的**不覆盖**语义，把缺失的 skill 从
+  镜像补装到用户 PV；用户已有的 skill（可能被修改）一律不动。
 - **project 目录恢复**：会话文件（PV 上）记录了工作目录（如 `/dtom2`），而该目
   录本身若建在 PV 外，刷新后即消失，pi agent 会拒绝打开会话（"Stored session
   working directory does not exist"）。supervisor 循环读取 PV 上持久化的
-  `projects.json`，为每个 project 路径 `mkdir -p` 重建空目录。
+  `projects.json`，为每个 project 路径 `mkdir -p` 重建空目录；cwd 落在持久面之外
+  时会打 warning。**新建 project 时请把路径放在 `$HOME` 或 `/data/pi-agent` 下。**
 
 > [!NOTE]
-> 为什么必须是 supervisor 内的**后台循环**而不是一次性启动步骤：refresh 后沙箱
-> 是从快照（golden base 或挂起 checkpoint）**恢复**的，恢复的进程从快照断点继
-> 续运行，启动期的一次性步骤永远不会重跑；循环进程被恢复后会继续运行，每次
+> 为什么必须是 supervisor 内的**后台循环**而不是一次性启动步骤：恢复时进程从快照
+> 断点继续运行，启动期的一次性步骤永远不会重跑；循环进程被恢复后会继续运行，每次
 > resume 后数秒内即完成重建。
+
+> [!IMPORTANT]
+> **golden base 快照在 mf-pi 中不可用。** 平台会在每个 ActorTemplate 首次部署 / spec
+> 变更时生成一个 golden 快照，它记录的是 **golden actor 自己那份卷**的 9p 挂载树，
+> 对每用户卷不可恢复（新用户空卷 → `failed to walk "skills"` → actor 卡
+> `STATUS_RESUMING`）。因此 `deploy.sh` / `deploy-test.sh` 在 apply 后会自动执行
+> `ensure-no-golden.sh` 清空 `status.goldenSnapshot`，且 refresh / 各 `test-*.sh` 的
+> resume 都带 `--boot`。代价：镜像更新后每个用户的**首次** resume 是冷启动
+> (~25–40s)，由「Agent 正在载入」提示页覆盖；之后 suspend/resume 仍走 actor 自己的
+> 快照，速度快。旧部署或应急仍可用 `./recover-actors.sh -y`。
 
 #### 彻底删除（purge）
 
@@ -512,12 +537,17 @@ kubectl ate purge volumes <user> -a <atespace> -t <templateNS>/<templateName>
 #### 检查与验证工具
 
 - `./exec-actor.sh <user> [--test]`：在节点上打开该用户 PV 的 shell（以
-  `data/pi-agent/` 视图呈现，即 actor 内 `/data/pi-agent` 的内容）。
+  `data/pi-agent/` 视图呈现，即 actor 内 `/data/pi-agent` 的内容，含 `home/`）。
 - `./list-pvs.sh [--test] [--detail] [--show-auth]`：列出所有用户 PV 及数据概
   况（actor 状态、大小、mtime、文件数、顶层内容；`--show-auth` 会输出
   `auth.json`，含 API key，谨慎使用）。
 - `./test-userdata-persistence.sh`：端到端验证——写入哨兵文件 → refresh → 读
-  回，并用 `runsc exec` 校验刷新后 actor 内 `/data/pi-agent` 仍挂载且哨兵可读。
+  回，并用 `runsc exec` 校验刷新后 actor 内 `/data/pi-agent` 仍挂载、哨兵可读、
+  `HOME` 在 PV 上。
+- `./test-image-update-persistence.sh`：**镜像更新**端到端验证——写入用户 skill、
+  `$HOME/.pi/packages`、project 文件三种哨兵 → `MFPI_DEPLOY_REV=<ts>` 触发真实
+  模板变更 redeploy → 断言全部存活、actor 不卡 `STATUS_RESUMING`、无 golden 快
+  照残留、新建用户（空卷）也能正常 resume。生产环境加 `--prod`。
 
 **重置一个用户并验证自动恢复**：
 
@@ -528,8 +558,8 @@ kubectl ate resume actor alice -a mfpi   # 恢复 → 自动挂回同一持久�
 ```
 
 恢复后，alice 的专属 provider key（`auth.json`）、已安装的 skills 与会话历史会自动
-出现，**无需**重新驱动注入。完整设计见 `docs/save_userdata_pv.md` 与
-`docs/perUserDataVolume.md`。
+出现，**无需**重新驱动注入。完整设计见 `docs/save_userdata_pv.md`、
+`docs/perUserDataVolume.md`，根因与限制见 `docs/persistence_gaps.md`。
 
 ### 容量配置
 
@@ -641,9 +671,9 @@ curl -s -u alice:<用户密码> -H 'Accept: text/html' http://localhost:58681/al
 
 ### 验证持久化
 
-本演示不挂载 `durableDir` 卷，会话历史与 skills 随容器的文件系统一起保存在
-Full 快照中（session JSONL 位于 `/data/pi-agent/sessions/`）。确认它在挂起/恢复
-后仍然存在：
+会话历史、skills、`auth.json`、`projects.json` 以及 `$HOME` 下用户自己安装的 Pi 包
+都在 sticky `userdata` 卷上（actor 内路径 `/data/pi-agent`，`$HOME` 指向其中的
+`home/`）。挂起/恢复走 Full 快照，数据自然也保留。确认它在挂起/恢复后仍然存在：
 
 ```bash
 # 在 UI 中为 alice 建立会话，然后挂起：
@@ -659,13 +689,17 @@ kubectl ate resume actor alice -a mfpi
 > 「删除并重建」式持久化的完整端到端验证可直接运行
 > `./test-userdata-persistence.sh`（测试环境）：自动创建测试用户、写入哨兵文件、
 > refresh、读回并断言，另用 `runsc exec` 校验刷新后 actor 内 `/data/pi-agent`
-> 仍挂载且哨兵可读，无需手动操作。
+> 仍挂载、哨兵可读、`HOME` 在 PV 上，无需手动操作。
+>
+> **镜像更新**（换 digest / 改模板）的持久化验证用
+> `./test-image-update-persistence.sh`：它会真的做一次 `MFPI_DEPLOY_REV=<ts>`
+> redeploy，并断言用户安装的 skill、`$HOME/.pi/packages` 与 project 文件都还在。
 
 > [!NOTE]
-> 挂起 / 恢复（Full 快照）只能保住**同一实例**的会话。若想验证「**删除并重建**
-> 同一用户」后数据仍在，见上文
-> [用户数据持久化](#用户数据持久化重置后自动恢复)：数据保存在 sticky 持久卷上，
-> 重建后自动重新挂载。
+> 挂起 / 恢复（Full 快照）只能保住**同一实例**的会话。若想验证「**删除并重建**」
+> 或「**镜像更新**」后数据仍在，见上文
+> [用户数据持久化](#用户数据持久化重置--镜像更新后自动恢复)：数据保存在 sticky
+> 持久卷上，重建后自动重新挂载；project 路径请放在 `$HOME` 或 `/data/pi-agent` 下。
 
 ## 开发：运行 admin 服务单元测试
 
@@ -756,6 +790,11 @@ go test -cover ./...
 > 上 `58681` 与 `59681` 共享 `mfpi_user` cookie）；worker 按标签调度且匹配范围是整
 > 个集群；路由器按 Host 头的 atespace 路由。因此测试环境必须使用不同的 atespace、
 > cookie 名、worker 标签和快照路径，才能与生产互不干扰。
+>
+> **持久化相关开关**（两套部署共用）：
+> `MFPI_KEEP_GOLDEN=1` 保留 controller 生成的 golden base 快照（不推荐，见上文）；
+> `MFPI_ALLOW_MULTI_NODE=1` 允许在 >1 节点集群部署（sticky 卷是节点本地，风险自担）；
+> `MFPI_DEPLOY_REV` 部署版本戳（渲染进 `PI_WEB_DEPLOY_REV`，用于强制一次模板变更）。
 
 ### 部署
 
@@ -803,6 +842,8 @@ cd demos/mf-pi
 ### 故障恢复脚本
 
 ```bash
+./ensure-no-golden.sh                 # 清空各模板的 golden base 快照（deploy 自动调用；
+                                      #  --test / --dry-run / MFPI_GOLDEN_TIMEOUT）
 ./recover-actors.sh                   # 一次性修复「所有 actor 连不上」的 golden base 故障（生产）
 ./recover-actors.sh --dry-run         # 只打印计划，不做任何改动
 ./recover-actors.sh --test            # 对测试环境执行（自动切到 mfpi-test/59880）
@@ -817,6 +858,7 @@ cd demos/mf-pi
 ./test-loading-page.sh                # 「Agent 正在载入」提示页 + 就绪门（见上文）
 ./test-skill-distribution.sh          # 管理员统一安装 Skill 的分发全流程
 ./test-userdata-persistence.sh        # 用户数据持久化（删除重建后自动恢复）
+./test-image-update-persistence.sh    # 镜像更新（模板变更）后用户 skill/文件仍在
 ```
 
 > [!NOTE]
@@ -827,6 +869,13 @@ cd demos/mf-pi
 ## 故障排查
 
 ### 所有用户都连不上（golden base 快照损坏）→ `./recover-actors.sh`
+
+> [!NOTE]
+> **现在通常不需要手工执行本脚本。** `deploy.sh` / `deploy-test.sh` 在 apply 后会
+> 自动调用 `ensure-no-golden.sh` 清空各模板的 `status.goldenSnapshot`（refresh 后
+> 还会再补一次），`refresh-actor*.sh` 与各 `test-*.sh` 的 resume 也都带 `--boot`。
+> 本脚本保留给**旧部署**、手工恢复，或 `MFPI_KEEP_GOLDEN=1` 等特殊情况。
+> 根因见 [`docs/persistence_gaps.md`](./docs/persistence_gaps.md)。
 
 **现象**：重部署（尤其是**改了容器名/镜像**，如 `pi-web → mf-agent`）之后，
 **所有**用户打开 `/<user>/` 都连不上：
@@ -870,8 +919,9 @@ cd demos/mf-pi
 **代价**：在平台把 golden base 修好之前，每个 actor 的**首次**恢复是冷启动
 （~25–40s，浏览器侧由「Agent 正在载入」提示页覆盖），之后的挂起/恢复仍走 actor 自己
 的快照，依然很快（实测 6s）。注意：`phase=Ready` 是 no-op，**不会自动重新生成**
-golden 快照；要重新生成需把 `status.phase` 置回 `Initial`（会再次产生坏快照，建议等
-平台修复后再做）。
+golden 快照；要重新生成需把 `status.phase` 置回 `Initial`（会再次产生坏快照，不建议）。
+`deploy.sh` / `deploy-test.sh` 已内置这一步（`ensure-no-golden.sh`），正常情况下
+无需手工处理；`MFPI_KEEP_GOLDEN=1` 可关闭自动清理，但不推荐。
 
 > [!NOTE]
 > 需要 router 的 port-forward 才能判断 actor「是否真的在服务」。请先
