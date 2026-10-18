@@ -36,14 +36,40 @@ demo-mf-pi_cmdline() {
 # Resolve the digest-pinned references for the mf-agent (pi-web) workload and
 # pause images already pushed to ${KO_DOCKER_REPO} (localhost:5001 for kind).
 # The workload images are shared with the test environment.
+#
+# Build the workload image from the miaofang-agent SOURCE so every deploy picks
+# up the latest repo changes (build-image.sh --from-source). Set
+# MFPI_SKIP_WORKLOAD_BUILD=1 to reuse an already-pushed image (offline/CI), and
+# MFPI_WORKLOAD_SOURCE to point at a different checkout.
+build_workload_image() {
+  local repo="${KO_DOCKER_REPO}"
+  if [[ "${MFPI_SKIP_WORKLOAD_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
+  local src="${MFPI_WORKLOAD_SOURCE:-/home/liuchong/git/miaofang-agent}"
+  if [[ ! -d "${src}/docker" ]]; then
+    echo "workload image source not found at '${src}'" >&2
+    echo "  set MFPI_WORKLOAD_SOURCE to the miaofang-agent checkout, or" >&2
+    echo "  set MFPI_SKIP_WORKLOAD_BUILD=1 to use the already-pushed mf-agent image" >&2
+    return 1
+  fi
+  echo "building workload image from ${src} (latest source) ..."
+  ( cd "${src}" && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source ) \
+    || { echo "workload image build failed (from ${src})" >&2; return 1; }
+  echo "pushing mf-agent:latest to ${repo} ..."
+  docker tag mf-agent:latest "${repo}/mf-agent:latest"
+  docker push "${repo}/mf-agent:latest"
+}
+
 demo-mf-pi_images() {
   local repo="${KO_DOCKER_REPO}"
   local piweb pause
+  build_workload_image || return 1
   piweb="$(docker inspect "${repo}/mf-agent:latest" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
   pause="$(docker inspect "${repo}/pause:3.10.2" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
   if [[ -z "${piweb}" || -z "${pause}" ]]; then
-    echo "mf-agent (pi-web) or pause image not found in ${repo}; push them first:" >&2
-    echo "  cd /home/liuchong/git/pi-web && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh" >&2
+    echo "mf-agent or pause image not present in ${repo} after build; push them first:" >&2
+    echo "  cd /home/liuchong/git/miaofang-agent && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source" >&2
     echo "  docker tag mf-agent:latest ${repo}/mf-agent:latest && docker push ${repo}/mf-agent:latest" >&2
     echo "  docker tag rancher/mirrored-pause:3.10.2 ${repo}/pause:3.10.2 && docker push ${repo}/pause:3.10.2" >&2
     return 1

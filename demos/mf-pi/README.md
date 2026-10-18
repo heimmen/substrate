@@ -17,9 +17,12 @@ supervisor 同时运行两者（与 pi-web 仓库 `docker/scripts/run-container.
 
 - 已安装 Agent Substrate 的 k8s 集群
   （`./hack/install-ate.sh --deploy-ate-system`）。
-- 本地已构建的 pi-web 镜像 `mf-agent:latest`（由 pi-web 仓库
-  `docker/scripts/build-image.sh` 构建，本地 tag 也可用 `pi-web:local`）。该镜像
-  必须能被集群节点访问。
+- 工作负载源码 `miaofang-agent`（含 `docker/scripts/build-image.sh`，默认
+  `/home/liuchong/git/miaofang-agent`，可用 `MFPI_WORKLOAD_SOURCE` 指定）。部署脚本
+  会在每次部署时**用 `--from-source` 从该仓库构建最新代码**并推送到本地仓库，因此
+  不需要你手动先构建镜像。
+- `ko`、`docker`、`npm`/`node`（构建工作负载镜像需要 npm）在 PATH 上；**pause 镜像**
+  仍需手动推送到本地仓库（见下）。
 
 > [!NOTE]
 > **本地集群不需要真实的 GCS bucket。** 在 kind/k3s 上，快照存储在集群内部的对象
@@ -28,22 +31,28 @@ supervisor 同时运行两者（与 pi-web 仓库 `docker/scripts/run-container.
 > （`gs://${BUCKET_NAME}`）仅在 GKE 上使用。
 
 > [!IMPORTANT]
-> 在本地集群上，节点无法访问外部镜像仓库，因此 pi-web 镜像**和** pause 镜像都必
-> 须推送到本地仓库（`localhost:5001`）。部署脚本在镜像就位后会自动解析其摘要引
-> 用。
+> **部署会自动构建并推送最新工作负载镜像。** `deploy.sh` / `deploy-test.sh` /
+> `install-demo-mf-pi*.sh` 每次运行都会 `cd ${MFPI_WORKLOAD_SOURCE} && PI_WEB_IMAGE=
+> mf-agent:latest docker/scripts/build-image.sh --from-source`（打包仓库自身 `src/`
+> 而非发布的 npm 包），再 tag+push 到 `${KO_DOCKER_REPO}/mf-agent:latest` 并解析其
+> digest 固定引用，所以**总能抓到 `miaofang-agent` 的最新改动**。若源码目录缺失或
+> 构建失败，部署会明确报错中止（不会默默用旧镜像）。
+>
+> 需要复用已有镜像而不重新构建时（离线/CI），设置 `MFPI_SKIP_WORKLOAD_BUILD=1`；
+> 源码目录不在默认位置时设置 `MFPI_WORKLOAD_SOURCE=<checkout>`。
 
-### 1. 将镜像推送到集群的镜像仓库
+### 1. 推送 pause 镜像（工作负载镜像由部署脚本自动构建）
 
-在 kind 集群上（`KO_DOCKER_REPO=localhost:5001`），先将镜像本地化：
+工作负载镜像 `mf-agent` 由部署脚本从 `miaofang-agent` 源码自动构建+推送，无需手动。
+**pause 镜像** 仍需手动推送一次（`.3.10.2`；本地 kind 集群的节点无法访问外部仓库）：
 
 ```bash
-# pi-web 工作负载镜像（由 pi-web 仓库的 docker/scripts/build-image.sh 构建）
-docker tag mf-agent:latest localhost:5001/mf-agent:latest
-docker push localhost:5001/mf-agent:latest
-
 # pause 镜像（3.10.2；可使用任意可访问的镜像源，例如 rancher/mirrored-pause）
 docker tag rancher/mirrored-pause:3.10.2 localhost:5001/pause:3.10.2
 docker push localhost:5001/pause:3.10.2
+
+# （可选）若想跳过部署时的自动构建、改为复用仓库里已有的 mf-agent 镜像：
+# export MFPI_SKIP_WORKLOAD_BUILD=1
 ```
 
 > [!IMPORTANT]

@@ -214,17 +214,29 @@ pi-web 前端全相对路径，nginx 只需：
 
 ## 镜像前置条件
 
-```bash
-# 1) 构建 pi-web 镜像并推到本地 registry（kind 离线环境）
-cd /home/liuchong/git/pi-web
-PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh
-docker tag mf-agent:latest localhost:5001/mf-agent:latest
-docker push localhost:5001/mf-agent:latest
+**工作负载镜像（`mf-agent`）由部署脚本自动构建**：`deploy.sh` / `deploy-test.sh` /
+`install-demo-mf-pi*.sh` 每次都会 `cd ${MFPI_WORKLOAD_SOURCE}`（默认
+`/home/liuchong/git/miaofang-agent`）并运行
+`PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source`
+（`--from-source` 打包仓库自身 `src/` 而非发布的 npm 包），再 tag+push 到
+`${KO_DOCKER_REPO}/mf-agent:latest` 并解析其 digest 固定引用，所以**总能抓取
+`miaofang-agent` 的最新改动**。源码目录缺失或构建失败会明确报错中止。
 
-# 2) pause 镜像（与 mf-cc 共用）
+- 复用已有镜像而不重新构建（离线/CI）：`export MFPI_SKIP_WORKLOAD_BUILD=1`
+- 源码不在默认位置：`export MFPI_WORKLOAD_SOURCE=<checkout>`
+
+**pause 镜像** 仍需手动推送一次（kind 离线集群节点无法访问外部仓库）：
+
+```bash
+# pause 镜像（与 mf-cc 共用；3.10.2，可用任意可访问镜像源）
 docker tag rancher/mirrored-pause:3.10.2 localhost:5001/pause:3.10.2
 docker push localhost:5001/pause:3.10.2
 ```
+
+（需要手动构建工作负载镜像时：`cd /home/liuchong/git/miaofang-agent &&
+PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source &&
+docker tag mf-agent:latest localhost:5001/mf-agent:latest && docker push
+localhost:5001/mf-agent:latest`。）
 
 ## 部署与验证
 
