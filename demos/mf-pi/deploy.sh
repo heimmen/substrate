@@ -23,9 +23,18 @@
 #                          per-user volumes — docs/persistence_gaps.md)
 #   MFPI_ALLOW_MULTI_NODE (set 1 to allow a cluster with more than one node;
 #                          sticky userdata volumes are node-local)
+#   MFPI_SKIP_NGINX      (set 1 to skip rebuilding/recreating the mfpi-nginx
+#                          gateway on 58681 after the cluster deploy)
 #
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
+#
+# Note: deploy.sh ONLY deploys the cluster-side resources (ActorTemplates +
+# mfpi-admin). The mfpi-nginx reverse proxy (listening on 58681) is a plain
+# host Docker container with --network host, managed by build-image.sh /
+# run-nginx.sh — NOT a cluster resource. To keep the gateway in sync with
+# nginx.conf, cmd_deploy calls refresh_nginx_gateway() at the end (set
+# MFPI_SKIP_NGINX=1 to opt out).
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -270,6 +279,82 @@ refresh_existing_users() {
   fi
 }
 
+# refresh_nginx_gateway rebuilds the mfpi-nginx image and recreates the
+# 58681 gateway container so a running proxy picks up the latest nginx.conf.
+#
+# Unlike the cluster resources above, mfpi-nginx is a plain host Docker
+# container (--network host) managed by build-image.sh / run-nginx.sh — it is
+# NOT part of the manifest applied by ko, so a redeploy would otherwise leave
+# a stale proxy running. This function rebuilds the image from nginx.conf and
+# recreates the container in place, preserving an existing htpasswd bind mount
+# and leaving the port-forward tunnels (58680/58682) untouched. It is skipped
+# entirely with MFPI_SKIP_NGINX=1 (e.g. CI where nginx isn't managed here).
+refresh_nginx_gateway() {
+  if [[ "${MFPI_SKIP_NGINX:-0}" == "1" ]]; then
+    echo "MFPI_SKIP_NGINX=1; skipping the mfpi-nginx gateway refresh."
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "WARNING: docker not found; skipping mfpi-nginx gateway refresh." >&2
+    echo "  The 58681 proxy still runs its old config; rebuild/recreate it" >&2
+    echo "  separately: ./build-image.sh && docker rm -f mfpi-nginx && ./run-nginx.sh" >&2
+    return 0
+  fi
+
+  echo "Refreshing mfpi-nginx gateway (rebuild image + recreate 58681 container)..."
+  if ! ./build-image.sh; then
+    echo "WARNING: mfpi-nginx image build failed; leaving the running proxy untouched." >&2
+    return 0
+  fi
+
+  # Recreate the container with the same runtime shape as run-nginx.sh, but
+  # preserve an existing htpasswd bind mount (so the admin password set by the
+  # last run-nginx.sh is not reset) and never touch the healthy port-forwards.
+  local bind_specs=() host_network=
+  # Use --type container: a bare `docker inspect mfpi-nginx` also matches the
+  # IMAGE named mfpi-nginx, so it returns 0 (success) even when the container
+  # is absent, which would wrongly take the "reuse existing" branch and drop
+  # the bind/network flags.
+  if docker inspect --type container mfpi-nginx >/dev/null 2>&1; then
+    # Reuse the running container's binds (e.g. /tmp/mfpi-admin.htpasswd ->
+    # /etc/nginx/mfpi-admin.htpasswd:ro) and its host-network mode.
+    mapfile -t bind_specs < <(docker inspect --type container mfpi-nginx \
+      --format '{{range .HostConfig.Binds}}{{.}}{{"\n"}}{{end}}' 2>/dev/null)
+    host_network="$(docker inspect --type container mfpi-nginx --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)"
+    docker rm -f mfpi-nginx >/dev/null 2>&1 || true
+  else
+    # No existing container: run with the same default credentials run-nginx.sh
+    # would use (admin / mf@pass2026), generated into a stable path.
+    local htpasswd="${TMPDIR:-/tmp}/mfpi-admin.htpasswd"
+    if [[ ! -f "${htpasswd}" ]]; then
+      printf '%s:%s\n' "${ADMIN_USER:-admin}" \
+        "$(openssl passwd -apr1 "${ADMIN_PASSWORD:-mf@pass2026}")" > "${htpasswd}"
+      chmod 644 "${htpasswd}"
+    fi
+    bind_specs=("${htpasswd}:/etc/nginx/mfpi-admin.htpasswd:ro")
+    host_network="host"
+  fi
+
+  local args=(-d --name mfpi-nginx)
+  # Each bind spec needs its own -v flag.
+  local spec
+  for spec in "${bind_specs[@]}"; do
+    [[ -n "${spec}" ]] && args+=("-v" "${spec}")
+  done
+  if [[ "${host_network}" == "host" ]]; then
+    # --network host ignores -p; keep -p only for the non-host fallback.
+    args+=("--network" "host")
+  else
+    args+=("-p" "58681:58681")
+  fi
+  args+=("mfpi-nginx:latest")
+
+  docker run "${args[@]}"
+  echo "mfpi-nginx gateway refreshed:"
+  echo "  proxy:      http://localhost:58681/<username>"
+  echo "  management: http://localhost:58681/usermanagement/"
+}
+
 cmd_deploy() {
   for v in DEEPSEEK_API_KEY BUCKET_NAME KO_DOCKER_REPO; do
     if [[ -z "${!v:-}" ]]; then
@@ -323,8 +408,14 @@ cmd_deploy() {
   # cheap no-op when every template's goldenSnapshot is already empty.
   ensure_no_golden
 
+  # Rebuild the mfpi-nginx image and recreate the 58681 gateway from the
+  # current nginx.conf (the proxy is a host container, not a cluster resource,
+  # so it is not refreshed by the ko apply above). Set MFPI_SKIP_NGINX=1 to skip.
+  refresh_nginx_gateway
+
   echo "mf-pi demo deployed."
-  echo "  management UI: run ./run-nginx.sh, then open http://localhost:58681/usermanagement/"
+  echo "  management UI: http://localhost:58681/usermanagement/ (see run-nginx.sh for credentials)"
+  echo "  gateway refreshed from nginx.conf on 58681 (unless MFPI_SKIP_NGINX=1)"
 }
 
 usage() {

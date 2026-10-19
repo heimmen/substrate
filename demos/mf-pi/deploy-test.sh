@@ -27,9 +27,20 @@
 #                          per-user volumes — docs/persistence_gaps.md)
 #   MFPI_ALLOW_MULTI_NODE (set 1 to allow a cluster with more than one node;
 #                          sticky userdata volumes are node-local)
+#   MFPI_SKIP_NGINX      (set 1 to skip recreating the mfpi-nginx-test gateway
+#                          on 59681 after the cluster deploy)
 #
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
+#
+# Note: deploy-test.sh ONLY deploys the cluster-side resources (ActorTemplates
+# + mfpi-admin) into ate-demo-mf-pi-test. The test gateway (mfpi-nginx-test on
+# 59681) is a plain host Docker container with --network host, managed by
+# run-nginx-test.sh — NOT a cluster resource. Unlike the production gateway it
+# does NOT bake the config into an image; it bind-mounts nginx-test.conf at
+# runtime (run-nginx-test.sh), so "refreshing" it is just recreating the
+# container so it re-reads the current nginx-test.conf. cmd_deploy calls
+# refresh_nginx_test_gateway() at the end (set MFPI_SKIP_NGINX=1 to opt out).
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -277,6 +288,78 @@ refresh_existing_users() {
   fi
 }
 
+# refresh_nginx_test_gateway recreates the 59681 test gateway container so it
+# re-reads the latest nginx-test.conf.
+#
+# Unlike deploy.sh, the TEST gateway does not bake a config into an image: it
+# uses the same mfpi-nginx image as production but bind-mounts nginx-test.conf
+# over /etc/nginx/conf.d/default.conf at runtime (run-nginx-test.sh). So no
+# image rebuild is needed here — "refreshing" means recreating the
+# mfpi-nginx-test container with the current nginx-test.conf and htpasswd. An
+# existing container's binds (htpasswd + nginx-test.conf) are preserved so the
+# admin password set by the last run-nginx-test.sh is not reset, and the
+# 59880/59882 port-forward tunnels are left untouched. Skipped with
+# MFPI_SKIP_NGINX=1 (e.g. CI where nginx isn't managed here).
+refresh_nginx_test_gateway() {
+  if [[ "${MFPI_SKIP_NGINX:-0}" == "1" ]]; then
+    echo "MFPI_SKIP_NGINX=1; skipping the mfpi-nginx-test gateway refresh."
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "WARNING: docker not found; skipping mfpi-nginx-test gateway refresh." >&2
+    echo "  The 59681 proxy still runs its old config; recreate it separately:" >&2
+    echo "  ./run-nginx-test.sh" >&2
+    return 0
+  fi
+
+  echo "Refreshing mfpi-nginx-test gateway (recreate 59681 container from nginx-test.conf)..."
+  local name="mfpi-nginx-test"
+  local bind_specs=() host_network=
+  # Use --type container: a bare `docker inspect mfpi-nginx-test` also matches
+  # the mfpi-nginx IMAGE (shared with prod), returning 0 even when the test
+  # container is absent, which would wrongly drop the binds/network.
+  if docker inspect --type container "${name}" >/dev/null 2>&1; then
+    # Reuse the running container's binds (/tmp/mfpi-admin-test.htpasswd ->
+    # htpasswd, PWD/nginx-test.conf -> default.conf) and host-network mode.
+    mapfile -t bind_specs < <(docker inspect --type container "${name}" \
+      --format '{{range .HostConfig.Binds}}{{.}}{{"\n"}}{{end}}' 2>/dev/null)
+    host_network="$(docker inspect --type container "${name}" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)"
+    docker rm -f "${name}" >/dev/null 2>&1 || true
+  else
+    # No existing container: mirror run-nginx-test.sh defaults (distinct
+    # test htpasswd path) so the gateway comes up the same way it would via
+    # that script.
+    local htpasswd="${TMPDIR:-/tmp}/mfpi-admin-test.htpasswd"
+    if [[ ! -f "${htpasswd}" ]]; then
+      printf '%s:%s\n' "${ADMIN_USER:-admin}" \
+        "$(openssl passwd -apr1 "${ADMIN_PASSWORD:-mf@pass2026}")" > "${htpasswd}"
+      chmod 644 "${htpasswd}"
+    fi
+    bind_specs=(
+      "${htpasswd}:/etc/nginx/mfpi-admin.htpasswd:ro"
+      "$(pwd)/nginx-test.conf:/etc/nginx/conf.d/default.conf:ro"
+    )
+    host_network="host"
+  fi
+
+  local args=(-d --name "${name}")
+  local spec
+  for spec in "${bind_specs[@]}"; do
+    [[ -n "${spec}" ]] && args+=("-v" "${spec}")
+  done
+  if [[ "${host_network}" == "host" ]]; then
+    args+=("--network" "host")
+  else
+    args+=("-p" "59681:59681")
+  fi
+  args+=("mfpi-nginx:latest")
+
+  docker run "${args[@]}"
+  echo "mfpi-nginx-test gateway refreshed:"
+  echo "  proxy:      http://localhost:59681/<username>"
+  echo "  management: http://localhost:59681/usermanagement/"
+}
+
 cmd_deploy() {
   for v in DEEPSEEK_API_KEY BUCKET_NAME KO_DOCKER_REPO; do
     if [[ -z "${!v:-}" ]]; then
@@ -330,8 +413,15 @@ cmd_deploy() {
   # cheap no-op when every template's goldenSnapshot is already empty.
   ensure_no_golden
 
+  # Recreate the 59681 test gateway from the current nginx-test.conf (the
+  # test proxy bind-mounts nginx-test.conf at runtime and is not a cluster
+  # resource, so it is not refreshed by the ko apply above). MFPI_SKIP_NGINX=1
+  # to skip.
+  refresh_nginx_test_gateway
+
   echo "mf-pi test environment deployed."
-  echo "  management UI: run ./run-nginx-test.sh, then open http://localhost:59681/usermanagement/"
+  echo "  management UI: http://localhost:59681/usermanagement/ (see run-nginx-test.sh for credentials)"
+  echo "  gateway refreshed from nginx-test.conf on 59681 (unless MFPI_SKIP_NGINX=1)"
 }
 
 usage() {
