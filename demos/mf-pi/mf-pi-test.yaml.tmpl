@@ -86,17 +86,24 @@ metadata:
     workload: mf-pi-small-test
 spec:
   # Number of physical workers; bounds the max number of concurrently-active
-  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 2).
-  replicas: ${MFPI_WORKER_REPLICAS}
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS_SMALL}
+  # (default 32), independent of the base/mid/large pools. Must match the
+  # production small pool's sizing (mf-pi.yaml.tmpl).
+  replicas: ${MFPI_WORKER_REPLICAS_SMALL}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
   template:
     resources:
+      # requests.cpu is what the scheduler reserves, so it bounds how many
+      # workers — i.e. how many concurrently-active users — fit on one node.
+      # limits.cpu only caps runtime throttling. Keep the request small and the
+      # limit generous: mostly-idle agents pack densely, while an active agent
+      # can still burst into capacity the idle workers are not using.
       requests:
-        cpu: "0.5"
+        cpu: "250m"
         memory: 1Gi
       limits:
-        cpu: "0.5"
+        cpu: "1"
         memory: 1Gi
 
 ---

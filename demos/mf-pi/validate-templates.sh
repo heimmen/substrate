@@ -11,6 +11,7 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${BUCKET_NAME}|ate-snapshots|g" \
       -e "s|\${MF_PI_DIGEST}|${DIGEST}|g" \
       -e "s|\${PAUSE_DIGEST}|sha256:placeholder|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|3|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|2|g" \
       -e "s|\${MFPI_DEPLOY_REV}|0|g" \
       "$t" > /tmp/mfpi-render-check.yaml
@@ -118,6 +119,19 @@ for tier in ("small", "mid", "large"):
     res = wp["spec"]["template"]["resources"]
     assert res.get("requests") and res.get("limits"), (tier, res)
     assert wp["metadata"]["labels"]["workload"] == ("mf-pi-%s-test" % tier if "test" in name else "mf-pi-" + tier), wp
+
+# The small tier is the default tier for mf-pi users, so it is sized for
+# concurrency: many workers with a small CPU request (what the scheduler
+# reserves, i.e. what bounds concurrent users per node) but a larger limit so an
+# active agent is not throttled to the request. This render substitutes
+# MFPI_WORKER_REPLICAS_SMALL=3 (see the sed above).
+small = wps["mf-pi-wp-small"]
+assert small["spec"]["replicas"] == 3, small["spec"]["replicas"]
+small_res = small["spec"]["template"]["resources"]
+assert small_res["requests"]["cpu"] == "250m", small_res
+assert small_res["limits"]["cpu"] == "1", small_res
+assert small_res["requests"]["memory"] == "1Gi", small_res
+assert small_res["limits"]["memory"] == "1Gi", small_res
 
 # mfpi-admin Deployment: no MinIO broker env; expiry/tier ConfigMaps wired;
 # shared-skills PVC mounted with SKILLS_DIR set.

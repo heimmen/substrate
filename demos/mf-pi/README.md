@@ -577,15 +577,41 @@ kubectl ate resume actor alice -a mfpi   # 恢复 → 自动挂回同一持久�
 
 ### 容量配置
 
-`WorkerPool` 的副本数由环境变量 `MFPI_WORKER_REPLICAS` 控制，决定
-**最大同时活跃（未挂起）用户数**：`./deploy.sh` 默认 `16`，
-`hack/install-ate.sh` 默认 `4`。部署时设置：
+`WorkerPool` 的副本数决定**最大同时活跃（未挂起）用户数**（一个活跃用户独占一个
+worker），由环境变量控制：
+
+| 变量 | 作用 | deploy.sh | install-ate |
+|---|---|---|---|
+| `MFPI_WORKER_REPLICAS` | base / mid / large 池 | `16` | `4` |
+| `MFPI_WORKER_REPLICAS_SMALL` | **small 池（默认档位）** | `32` | `32` |
 
 ```bash
-MFPI_WORKER_REPLICAS=8 ./deploy.sh
+MFPI_WORKER_REPLICAS=8 MFPI_WORKER_REPLICAS_SMALL=32 ./deploy.sh
 # 或
 MFPI_WORKER_REPLICAS=8 ... ./hack/install-ate-kind.sh --deploy-demo-mf-pi
 ```
+
+**small 档位的 CPU 是按「单机塞更多并发」调的**（`mf-pi-wp-small`）：
+
+- `requests.cpu: 250m` —— 调度器按 request 预留，**只有它决定一个节点能放多少
+  worker**（即多少并发用户）；
+- `limits.cpu: "1"` —— 只影响运行时限流。活跃 agent 可以突发占用空闲核，不会被
+  0.25 核卡死。
+
+16 个 worker 原本占 `16 × 0.5 = 8` 核，现在 `16 × 0.25 = 4` 核；按当下 24 核的节点
+（非 small 基线约 8 核），small 池最多可开到约 40–56 个 worker。注意这是**超卖**：
+若 40 个 worker 同时活跃，总 limit 远超物理核，活跃用户之间会按 request 比例争抢
+CPU —— 对「大部分时间空闲」的 agent 负载这是刻意的取舍。
+
+> [!WARNING]
+> base / mid / large 三个池也由 `MFPI_WORKER_REPLICAS` 控制（默认 16）。如果只用
+> small 档位，部署后记得把它们缩到 0，否则 mid(16×1 核) + large(16×2 核) 会瞬间
+> 把 24 核的节点占满、pod 全部 Pending：
+> ```bash
+> for p in mf-pi-workerpool mf-pi-wp-mid mf-pi-wp-large; do
+>   kubectl scale workerpool "$p" -n ate-demo-mf-pi --replicas=0
+> done
+> ```
 
 ### 空闲自动挂起（释放资源）
 
@@ -798,6 +824,7 @@ go test -cover ./...
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
 | userdata 持久卷 | sticky per-actor 卷（随 ActorTemplate） | 同左（test ns 内） |
 | `MFPI_WORKER_REPLICAS` 默认 | `16`（deploy.sh）/ `4`（install-ate） | `2` |
+| `MFPI_WORKER_REPLICAS_SMALL` 默认 | `32` | `32` |
 
 > [!NOTE]
 > **为什么需要这些隔离**：Atespace 是集群级资源；nginx cookie 忽略端口（同一宿主
