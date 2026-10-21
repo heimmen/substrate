@@ -49,9 +49,11 @@ func TestLoadingPageSuspendedActor(t *testing.T) {
 	if !strings.Contains(body, "正在唤醒") {
 		t.Errorf("body does not say the agent is waking:\n%s", body)
 	}
-	// The username is injected into a JS context; html/template must quote it.
-	if !strings.Contains(body, `var user = "alice";`) {
-		t.Errorf("username not rendered as a JS string literal")
+	// Values injected into JS are escaped by html/template. The retry URL comes
+	// from X-Original-URI, which is client-controlled, so this is the escaping
+	// boundary too.
+	if !strings.Contains(body, `var retryURL = "/alice/";`) {
+		t.Errorf("retry URL not rendered as a JS string literal")
 	}
 	if !strings.Contains(body, `href="/alice/"`) {
 		t.Errorf("retry link does not point back at the user's page")
@@ -59,11 +61,63 @@ func TestLoadingPageSuspendedActor(t *testing.T) {
 	if got := rec.Header().Get("Retry-After"); got != "3" {
 		t.Errorf("Retry-After = %q, want 3", got)
 	}
-	if !strings.Contains(body, `http-equiv="refresh"`) {
-		t.Errorf("page does not auto-refresh")
+	// Retries happen in place, so the elapsed counter cannot be restarted by a
+	// page reload; the meta refresh survives only as a no-JS fallback.
+	if !strings.Contains(body, "fetch(retryURL") {
+		t.Errorf("page does not retry in place")
 	}
+	if strings.Contains(body, "sessionStorage") {
+		t.Errorf("counter must not depend on sessionStorage across page reloads")
+	}
+	assertRefreshIsNoScriptFallback(t, body)
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+}
+
+// assertRefreshIsNoScriptFallback checks that the page's only meta refresh is
+// the <noscript> fallback. A page-level meta refresh reloads the document every
+// 3s, and a reload is what used to restart the "已等待 N 秒" counter — which is
+// exactly the bug this guards against.
+func assertRefreshIsNoScriptFallback(t *testing.T, body string) {
+	t.Helper()
+	noscript := strings.Index(body, "<noscript>")
+	refresh := strings.Index(body, `http-equiv="refresh"`)
+	if refresh == -1 {
+		t.Fatalf("no auto-refresh at all: no-JS users would be stuck on the page")
+	}
+	if noscript == -1 || refresh < noscript {
+		t.Errorf("meta refresh must live inside <noscript> only; a document-level refresh restarts the elapsed counter")
+	}
+}
+
+// TestLoadingPageCounterIsMonotonic pins the contract behind the visible timer:
+// within one wait episode the page must never reload itself, because the counter
+// only lives in page memory. Retries are issued with fetch() instead.
+func TestLoadingPageCounterIsMonotonic(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+
+	body := doLoading(s, loadingReq("/alice/", "")).Body.String()
+	if n := strings.Count(body, "http-equiv="); n != 1 {
+		t.Errorf("found %d http-equiv declarations, want exactly 1 (the noscript fallback)", n)
+	}
+	if !strings.Contains(body, "setInterval(tick, 1000)") {
+		t.Errorf("elapsed counter is not ticked every second")
+	}
+	// The episode start must be the page's own load time, never something
+	// restored from storage that could be stale or missing.
+	if !strings.Contains(body, "var startedAt = Date.now();") {
+		t.Errorf("counter start must be taken from the current page load")
+	}
+	if strings.Contains(body, "sessionStorage") || strings.Contains(body, "localStorage") {
+		t.Errorf("counter must not be carried across page loads")
+	}
+	for _, want := range []string{"fetch(retryURL", "looksReady", "mfpi-page"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing in-place retry piece %q", want)
+		}
 	}
 }
 

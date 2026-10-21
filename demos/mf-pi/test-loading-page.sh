@@ -15,7 +15,10 @@
 #   2. While the actor is SUSPENDED, GET /<user>/ with Accept: text/html must
 #      return the interstitial page (marker meta tag) promptly, not the real
 #      pi-web page. This is the behaviour the readiness gate adds.
-#   3. The page must advertise an auto-refresh (meta refresh).
+#   3. The page must retry in place (fetch) so its "已等待 N 秒" counter is
+#      monotonic, and keep a <noscript> meta refresh as the no-JS fallback. A
+#      document-level meta refresh is rejected: it reloads the page and resets
+#      the counter to 0 on every slow retry.
 #   4. Re-requesting until the actor is RUNNING must eventually serve the real
 #      pi-web UI ("PI WEB"), i.e. the interstitial is a transient state.
 #   5. API/WebSocket clients must NOT receive the HTML page: an API request
@@ -198,10 +201,22 @@ if awk -v t="$elapsed" 'BEGIN { exit !(t < 3.0) }'; then
 else
   bad "loading page was slow (${elapsed}s); the readiness gate may not be active"
 fi
-if grep -qF 'http-equiv="refresh"' "$BODY"; then
-  ok "loading page auto-refreshes"
+if grep -qF 'fetch(retryURL' "$BODY"; then
+  ok "loading page retries in place (counter cannot be reset by a reload)"
 else
-  bad "loading page does not advertise an auto-refresh"
+  bad "loading page does not retry in place (a reload would reset the counter)"
+fi
+# The meta refresh must survive only as the no-JS fallback; a document-level one
+# is what used to restart the "已等待 N 秒" counter.
+if grep -qF 'http-equiv="refresh"' "$BODY" && grep -qF '<noscript>' "$BODY"; then
+  ok "no-JS fallback keeps a <noscript> meta refresh"
+else
+  bad "missing the <noscript> auto-refresh fallback"
+fi
+if grep -qF 'sessionStorage' "$BODY"; then
+  bad "loading page carries the counter across reloads (sessionStorage)"
+else
+  ok "counter is page-local and monotonic"
 fi
 
 # --- 2. It is transient: the real UI appears once the actor is up --------

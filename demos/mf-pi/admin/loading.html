@@ -6,7 +6,9 @@
 <!-- mfpi-loading-page: stable marker for the E2E test (test-loading-page.sh). -->
 <meta name="mfpi-page" content="loading">
 <title>Agent 正在载入…</title>
-{{if .AutoRefresh}}<meta http-equiv="refresh" content="3">{{end}}
+{{if .AutoRefresh}}<!-- No-JS fallback only. With JS the page retries in place (see the
+     script below), so the "已等待 N 秒" counter is never restarted by a reload. -->
+<noscript><meta http-equiv="refresh" content="3"></noscript>{{end}}
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -77,27 +79,19 @@
   </div>
   <script>
     (function () {
-      var user = {{.Username}};
       var auto = {{.AutoRefresh}};
       if (!auto) { return; }
-      var now = Date.now();
-      var key = 'mfpi_loading_' + user;
-      var state = { start: now, updated: now };
-      try {
-        var raw = sessionStorage.getItem(key);
-        if (raw) {
-          var prev = JSON.parse(raw);
-          // Continue the same wait episode only if the previous load was
-          // recent (i.e. it was another auto-refresh, not a fresh visit).
-          if (prev && typeof prev.updated === 'number' && (now - prev.updated) < 10000) {
-            state.start = prev.start;
-          }
-        }
-        sessionStorage.setItem(key, JSON.stringify({ start: state.start, updated: now }));
-      } catch (e) { /* sessionStorage unavailable: degrade to a plain counter */ }
-      var startedAt = state.start;
+      var retryURL = {{.RetryURL}};
+      var startedAt = Date.now();
       var el = document.getElementById('elapsed');
       var hint = document.getElementById('hint');
+
+      // The wait episode starts once, when this page is first rendered, and the
+      // page never reloads itself: retries happen in place with fetch(). The
+      // counter therefore only ever grows. (It used to be carried across a
+      // full-page meta refresh via sessionStorage with a 10s freshness window,
+      // so any retry that took longer than that — or a browser with storage
+      // disabled — restarted it at 0 over and over during a slow resume.)
       function tick() {
         var secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
         if (el) { el.textContent = String(secs); }
@@ -105,6 +99,35 @@
       }
       tick();
       setInterval(tick, 1000);
+
+      // Each retry re-requests the original URL. While the actor is not ready
+      // nginx answers with this very page, identified by its mfpi-page marker;
+      // once the real UI is back we navigate to it.
+      function looksReady(body) {
+        return typeof body === 'string' && body.length > 0 && body.indexOf('mfpi-page') === -1;
+      }
+      function schedule() { window.setTimeout(retry, 3000); }
+      function retry() {
+        fetch(retryURL, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: { 'Accept': 'text/html' }
+        }).then(function (res) {
+          if (res.status === 401) {
+            // Credentials were dropped: hand it back to the browser so it can
+            // prompt again instead of retrying a request that cannot succeed.
+            window.location.replace(retryURL);
+            return;
+          }
+          if (!res.ok) { schedule(); return; }
+          return res.text().then(function (body) {
+            if (looksReady(body)) { window.location.replace(retryURL); }
+            else { schedule(); }
+          });
+        }).catch(function () { schedule(); });
+      }
+      schedule();
     })();
   </script>
 </body>
