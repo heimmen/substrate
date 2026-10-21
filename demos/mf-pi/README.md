@@ -580,16 +580,20 @@ kubectl ate resume actor alice -a mfpi   # 恢复 → 自动挂回同一持久�
 `WorkerPool` 的副本数决定**最大同时活跃（未挂起）用户数**（一个活跃用户独占一个
 worker），由环境变量控制：
 
-| 变量 | 作用 | deploy.sh | install-ate |
+| 变量 | 作用 | deploy.sh（生产） | deploy-test.sh（测试） |
 |---|---|---|---|
-| `MFPI_WORKER_REPLICAS` | base / mid / large 池 | `16` | `4` |
-| `MFPI_WORKER_REPLICAS_SMALL` | **small 池（默认档位）** | `32` | `32` |
+| `MFPI_WORKER_REPLICAS` | base / mid / large 池 | `16` | `2` |
+| `MFPI_WORKER_REPLICAS_SMALL` | **small 池（默认档位）** | `32` | `8` |
 
 ```bash
 MFPI_WORKER_REPLICAS=8 MFPI_WORKER_REPLICAS_SMALL=32 ./deploy.sh
-# 或
-MFPI_WORKER_REPLICAS=8 ... ./hack/install-ate-kind.sh --deploy-demo-mf-pi
+# 测试环境默认 small=8：test 通常与生产共用同一台开发节点，
+# 32（生产）+ 32（测试）会把 24 核节点顶到 ~100% 并产生 Pending。
+MFPI_WORKER_REPLICAS_SMALL=32 ./deploy-test.sh   # 独占大节点时才调大
 ```
+
+> `hack/install-ate*.sh --deploy-demo-mf-pi` 的默认：`MFPI_WORKER_REPLICAS=4`、
+> `MFPI_WORKER_REPLICAS_SMALL=32`。
 
 **small 档位的 CPU 是按「单机塞更多并发」调的**（`mf-pi-wp-small`）：
 
@@ -824,7 +828,7 @@ go test -cover ./...
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
 | userdata 持久卷 | sticky per-actor 卷（随 ActorTemplate） | 同左（test ns 内） |
 | `MFPI_WORKER_REPLICAS` 默认 | `16`（deploy.sh）/ `4`（install-ate） | `2` |
-| `MFPI_WORKER_REPLICAS_SMALL` 默认 | `32` | `32` |
+| `MFPI_WORKER_REPLICAS_SMALL` 默认 | `32` | `8`（共用节点；独占大节点可调 32） |
 
 > [!NOTE]
 > **为什么需要这些隔离**：Atespace 是集群级资源；nginx cookie 忽略端口（同一宿主

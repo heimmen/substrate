@@ -67,10 +67,13 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   )"
 fi
 : "${MFPI_WORKER_REPLICAS:=2}"
-# Small tier is sized separately (default 32) so the test environment can also
-# exercise many concurrent users. Override to keep a light test env, e.g.
-# MFPI_WORKER_REPLICAS_SMALL=2 ./deploy-test.sh
-: "${MFPI_WORKER_REPLICAS_SMALL:=32}"
+# The small tier is sized separately from the other pools. The TEST default is
+# deliberately smaller than production's 32: the test environment usually shares
+# a single dev node with production, and 32 test workers (8 cores at 250m) on
+# top of production's 32 leaves the scheduler at ~100% and pods Pending. Raise it
+# when testing on a bigger/dedicated node, e.g.
+#   MFPI_WORKER_REPLICAS_SMALL=32 ./deploy-test.sh
+: "${MFPI_WORKER_REPLICAS_SMALL:=8}"
 # ko builds ateom-gvisor (and other Go images) on this offline-friendly base.
 export KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-localhost:5001/distroless-static-debian13}"
 
@@ -87,7 +90,7 @@ render() {
       -e "s|\${DEEPSEEK_API_KEY}|$(esc_repl "${DEEPSEEK_API_KEY:-placeholder}")|g" \
       -e "s|\${MF_PI_DIGEST}|$(esc_repl "${MF_PI_DIGEST}")|g" \
       -e "s|\${PAUSE_DIGEST}|$(esc_repl "${PAUSE_DIGEST}")|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-32}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-8}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|$(esc_repl "${MFPI_WORKER_REPLICAS:-2}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
       "${TEMPLATE}"
