@@ -52,6 +52,10 @@ ATESPACE="${MFPI_ATESPACE:-mfpi-test}"
 NAMESPACE="${MFPI_NAMESPACE:-ate-demo-mf-pi-test}"
 ENTRY_PORT="${MFPI_ENTRY_PORT:-59681}"
 ADMIN_PORT="${MFPI_ADMIN_PORT:-59882}"
+# Provision the test actor on the SAME tier real users get (the admin assigns
+# DEFAULT_TIER=small, i.e. mf-pi-small). Using the base template here would put
+# the test on a pool nobody else uses and hide small-tier regressions.
+TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi-test/mf-pi-small}"
 TEST_USER="${TEST_USER:-loadtest-$(date +%s | tail -c 6)}"
 READY_TIMEOUT="${READY_TIMEOUT:-180}"
 
@@ -166,7 +170,7 @@ log "test user: ${TEST_USER} (atespace ${ATESPACE}, ns ${NAMESPACE})"
 log "== 0. provision test actor and page password =="
 if ! "${KUBECTL_ATE_CMD[@]}" get actor "$TEST_USER" -a "$ATESPACE" >/dev/null 2>&1; then
   "${KUBECTL_ATE_CMD[@]}" create actor "$TEST_USER" -a "$ATESPACE" \
-    --template "ate-demo-mf-pi-test/mf-pi" >/dev/null 2>&1 || true
+    --template "$TEMPLATE" >/dev/null 2>&1 || true
 fi
 PASSWORD="$(curl -sS -X POST "${ADMIN}/api/users/${TEST_USER}/password" 2>/dev/null | jq -r '.password // empty' || true)"
 if [[ -z "$PASSWORD" ]]; then

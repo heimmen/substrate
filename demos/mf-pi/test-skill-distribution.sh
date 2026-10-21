@@ -52,6 +52,10 @@ cd "$(dirname "$0")"
 ATESPACE="${MFPI_ATESPACE:-mfpi-test}"
 NAMESPACE="${MFPI_NAMESPACE:-ate-demo-mf-pi-test}"
 NODE="${NODE:-kind-control-plane}"
+# Provision the test actor on the SAME tier real users get (the admin assigns
+# DEFAULT_TIER=small, i.e. mf-pi-small), so the test exercises the pool the demo
+# actually runs on. Override with MFPI_TEMPLATE to target another tier.
+TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi-test/mf-pi-small}"
 TEST_USER="${TEST_USER:-skilltest-$(date +%s | tail -c 6)}"
 SKILL_NAME="hello-skill"
 SKILLS_DIR="/data/pi-agent/skills"
@@ -213,7 +217,7 @@ log "admin reachable via port-forward ${PORT}; test user: ${TEST_USER}"
 log "== 0. provision test actor =="
 if ! "${KUBECTL_ATE_CMD[@]}" get actor "$TEST_USER" -a "$ATESPACE" >/dev/null 2>&1; then
   "${KUBECTL_ATE_CMD[@]}" create actor "$TEST_USER" -a "$ATESPACE" \
-    --template "ate-demo-mf-pi-test/mf-pi" >/dev/null 2>&1 || true
+    --template "$TEMPLATE" >/dev/null 2>&1 || true
 fi
 if ! wait_for_running; then
   log "FATAL: could not bring test actor up; aborting"

@@ -65,17 +65,21 @@ if (( PROD )); then
   ATESPACE="${MFPI_ATESPACE:-mfpi}"
   NAMESPACE="${MFPI_NAMESPACE:-ate-demo-mf-pi}"
   PROXY="${MFPI_PROXY:-localhost:58681}"
-  TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi/mf-pi}"
+  TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi/mf-pi-small}"
   DEPLOY_SCRIPT="${MFPI_DEPLOY_SCRIPT:-./deploy.sh}"
   ENV_LABEL="production"
 else
   ATESPACE="${MFPI_ATESPACE:-mfpi-test}"
   NAMESPACE="${MFPI_NAMESPACE:-ate-demo-mf-pi-test}"
   PROXY="${MFPI_PROXY:-localhost:59681}"
-  TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi-test/mf-pi}"
+  TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi-test/mf-pi-small}"
   DEPLOY_SCRIPT="${MFPI_DEPLOY_SCRIPT:-./deploy-test.sh}"
   ENV_LABEL="test"
 fi
+# NOTE: the test user is created through the admin API (POST /api/users), so the
+# actor's template is decided by the admin's tier mapping (DEFAULT_TIER=small ->
+# mf-pi-<tier>), not by TEMPLATE. TEMPLATE is only what we report, so it is
+# defaulted to the small tier to match what real users get.
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-mf@pass2026}"
 STAMP="$(date +%s)"

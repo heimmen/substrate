@@ -53,7 +53,8 @@
 #
 # Override any of the following env vars to retarget:
 #   MFPI_ATESPACE        (default mfpi-test)
-#   MFPI_TEMPLATE        (default ate-demo-mf-pi-test/mf-pi)
+#   MFPI_TEMPLATE        (default ate-demo-mf-pi-test/mf-pi-small, the tier the
+#                        admin assigns to real users via DEFAULT_TIER=small)
 #   MFPI_NAMESPACE       (default ate-demo-mf-pi-test)
 #   MFPI_PROXY           (default localhost:59681)
 #   ADMIN_USER / ADMIN_PASSWORD  (default admin / mf@pass2026)
@@ -64,7 +65,7 @@ cd "$(dirname "$0")"
 
 # --- Configurable defaults ----------------------------------------------
 ATESPACE="${MFPI_ATESPACE:-mfpi-test}"
-TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi-test/mf-pi}"
+TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi-test/mf-pi-small}"
 NAMESPACE="${MFPI_NAMESPACE:-ate-demo-mf-pi-test}"
 PROXY="${MFPI_PROXY:-localhost:59681}"
 ADMIN_USER="${ADMIN_USER:-admin}"
