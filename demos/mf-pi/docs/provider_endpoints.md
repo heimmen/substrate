@@ -60,12 +60,17 @@
 **管理面 UI**：`/usermanagement/` 顶部**唯一**的「**模型设置**」按钮打开一个对话框，含两个标签页。
 「**模型端点**」列出内置 provider（只读，带「内置」标记）与注册表中的自定义端点（`custom:true`，
 每行可**删除**），并提供新增表单：Provider ID（可选，缺省由显示名派生）/ 显示名 / API 地址 /
-API 协议（OpenAI Chat Completions、OpenAI Responses、Anthropic Messages）/ 探测用 API Key
-（**仅用于探测，不保存**）/ 模型目录。模型目录既可以用「**获取可用模型**」向端点探测后勾选
-（见 §4.1），也可以手工逐行填写模型 ID、显示名称、上下文窗口、最大输出 token 数与输入类型
-（文本/图片）。「**用户 API Key**」选择用户与 provider 后保存或清除该用户的凭据（用户行菜单
-不再提供设置/清除 Key）。增删端点后前端会重新拉取 provider 列表，两个标签页立即反映变更。
-以下 API 即该 UI 的后端。
+API 协议（管理页只提供 **OpenAI Chat Completions**）/ 探测用 API Key
+（**仅用于探测，不保存**）/ 模型目录。表单与 **JSON 输入**两种方式等价（对话框内的
+「表单输入 / JSON 输入」切换，草稿互转）：JSON 的形状即 `POST /api/providers` 的请求体，
+可选的 `apiKey` 仅用于探测、不保存；「获取可用模型」在表单模式下使用。JSON 编辑器提供
+**DeepSeek 官方 API 的完整示例**（占位文本 +「填入 DeepSeek 示例」按钮），可以直接在上面改：
+模型目录既可以用「**获取可用模型**」向端点探测后勾选（见 §4.1），也可以手工逐行填写模型 ID、
+显示名称、上下文窗口、最大输出 token 数与输入类型（文本/图片）。「**用户 API Key**」默认**应用到所有用户**
+（也可切「指定用户」勾选子集），一次保存 / 清除即批量生效，并逐用户反馈结果（运行中的 actor
+立即注入，挂起的用户恢复后自动生效；用户行菜单不再提供设置/清除 Key）。增删端点后前端会
+重新拉取 provider 列表，两个标签页立即反映变更。以下 API 即该 UI 的后端（批量凭据接口见
+`docs/user_agent_api.md` 的「批量用户 API Key」一节）。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -73,9 +78,26 @@ API 协议（OpenAI Chat Completions、OpenAI Responses、Anthropic Messages）/
 | POST | `/api/providers` | 新增 / 覆盖一个自定义端点 |
 | POST | `/api/providers/discover` | 探测端点提供哪些模型（「获取可用模型」的后端） |
 | DELETE | `/api/providers/{id}` | 从注册表移除一个自定义端点 |
+| POST | `/api/apikeys` | 批量设置用户专属 Key（省略 `users` = 全部用户） |
+| POST | `/api/apikeys/clear` | 批量清除用户专属 Key（省略 `users` = 全部用户） |
 
 **POST** body：`{"id"?:string,"name":string,"baseUrl":string,"api"?:string,"models":[{id,name?,contextWindow?,maxTokens?,input?}]}`
 （`models` 也可传字符串数组，等价于只填 `id`）
+
+管理页 JSON 输入用的同一份 DeepSeek 示例：
+
+```json
+{
+  "id": "deepseek",
+  "name": "DeepSeek",
+  "baseUrl": "https://api.deepseek.com/v1",
+  "api": "openai-completions",
+  "models": [
+    { "id": "deepseek-chat", "name": "DeepSeek Chat", "contextWindow": 128000, "maxTokens": 8192, "input": ["text"] },
+    { "id": "deepseek-reasoner", "name": "DeepSeek Reasoner", "contextWindow": 128000, "maxTokens": 64000, "input": ["text"] }
+  ]
+}
+```
 
 - `id` 可省略，由 `name` 推导：转小写；`-` `_` `.` 与空格折叠为 `-`（去掉首尾），**其它非字母
   数字字符直接丢弃**（例：`Z.AI  GLM` → `z-ai-glm`）；推不出任何字符时回退为 `custom`。显式 id 须匹配

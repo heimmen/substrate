@@ -68,6 +68,13 @@ type keyStore interface {
 	Set(name string, key providerKey) error
 	// Delete removes any stored credential for the user (idempotent).
 	Delete(name string) error
+	// SetMany stores several credentials in one Secret write. It is the batch
+	// counterpart of Set: either every entry is persisted or none is, so a
+	// "apply to all users" action never leaves a half-written Secret.
+	SetMany(keys map[string]providerKey) error
+	// DeleteMany removes several stored credentials in one Secret write
+	// (idempotent: names without a stored entry are ignored).
+	DeleteMany(names []string) error
 }
 
 // secretKeyStore stores per-user keys in a Kubernetes Secret (username -> JSON
@@ -146,6 +153,58 @@ func (s *secretKeyStore) Delete(name string) error {
 		if k != name {
 			next[k] = v
 		}
+	}
+	if err := s.persist(next); err != nil {
+		return err
+	}
+	s.data = next
+	return nil
+}
+
+// SetMany persists every entry in one Secret update. Callers use it for batch
+// operations (apply one key to many users): a single Get→Update keeps the write
+// atomic and avoids N rewrite of the same Secret.
+func (s *secretKeyStore) SetMany(keys map[string]providerKey) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]providerKey, len(s.data)+len(keys))
+	for k, v := range s.data {
+		next[k] = v
+	}
+	for k, v := range keys {
+		next[k] = v
+	}
+	if err := s.persist(next); err != nil {
+		return err
+	}
+	s.data = next
+	return nil
+}
+
+// DeleteMany removes every named entry in one Secret update. Names without a
+// stored entry are ignored, so a repeat call is harmless.
+func (s *secretKeyStore) DeleteMany(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]providerKey, len(s.data))
+	for k, v := range s.data {
+		next[k] = v
+	}
+	removed := false
+	for _, name := range names {
+		if _, ok := next[name]; ok {
+			delete(next, name)
+			removed = true
+		}
+	}
+	if !removed {
+		return nil
 	}
 	if err := s.persist(next); err != nil {
 		return err

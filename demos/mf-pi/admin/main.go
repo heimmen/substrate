@@ -682,23 +682,10 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	var all []*ateapipb.Actor
-	pageToken := ""
-	for {
-		resp, err := s.client.ListActors(ctx, &ateapipb.ListActorsRequest{
-			Atespace:  s.atespace,
-			PageSize:  1000,
-			PageToken: pageToken,
-		})
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "列出用户失败: " + err.Error()})
-			return
-		}
-		all = append(all, resp.GetActors()...)
-		pageToken = resp.GetNextPageToken()
-		if pageToken == "" {
-			break
-		}
+	all, err := s.listActors(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "列出用户失败: " + err.Error()})
+		return
 	}
 
 	users := make([]userSummary, 0, len(all))
@@ -717,6 +704,29 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].Name < users[j].Name })
 	writeJSON(w, http.StatusOK, map[string]any{"atespace": s.atespace, "users": users})
+}
+
+// listActors returns every actor in the administered atespace, following the
+// paging token until exhausted. Shared by the user list and the batch
+// credential fan-out.
+func (s *server) listActors(ctx context.Context) ([]*ateapipb.Actor, error) {
+	var all []*ateapipb.Actor
+	pageToken := ""
+	for {
+		resp, err := s.client.ListActors(ctx, &ateapipb.ListActorsRequest{
+			Atespace:  s.atespace,
+			PageSize:  1000,
+			PageToken: pageToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, resp.GetActors()...)
+		pageToken = resp.GetNextPageToken()
+		if pageToken == "" {
+			return all, nil
+		}
+	}
 }
 
 // handleCreateUser mirrors create-user.sh: auto-create the atespace, then
@@ -1724,6 +1734,10 @@ func main() {
 	mux.HandleFunc("/api/providers/discover", srv.handleDiscoverProviderModels)
 	mux.HandleFunc("/api/providers/", srv.handleDeleteProvider)
 	mux.HandleFunc("/api/users/", srv.handleUserSubresource)
+	// Batch credential fan-out (apply/clear one key for many users). Both
+	// exact paths share one handler, which dispatches on the /clear suffix.
+	mux.HandleFunc("/api/apikeys", srv.handleBatchAPIKeys)
+	mux.HandleFunc("/api/apikeys/clear", srv.handleBatchAPIKeys)
 	mux.HandleFunc("/_mfpi_auth", srv.handleAuth)
 	// Readiness gate: like /_mfpi_auth but also rejects (403) a request whose
 	// actor is not RUNNING, so nginx can show the loading page immediately

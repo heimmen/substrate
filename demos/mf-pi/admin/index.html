@@ -201,7 +201,7 @@
      改变对话框大小（内容短的那一页底部留白，这是刻意的取舍）。外框不滚动，滚动
      只发生在下面的 .tab-panel，因此整页只有一个滚动条。 */
   .modal.endpoint-modal {
-    max-width: 560px;
+    max-width: 680px;
     height: 90vh;
     max-height: 760px;
     display: flex;
@@ -413,6 +413,88 @@
   .model-picker-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .model-picker-toolbar .modal-hint { margin: 0; }
   .model-picker-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
+
+  /* 表单 / JSON 与「应用范围」共用的分段控件。 */
+  .mode-switch {
+    display: flex;
+    gap: 4px;
+    background: var(--gray-bg);
+    border-radius: 8px;
+    padding: 3px;
+    margin-bottom: 12px;
+  }
+  .mode-switch .mode-btn {
+    flex: 1 1 0;
+    background: transparent;
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+  }
+  .mode-switch .mode-btn:hover { color: var(--text); }
+  .mode-switch .mode-btn[aria-pressed="true"] {
+    background: var(--card);
+    color: var(--text);
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.10);
+  }
+  /* JSON 编辑器：等宽字体、可纵向调整；不参与 flex 拉伸。 */
+  .modal .json-editor {
+    width: 100%;
+    min-height: 260px;
+    max-height: 46vh;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    background: #fff;
+    color: var(--text);
+    margin-bottom: 8px;
+    resize: vertical;
+    white-space: pre;
+    overflow: auto;
+  }
+  /* 内置 provider 列表默认折叠，给表单让出空间。 */
+  .builtin-details { margin-bottom: 12px; }
+  .builtin-details > summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+    padding: 4px 0;
+    user-select: none;
+  }
+  .builtin-details > summary:hover { color: var(--text); }
+  /* 指定用户：可滚动的勾选列表。 */
+  .user-picker {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 4px;
+    margin-bottom: 12px;
+    background: #fff;
+  }
+  .user-picker label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .user-picker label:hover { background: var(--gray-bg); }
+  /* 批量结果：汇总 + 失败明细。 */
+  .batch-result { font-size: 13px; margin-bottom: 8px; }
+  .batch-result .batch-summary { color: var(--text); }
+  .batch-result .batch-fail {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    color: var(--danger);
+  }
+  .batch-result .batch-fail li { margin: 2px 0; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -800,31 +882,6 @@
       });
   }
 
-  // submitUserAPIKey 提交 {apiKey, providerId}（「用户 API Key」标签页的唯一提交路径），
-  // 沿用原有的成功/失败提示。done 是可选回调：成功后调用，让标签页刷新用户下拉与提示。
-  function submitUserAPIKey(name, key, providerId, done) {
-    clearMsg();
-    fetch("api/users/" + encodeURIComponent(name) + "/apikey", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: key, providerId: providerId })
-    })
-      .then(function (res) {
-        return res.json().then(function (j) {
-          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
-          return j;
-        });
-      })
-      .then(function (j) {
-        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "API Key 已设置"));
-        listUsers();
-        if (done) done();
-      })
-      .catch(function (err) {
-        showMsg("设置 Key 失败：" + err.message, true);
-      });
-  }
-
   // ---- 模型设置（唯一入口：标签页「模型端点」/「用户 API Key」） ----
 
   // modelSettingsEl 记录当前打开的"模型设置"对话框根节点（含遮罩）。每次打开新建、
@@ -1207,10 +1264,9 @@
     return false;
   }
 
-  // apiBaseUrlPlaceholder 按协议给出占位地址：Anthropic Messages 的 SDK 会自行追加
-  // /v1/messages，因此占位符不带 /v1。
+  // apiBaseUrlPlaceholder：OpenAI Chat Completions 的占位地址（含 /v1）。
   function apiBaseUrlPlaceholder(api) {
-    return api === "anthropic-messages" ? "https://gateway.example" : "https://gateway.example/v1";
+    return "https://gateway.example/v1";
   }
 
   // expandModelRow 展开/收起模型行的容量与输入类型区域。
@@ -1429,8 +1485,20 @@
   // refreshEndpointForm 统一重算新增端点表单的状态：Provider ID / API 地址的内联错误、
   // 显示名称占位符、「获取可用模型」的可用性与原因、逐行模型错误，以及保存按钮的可用性
   // （模型列表为空或任一行非法时禁用，原因显示在模型目录下方）。
+  // JSON 模式下改为校验 JSON 编辑器（保存按钮可用性与内联错误都来自它）。
   function refreshEndpointForm(root) {
     if (!root || root !== modelSettingsEl) return { models: [], valid: false, message: "" };
+
+    if (endpointMode(root) === "json") {
+      var parsed = parseEndpointJSON(root);
+      root.querySelector("#endpoint-json-error").textContent = parsed.error || "";
+      root.querySelector("#endpoint-ok").disabled = !!parsed.error;
+      return {
+        models: (parsed.payload && parsed.payload.models) || [],
+        valid: !parsed.error,
+        message: parsed.error || ""
+      };
+    }
 
     var id = root.querySelector("#endpoint-id").value.trim();
     var idHint = root.querySelector("#endpoint-id-hint");
@@ -1491,7 +1559,13 @@
   function resetEndpointForm(root) {
     if (!root) return;
     root._editingId = "";
+    root._editingProvider = null;
     root._editingAllowlist = null;
+    root._endpointMode = "form";
+    root._endpointJSONPending = false;
+    applyEndpointMode(root);
+    root.querySelector("#endpoint-json").value = "";
+    root.querySelector("#endpoint-json-error").textContent = "";
     var idInput = root.querySelector("#endpoint-id");
     idInput.value = "";
     idInput.disabled = false;
@@ -1525,7 +1599,8 @@
     idInput.disabled = true;
     root.querySelector("#endpoint-name").value = p.name || "";
     var apiSelect = root.querySelector("#endpoint-api");
-    apiSelect.value = detail.api || "openai-completions";
+    // 管理页目前只提供 OpenAI Chat Completions；旧数据里的其他协议值回退为缺省。
+    apiSelect.value = "openai-completions";
     var urlInput = root.querySelector("#endpoint-baseurl");
     urlInput.value = detail.baseUrl || "";
     urlInput.placeholder = apiBaseUrlPlaceholder(apiSelect.value);
@@ -1534,6 +1609,7 @@
 
     var rawModels = endpointRawModels(p);
     root._editingId = p.id;
+    root._editingProvider = p;
     root._editingAllowlist = endpointAllowlist(rawModels);
     rawModels.forEach(function (m) {
       addModelRow(root, normalizeModelForRow(m));
@@ -1615,53 +1691,255 @@
       });
   }
 
-  // submitEndpoint 校验并 POST 新端点：模型目录必填且逐行合法，API 地址必须是
-  // http(s):// 开头的完整地址（与服务端校验一致）；通过后清空表单并刷新缓存与列表。
-  function submitEndpoint(root) {
+  // ---- 模型端点：表单 / JSON 双模式（两者等价，切换不丢草稿） ----
+
+  // endpointMode 返回当前输入方式："form"（默认）或 "json"。
+  function endpointMode(root) {
+    return root && root._endpointMode === "json" ? "json" : "form";
+  }
+
+  // applyEndpointMode 切换两个编辑器的显隐与分段按钮的按下态。
+  function applyEndpointMode(root) {
+    var json = endpointMode(root) === "json";
+    root.querySelector("#endpoint-form-fields").hidden = json;
+    root.querySelector("#endpoint-json-wrap").hidden = !json;
+    root.querySelector("#endpoint-mode-form").setAttribute("aria-pressed", json ? "false" : "true");
+    root.querySelector("#endpoint-mode-json").setAttribute("aria-pressed", json ? "true" : "false");
+  }
+
+  // setEndpointMode 在表单与 JSON 之间切换，并转换当前草稿：
+  // 表单 → JSON 直接序列化；JSON → 表单用**宽松**解析（不要求 baseUrl/models 已填），
+  // 因此空表单切到 JSON 后仍能切回来。若 JSON 连映射都无法完成（语法错误等），
+  // 仍然切回表单并保留 JSON 草稿，避免把用户困在 JSON 标签页。
+  function setEndpointMode(root, mode) {
+    if (!root || mode === endpointMode(root)) return;
+    if (mode === "json") {
+      // 有尚未同步到表单的 JSON 草稿（例如解析失败过）时保留它；否则按表单重新序列化。
+      if (!root._endpointJSONPending) {
+        root.querySelector("#endpoint-json").value =
+          JSON.stringify(formEndpointJSON(root), null, 2);
+        root._endpointJSONPending = false;
+      }
+      root.querySelector("#endpoint-json-error").textContent = "";
+    } else {
+      root.querySelector("#endpoint-error").textContent = "";
+      var parsed = parseEndpointJSONLenient(root);
+      if (parsed.error) {
+        // 语法错误 / 顶层非对象 / 模型项缺 id：无法回填表单，但允许切回并保留草稿。
+        root.querySelector("#endpoint-error").textContent =
+          parsed.error + "（JSON 草稿已保留，可切回 JSON 输入继续修改）";
+        root._endpointJSONPending = true;
+      } else if (parsed.empty) {
+        // JSON 为空：保留表单原有内容（用户可能只是清空了 JSON）。
+        root._endpointJSONPending = false;
+      } else {
+        fillFormFromEndpointJSON(root, parsed);
+        root._endpointJSONPending = false;
+      }
+    }
+    root._endpointMode = mode;
+    applyEndpointMode(root);
+    refreshEndpointForm(root);
+  }
+
+  // endpointJSONExample：JSON 输入的完整示例（DeepSeek 官方 API，OpenAI Chat
+  // Completions 协议），同时用作 JSON 编辑器的占位文本。
+  var endpointJSONExample = JSON.stringify({
+    id: "deepseek",
+    name: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    api: "openai-completions",
+    models: [
+      {
+        id: "deepseek-chat",
+        name: "DeepSeek Chat",
+        contextWindow: 128000,
+        maxTokens: 8192,
+        input: ["text"]
+      },
+      {
+        id: "deepseek-reasoner",
+        name: "DeepSeek Reasoner",
+        contextWindow: 128000,
+        maxTokens: 64000,
+        input: ["text"]
+      }
+    ]
+  }, null, 2);
+
+  // formEndpointJSON 把表单序列化成与 POST /api/providers 请求体一致的形状。
+  // 用 collectModelRows 读取模型行，因此与表单保存的结果保持一致。
+  function formEndpointJSON(root) {
+    var state = collectModelRows(root);
+    var obj = { api: root.querySelector("#endpoint-api").value };
+    var id = root.querySelector("#endpoint-id").value.trim();
+    var name = root.querySelector("#endpoint-name").value.trim();
+    var baseUrl = root.querySelector("#endpoint-baseurl").value.trim();
+    if (id) obj.id = id;
+    if (name) obj.name = name;
+    if (baseUrl) obj.baseUrl = baseUrl;
+    var pinned = root.querySelector("#endpoint-pinned");
+    if (pinned && pinned.checked) obj.pinned = true;
+    obj.models = state.models || [];
+    return obj;
+  }
+
+  // parseEndpointJSONLenient 解析 JSON 编辑器，只拒绝完全无法映射的输入
+  // （语法错误 / 顶层非对象 / 模型项缺 id）；缺 baseUrl、models 为空等“未填完”
+  // 不算错误——这既是切回表单的路径，也让用户能在 JSON 里先写一半再切回。
+  // 返回 {payload, apiKey}、{empty:true} 或 {error}。
+  function parseEndpointJSONLenient(root) {
+    var ta = root.querySelector("#endpoint-json");
+    var text = ta.value.trim();
+    if (text === "") return { empty: true, payload: {}, apiKey: "" };
+    var obj;
+    try {
+      obj = JSON.parse(text);
+    } catch (e) {
+      return { error: "JSON 解析失败：" + e.message };
+    }
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      return { error: "JSON 顶层必须是对象" };
+    }
+    var payload = {};
+    if (typeof obj.id === "string" && obj.id.trim() !== "") payload.id = obj.id.trim();
+    if (typeof obj.name === "string" && obj.name.trim() !== "") payload.name = obj.name.trim();
+    if (typeof obj.baseUrl === "string") payload.baseUrl = obj.baseUrl.trim();
+    if (typeof obj.api === "string" && obj.api.trim() !== "") payload.api = obj.api.trim();
+    if (obj.pinned === true) payload.pinned = true;
+
+    var models = [];
+    if (Array.isArray(obj.models)) {
+      for (var i = 0; i < obj.models.length; i++) {
+        var m = obj.models[i];
+        if (!m || typeof m !== "object" || typeof m.id !== "string" || m.id.trim() === "") {
+          return { error: "models[" + i + "] 需要非空的 id" };
+        }
+        var item = { id: m.id.trim() };
+        if (typeof m.name === "string" && m.name.trim() !== "") item.name = m.name.trim();
+        if (typeof m.contextWindow === "number" && isFinite(m.contextWindow)) item.contextWindow = m.contextWindow;
+        if (typeof m.maxTokens === "number" && isFinite(m.maxTokens)) item.maxTokens = m.maxTokens;
+        if (Array.isArray(m.input) && m.input.length > 0) item.input = m.input;
+        models.push(item);
+      }
+    }
+    payload.models = models;
+
+    var apiKey = typeof obj.apiKey === "string" ? obj.apiKey.trim() : "";
+    return { payload: payload, apiKey: apiKey };
+  }
+
+  // parseEndpointJSON 是保存前的严格校验：在宽松解析之上要求 baseUrl 合法、
+  // 至少一个模型，并守住“编辑时 id 不可变”。apiKey 仅用于探测，保存前剥离。
+  function parseEndpointJSON(root) {
+    var parsed = parseEndpointJSONLenient(root);
+    if (parsed.error) return parsed;
+    if (parsed.empty) return { error: "JSON 不能为空" };
+    var payload = parsed.payload;
+    if (!payload.baseUrl) return { error: "baseUrl 不能为空" };
+    if (!isHTTPUrl(payload.baseUrl)) {
+      return { error: 'baseUrl "' + payload.baseUrl + '" 非法：需要 http:// 或 https:// 开头的完整地址' };
+    }
+    if (!payload.models || payload.models.length === 0) {
+      return { error: "models 至少需要一个模型" };
+    }
+    if (root._editingId) {
+      if (payload.id && payload.id !== root._editingId) {
+        return { error: "编辑现有端点时不能修改 id（当前为 " + root._editingId + "）" };
+      }
+      payload.id = root._editingId;
+    }
+    return parsed;
+  }
+
+  // fillFormFromEndpointJSON 用已解析的 JSON 回填表单；保留编辑模式与白名单状态。
+  function fillFormFromEndpointJSON(root, parsed) {
+    var editingId = root._editingId;
+    var editingProvider = root._editingProvider;
+    var allowlist = root._editingAllowlist;
+    resetEndpointForm(root);
+    root._editingId = editingId;
+    root._editingProvider = editingProvider;
+    root._editingAllowlist = allowlist;
+
+    var p = parsed.payload;
     var idInput = root.querySelector("#endpoint-id");
-    var nameInput = root.querySelector("#endpoint-name");
-    var urlInput = root.querySelector("#endpoint-baseurl");
+    idInput.value = p.id || "";
+    idInput.disabled = !!editingId;
+    root.querySelector("#endpoint-name").value = p.name || "";
     var apiSelect = root.querySelector("#endpoint-api");
+    // 管理页目前只提供 OpenAI Chat Completions；旧数据里的其他协议值回退为缺省。
+    apiSelect.value = "openai-completions";
+    var urlInput = root.querySelector("#endpoint-baseurl");
+    urlInput.value = p.baseUrl || "";
+    urlInput.placeholder = apiBaseUrlPlaceholder(apiSelect.value);
+    root.querySelector("#endpoint-pinned").checked = p.pinned === true;
+    if (parsed.apiKey) root.querySelector("#endpoint-apikey").value = parsed.apiKey;
+    (p.models || []).forEach(function (m) {
+      addModelRow(root, normalizeModelForRow(m));
+    });
+    setEndpointEditingIndicator(root, editingId ? editingProvider : null);
+  }
+
+  // submitEndpoint 校验并 POST 新端点：表单模式用逐行校验，JSON 模式用 parseEndpointJSON；
+  // 两条路径最终都提交同一份 payload，通过后清空表单并刷新缓存与列表。
+  function submitEndpoint(root) {
     var error = root.querySelector("#endpoint-error");
     var okBtn = root.querySelector("#endpoint-ok");
-
-    var id = idInput.value.trim();
-    var name = nameInput.value.trim();
-    var baseUrl = urlInput.value.trim();
-
     error.textContent = "";
-    var state = refreshEndpointForm(root);
-    if (!state.valid) {
-      error.textContent = state.message; // 与模型目录下方的内联原因一致，便于定位
-      return;
-    }
-    if (id === "" && name === "") {
-      error.textContent = "请至少填写 Provider ID 或显示名称";
-      idInput.focus();
-      return;
-    }
-    if (baseUrl === "") {
-      error.textContent = "baseUrl 不能为空";
-      urlInput.focus();
-      return;
-    }
-    if (!isHTTPUrl(baseUrl)) {
-      error.textContent = 'baseUrl "' + baseUrl + '" 非法：需要 http:// 或 https:// 开头的完整地址';
-      urlInput.focus();
-      return;
-    }
 
-    // 探测用的 API Key 绝不进入这里：下面的请求体里没有它。
-    var payload = {
-      baseUrl: baseUrl,
-      api: apiSelect.value,
-      models: state.models
-    };
-    if (id !== "") payload.id = id; // 留空则由服务端根据显示名生成；编辑时是同一个 id（覆盖保存）
-    if (name !== "") payload.name = name;
-    // 白名单开关随保存一起下发：后端据此把该端点的模型列表视为封闭集合。
-    var pinnedBox = root.querySelector("#endpoint-pinned");
-    payload.pinned = !!(pinnedBox && pinnedBox.checked);
+    var payload;
+    if (endpointMode(root) === "json") {
+      var parsed = parseEndpointJSON(root);
+      if (parsed.error) {
+        error.textContent = parsed.error;
+        root.querySelector("#endpoint-json-error").textContent = parsed.error;
+        return;
+      }
+      payload = parsed.payload;
+    } else {
+      var idInput = root.querySelector("#endpoint-id");
+      var nameInput = root.querySelector("#endpoint-name");
+      var urlInput = root.querySelector("#endpoint-baseurl");
+      var apiSelect = root.querySelector("#endpoint-api");
+
+      var id = idInput.value.trim();
+      var name = nameInput.value.trim();
+      var baseUrl = urlInput.value.trim();
+
+      var state = refreshEndpointForm(root);
+      if (!state.valid) {
+        error.textContent = state.message; // 与模型目录下方的内联原因一致，便于定位
+        return;
+      }
+      if (id === "" && name === "") {
+        error.textContent = "请至少填写 Provider ID 或显示名称";
+        idInput.focus();
+        return;
+      }
+      if (baseUrl === "") {
+        error.textContent = "baseUrl 不能为空";
+        urlInput.focus();
+        return;
+      }
+      if (!isHTTPUrl(baseUrl)) {
+        error.textContent = 'baseUrl "' + baseUrl + '" 非法：需要 http:// 或 https:// 开头的完整地址';
+        urlInput.focus();
+        return;
+      }
+
+      // 探测用的 API Key 绝不进入这里：下面的请求体里没有它。
+      payload = {
+        baseUrl: baseUrl,
+        api: apiSelect.value,
+        models: state.models
+      };
+      if (id !== "") payload.id = id; // 留空则由服务端根据显示名生成；编辑时是同一个 id（覆盖保存）
+      if (name !== "") payload.name = name;
+      // 白名单开关随保存一起下发：后端据此把该端点的模型列表视为封闭集合。
+      var pinnedBox = root.querySelector("#endpoint-pinned");
+      payload.pinned = !!(pinnedBox && pinnedBox.checked);
+    }
 
     okBtn.disabled = true;
     okBtn.textContent = "保存中…";
@@ -1681,14 +1959,14 @@
         var saved = j.provider || {};
         if (saved.id) {
           customEndpointDetails[saved.id] = {
-            baseUrl: baseUrl,
-            api: payload.api,
-            models: state.models,
-            pinned: payload.pinned
+            baseUrl: payload.baseUrl,
+            api: payload.api || "openai-completions",
+            models: payload.models,
+            pinned: !!payload.pinned
           };
         }
-        // 清空表单（含探测用 Key、编辑模式）便于连续操作；对话框保持打开，便于确认
-        // 列表与用户表已更新。编辑保存后也就此退出编辑模式。
+        // 清空表单（含探测用 Key、编辑模式、JSON 草稿）便于连续操作；对话框保持打开，
+        // 便于确认列表与用户表已更新。编辑保存后也就此退出编辑模式。
         resetEndpointForm(root);
         showMsg("自定义模型端点：" + (j.message || "已保存"));
         // 失效并重取 provider 缓存：端点列表与「用户 API Key」下拉立即出现新端点。
@@ -1736,6 +2014,8 @@
   // 取消 / Esc / 点击遮罩关闭，关闭时整体从 DOM 移除。
   function openModelSettings() {
     closeModelSettings();
+    // 每次打开都默认「应用到所有用户」，避免沿用上次对话框的「指定用户」范围。
+    keyTabScopeAll = true;
     var root = document.createElement("div");
     root.className = "modal-overlay";
     root.innerHTML =
@@ -1751,11 +2031,13 @@
       '<div class="tab-panel" id="settings-panel-endpoints" role="tabpanel" aria-labelledby="settings-tab-endpoints">' +
       '<div class="modal-note">端点对部署内所有用户可见、可在「用户 API Key」中选择；' +
       "每个用户的凭据（API Key）仍各自存储。</div>" +
-      '<label class="modal-label">内置 Provider</label>' +
+      '<details class="builtin-details">' +
+      '<summary>内置 Provider（只读）</summary>' +
       '<div class="endpoint-list" id="builtin-list">' +
       '<div class="endpoint-empty">正在加载…</div>' +
       "</div>" +
       '<div class="modal-hint">内置列表由部署的 <code>KEY_PROVIDERS</code> 决定，只读、不可编辑或删除。</div>' +
+      "</details>" +
       '<label class="modal-label">自定义端点</label>' +
       '<div class="endpoint-list" id="endpoint-list">' +
       '<div class="endpoint-empty">正在加载…</div>' +
@@ -1765,6 +2047,12 @@
       '<span class="endpoint-editing-note" id="endpoint-editing-note"></span>' +
       '<button class="secondary mini" id="endpoint-edit-cancel" title="放弃编辑，回到空白的新增端点表单">取消编辑</button>' +
       "</div>" +
+      // 输入方式：表单与 JSON 等价，切换时互相转换，草稿不丢。
+      '<div class="mode-switch" role="group" aria-label="端点输入方式">' +
+      '<button type="button" class="mode-btn" id="endpoint-mode-form" aria-pressed="true">表单输入</button>' +
+      '<button type="button" class="mode-btn" id="endpoint-mode-json" aria-pressed="false">JSON 输入</button>' +
+      "</div>" +
+      '<div id="endpoint-form-fields">' +
       '<label class="modal-label" for="endpoint-id">Provider ID（可选）</label>' +
       '<input type="text" id="endpoint-id" placeholder="acme-gateway" autocomplete="off" spellcheck="false" />' +
       '<div class="modal-hint" id="endpoint-id-hint"></div>' +
@@ -1776,8 +2064,6 @@
       '<label class="modal-label" for="endpoint-api">API 协议</label>' +
       '<select id="endpoint-api">' +
       '<option value="openai-completions">OpenAI Chat Completions</option>' +
-      '<option value="openai-responses">OpenAI Responses</option>' +
-      '<option value="anthropic-messages">Anthropic Messages</option>' +
       "</select>" +
       '<label class="modal-label" for="endpoint-apikey">API Key（仅用于探测，不会保存）</label>' +
       '<input type="text" id="endpoint-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
@@ -1801,28 +2087,52 @@
       '<span class="modal-hint" id="endpoint-catalog-note"></span>' +
       "</div>" +
       '<div class="modal-error" id="endpoint-model-error"></div>' +
+      "</div>" +
+      '<div id="endpoint-json-wrap" hidden>' +
+      '<div class="endpoint-section-head">' +
+      '<label class="modal-label" for="endpoint-json">端点配置（JSON）</label>' +
+      '<button type="button" class="secondary mini" id="endpoint-json-example">填入 DeepSeek 示例</button>' +
+      "</div>" +
+      '<textarea id="endpoint-json" class="json-editor" spellcheck="false"></textarea>' +
+      '<div class="modal-hint">字段与「保存端点」的请求体一致：<code>id</code>（可选；编辑时不可修改）、' +
+      "<code>name</code>、<code>baseUrl</code>（必填）、<code>api</code>（缺省 openai-completions）、" +
+      "<code>pinned</code>、<code>models</code>（至少一个，每项至少 <code>id</code>）。" +
+      "可选的 <code>apiKey</code> 仅用于探测，不会保存。</div>" +
+      '<div class="modal-error" id="endpoint-json-error"></div>' +
+      "</div>" +
       '<div class="modal-error" id="endpoint-error"></div>' +
       '<div class="modal-actions">' +
       '<button class="secondary" id="endpoint-cancel">取消</button>' +
       '<button id="endpoint-ok">保存端点</button>' +
       "</div>" +
       "</div>" +
-      // 标签页 2：用户 API Key（每用户凭据；用户与 provider 下拉每次显示都重填）。
+      // 标签页 2：用户 API Key（每用户凭据，可一次应用到所有用户）。
       '<div class="tab-panel" id="settings-panel-userkey" role="tabpanel" aria-labelledby="settings-tab-userkey" hidden>' +
-      '<label class="modal-label" for="key-user-select">用户</label>' +
-      '<select id="key-user-select"><option value="">请选择用户</option></select>' +
+      '<label class="modal-label">应用范围</label>' +
+      '<div class="mode-switch" role="group" aria-label="应用范围">' +
+      '<button type="button" class="mode-btn" id="key-scope-all" aria-pressed="true">所有用户（<span id="key-all-count">…</span>）</button>' +
+      '<button type="button" class="mode-btn" id="key-scope-pick" aria-pressed="false">指定用户</button>' +
+      "</div>" +
+      '<div id="key-user-picker" hidden>' +
+      '<div class="endpoint-rows-actions">' +
+      '<button type="button" class="secondary mini" id="key-pick-all">全选</button>' +
+      '<button type="button" class="secondary mini" id="key-pick-none">全不选</button>' +
+      '<span class="modal-hint" id="key-pick-count"></span>' +
+      "</div>" +
+      '<div class="user-picker" id="key-user-list"><div class="endpoint-empty">正在加载…</div></div>' +
+      "</div>" +
       '<label class="modal-label" for="key-provider-select">Provider</label>' +
       '<select id="key-provider-select"><option value="">加载中…</option></select>' +
       '<label class="modal-label" for="key-input">API Key</label>' +
       '<input type="text" id="key-input" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
-      '<div class="modal-note" id="key-provider-note"></div>' +
-      '<div class="modal-hint">Key 会写入 Secret 持久化并注入到该用户运行中的 agent；' +
-      "若 agent 尚未恢复将自动恢复。本页只设置该用户的凭据，端点由「模型端点」标签页维护。</div>" +
+      '<div class="modal-hint">Key 按用户分别持久化：运行中的 agent 立即注入；挂起的用户会在恢复后自动生效。' +
+      "本页只设置凭据，端点由「模型端点」标签页维护。</div>" +
+      '<div class="batch-result" id="key-result"></div>' +
       '<div class="modal-error" id="key-error"></div>' +
       '<div class="modal-actions">' +
       '<button class="secondary" id="key-cancel">关闭</button>' +
-      '<button class="danger" id="key-clear" disabled>清除 Key</button>' +
-      '<button id="key-ok">保存</button>' +
+      '<button class="danger" id="key-clear" disabled>清除所选用户的 Key</button>' +
+      '<button id="key-ok">保存到所选用户</button>' +
       "</div>" +
       "</div>" +
       "</div>";
@@ -1882,14 +2192,48 @@
       refreshEndpointForm(root);
     });
 
-    // 用户 API Key 标签页：用户 / provider 变化都重算提示与「清除 Key」可用性。
-    root.querySelector("#key-user-select").addEventListener("change", function () {
-      root.querySelector("#key-error").textContent = "";
-      syncKeyProviderToUser();
+    // 输入方式切换：表单 ↔ JSON，两者互相转换，草稿不丢。
+    root.querySelector("#endpoint-mode-form").addEventListener("click", function () {
+      setEndpointMode(root, "form");
+    });
+    root.querySelector("#endpoint-mode-json").addEventListener("click", function () {
+      setEndpointMode(root, "json");
+    });
+    root.querySelector("#endpoint-json").addEventListener("input", function () {
+      // JSON 被手工改过：切回表单失败时保留这份草稿，不被表单序列化覆盖。
+      root._endpointJSONPending = true;
+      refreshEndpointForm(root);
+    });
+    // 填入 DeepSeek 示例：给用户一个可以直接改的起点。
+    root.querySelector("#endpoint-json-example").addEventListener("click", function () {
+      var ta = root.querySelector("#endpoint-json");
+      ta.value = endpointJSONExample;
+      root._endpointJSONPending = true;
+      refreshEndpointForm(root);
+    });
+    // 表单被改过：表单重新成为唯一事实来源，下次切到 JSON 时按它序列化。
+    root.querySelector("#endpoint-form-fields").addEventListener("input", function () {
+      root._endpointJSONPending = false;
+    });
+    root.querySelector("#endpoint-form-fields").addEventListener("change", function () {
+      root._endpointJSONPending = false;
+    });
+
+    // 用户 API Key 标签页：应用范围 / 用户勾选 / provider 变化只清内联错误。
+    root.querySelector("#key-scope-all").addEventListener("click", function () {
+      setKeyScope(root, true);
+    });
+    root.querySelector("#key-scope-pick").addEventListener("click", function () {
+      setKeyScope(root, false);
+    });
+    root.querySelector("#key-pick-all").addEventListener("click", function () {
+      setKeyPickedAll(root, true);
+    });
+    root.querySelector("#key-pick-none").addEventListener("click", function () {
+      setKeyPickedAll(root, false);
     });
     root.querySelector("#key-provider-select").addEventListener("change", function () {
       root.querySelector("#key-error").textContent = "";
-      refreshKeyTabState();
     });
     root.querySelector("#key-clear").addEventListener("click", clearKeyTab);
     root.querySelector("#key-ok").addEventListener("click", saveKeyTab);
@@ -1914,25 +2258,30 @@
     document.body.appendChild(root);
     modelSettingsEl = root;
     root.querySelector("#endpoint-id").focus();
-    // 初始化状态：Provider ID 提示、显示名称占位符，模型目录为空时保存按钮禁用。
+    // 初始化状态：表单为默认输入方式，Provider ID 提示、显示名称占位符，
+    // 模型目录为空时保存按钮禁用。
+    applyEndpointMode(root);
+    root.querySelector("#endpoint-json").placeholder = endpointJSONExample;
     refreshEndpointForm(root);
     // 填充内置 / 自定义端点列表与「用户 API Key」的 provider 下拉；fetchProviders 失败时
     // 只用兜底列表，自定义端点列表显示空态。
     loadEndpoints(false);
   }
 
-  // ---- 标签页 2：用户 API Key（每用户凭据） ----
+  // ---- 标签页 2：用户 API Key（批量：所有用户 / 指定用户） ----
 
-  // keyTabUsers 缓存「用户 API Key」标签页的用户下拉数据（name -> 用户摘要），用于计算
-  // 提示文案与「清除 Key」的可用性；每次显示该标签页时重新拉取 api/users。
-  var keyTabUsers = {};
+  // keyTabUsers 是用户名列表；keyTabPicked 记录「指定用户」下的勾选（跨自动刷新保留）；
+  // keyTabScopeAll 为真时目标范围是全部用户。
+  var keyTabUsers = [];
+  var keyTabPicked = {};
+  var keyTabScopeAll = true;
 
-  // loadKeyTabUsers 拉取 api/users 并重建用户下拉：保留已选用户，未选时保持「请选择用户」
-  // 占位项（保存时会拦住空值）。失败只写标签页内联错误，不影响页面其它部分。
+  // loadKeyTabUsers 拉取 api/users 并重建勾选列表：新用户默认勾选，已删除的用户清掉选择，
+  // 失败只写标签页内联错误。
   function loadKeyTabUsers() {
     var root = modelSettingsEl;
     if (!root) return;
-    if (!root.querySelector("#key-user-select")) return;
+    if (!root.querySelector("#key-user-list")) return;
     fetch("api/users")
       .then(function (res) {
         return res.json().then(function (j) {
@@ -1942,21 +2291,17 @@
       })
       .then(function (data) {
         if (root !== modelSettingsEl) return; // 对话框已关闭或已重开，丢弃本次结果
-        var select = root.querySelector("#key-user-select");
-        if (!select) return;
-        var prev = select.value;
         var users = (data && data.users) || [];
-        keyTabUsers = {};
-        select.innerHTML = '<option value="">请选择用户</option>';
-        users.forEach(function (u) {
-          keyTabUsers[u.name] = u;
-          var opt = document.createElement("option");
-          opt.value = u.name;
-          opt.textContent = u.name;
-          select.appendChild(opt);
+        keyTabUsers = users.map(function (u) { return u.name; });
+        var known = {};
+        keyTabUsers.forEach(function (name) {
+          known[name] = true;
+          if (!(name in keyTabPicked)) keyTabPicked[name] = true;
         });
-        if (prev && keyTabUsers[prev]) select.value = prev;
-        syncKeyProviderToUser();
+        Object.keys(keyTabPicked).forEach(function (name) {
+          if (!known[name]) delete keyTabPicked[name];
+        });
+        renderKeyUserList(root);
       })
       .catch(function (err) {
         if (root !== modelSettingsEl) return;
@@ -1965,72 +2310,74 @@
       });
   }
 
-  // ensureKeyProviderOption 保证 provider 下拉里存在 id 选项：用户已存储的 provider 可能
-  // 已被删除、不在部署列表中，补一项以免选不中、无法按旧 provider 执行切换/清除。
-  function ensureKeyProviderOption(select, id) {
-    if (!id) return;
-    for (var i = 0; i < select.options.length; i++) {
-      if (select.options[i].value === id) return;
-    }
-    var opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = providerDisplayName(id);
-    select.insertBefore(opt, select.firstChild);
-  }
-
-  // keyTabStoredProvider 返回当前选中用户已存储的 provider id（未设置则为空串）。
-  function keyTabStoredProvider() {
-    if (!modelSettingsEl) return "";
-    var select = modelSettingsEl.querySelector("#key-user-select");
-    var u = select ? keyTabUsers[select.value] : null;
-    if (!u || !u.hasPersonalKey) return "";
-    return u.personalKeyProvider || "";
-  }
-
-  // syncKeyProviderToUser 把 provider 下拉切到所选用户已存储的 provider（与旧对话框一致）：
-  // 该 provider 已从部署列表删除时补一项，保证仍能显示提示并执行清除；随后重算提示文案。
-  function syncKeyProviderToUser() {
-    if (!modelSettingsEl) return;
-    var select = modelSettingsEl.querySelector("#key-provider-select");
-    if (!select) return;
-    var stored = keyTabStoredProvider();
-    if (stored) {
-      ensureKeyProviderOption(select, stored);
-      select.value = stored;
-    }
-    refreshKeyTabState();
-  }
-
-  // refreshKeyTabState 重算「用户 API Key」的提示与「清除 Key」可用性：未选用户 → 提示
-  // 清空、清除禁用；未设置 → 说明保存后会使用所选 provider；已设置 → 覆盖或切换提示。
-  function refreshKeyTabState() {
-    if (!modelSettingsEl) return;
-    var userSelect = modelSettingsEl.querySelector("#key-user-select");
-    var providerSelect = modelSettingsEl.querySelector("#key-provider-select");
-    var note = modelSettingsEl.querySelector("#key-provider-note");
-    var clearBtn = modelSettingsEl.querySelector("#key-clear");
-    if (!userSelect || !providerSelect || !note || !clearBtn) return;
-    var u = keyTabUsers[userSelect.value];
-    clearBtn.disabled = !(u && u.hasPersonalKey);
-    if (!u) {
-      note.textContent = "";
-      return;
-    }
-    var stored = u.hasPersonalKey ? (u.personalKeyProvider || "") : "";
-    if (!stored) {
-      note.textContent = "该用户当前未设置专属 Key；保存后将使用所选的 provider。";
-      return;
-    }
-    var storedName = providerDisplayName(stored);
-    if (providerSelect.value === stored) {
-      note.textContent = "当前已设置：" + storedName + "（保存后将覆盖现有 Key）";
+  // renderKeyUserList 重建用户勾选列表并刷新计数。
+  function renderKeyUserList(root) {
+    var box = root.querySelector("#key-user-list");
+    if (!box) return;
+    box.innerHTML = "";
+    if (keyTabUsers.length === 0) {
+      box.innerHTML = '<div class="endpoint-empty">暂无用户</div>';
     } else {
-      note.textContent = "当前已设置：" + storedName + "（保存后将切换并退出旧 provider）";
+      keyTabUsers.forEach(function (name) {
+        var label = document.createElement("label");
+        var cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = name;
+        cb.checked = keyTabPicked[name] === true;
+        cb.addEventListener("change", function () {
+          keyTabPicked[name] = cb.checked;
+          updateKeyScopeCounts(root);
+        });
+        var span = document.createElement("span");
+        span.textContent = name;
+        label.appendChild(cb);
+        label.appendChild(span);
+        box.appendChild(label);
+      });
     }
+    updateKeyScopeCounts(root);
   }
 
-  // fillKeyProviderSelect 用 provider 列表重填「用户 API Key」的 provider 下拉：自定义端点加
-  // 「（自定义）」后缀；保留当前选择，用户已存储但已下架的 provider 会补一项。
+  // updateKeyScopeCounts 刷新「所有用户（N）」、已选计数、列表显隐与按钮可用性。
+  function updateKeyScopeCounts(root) {
+    if (!root) return;
+    var allCount = root.querySelector("#key-all-count");
+    if (allCount) allCount.textContent = String(keyTabUsers.length);
+    var picked = keyTabUsers.filter(function (n) { return keyTabPicked[n] === true; }).length;
+    var pickCount = root.querySelector("#key-pick-count");
+    if (pickCount) pickCount.textContent = "已选 " + picked + " / " + keyTabUsers.length + " 个用户";
+    var picker = root.querySelector("#key-user-picker");
+    if (picker) picker.hidden = keyTabScopeAll;
+    var allBtn = root.querySelector("#key-scope-all");
+    var pickBtn = root.querySelector("#key-scope-pick");
+    if (allBtn) allBtn.setAttribute("aria-pressed", keyTabScopeAll ? "true" : "false");
+    if (pickBtn) pickBtn.setAttribute("aria-pressed", keyTabScopeAll ? "false" : "true");
+    var empty = keyTabUsers.length === 0 || (!keyTabScopeAll && picked === 0);
+    var clearBtn = root.querySelector("#key-clear");
+    if (clearBtn) clearBtn.disabled = empty;
+    var okBtn = root.querySelector("#key-ok");
+    if (okBtn) okBtn.disabled = empty || !root.querySelector("#key-provider-select").value;
+  }
+
+  function setKeyScope(root, all) {
+    keyTabScopeAll = !!all;
+    root.querySelector("#key-error").textContent = "";
+    updateKeyScopeCounts(root);
+  }
+
+  function setKeyPickedAll(root, checked) {
+    keyTabUsers.forEach(function (name) { keyTabPicked[name] = !!checked; });
+    renderKeyUserList(root);
+  }
+
+  // selectedKeyTargets 返回本次操作的用户范围：全部用户返回空数组（后端把空 users 视为全部），
+  // 指定用户返回已勾选的名字。
+  function selectedKeyTargets() {
+    if (keyTabScopeAll) return [];
+    return keyTabUsers.filter(function (n) { return keyTabPicked[n] === true; });
+  }
+
+  // fillKeyProviderSelect 用 provider 列表重填 provider 下拉：自定义端点加「（自定义）」后缀。
   function fillKeyProviderSelect(list) {
     if (!modelSettingsEl) return;
     var select = modelSettingsEl.querySelector("#key-provider-select");
@@ -2043,34 +2390,54 @@
       opt.textContent = p.name + (p.custom ? "（自定义）" : "");
       select.appendChild(opt);
     });
-    var wanted = prev || keyTabStoredProvider() || "";
-    if (!wanted && select.options.length) wanted = select.options[0].value;
-    if (wanted) {
-      ensureKeyProviderOption(select, wanted);
-      select.value = wanted;
-    }
+    if (prev) select.value = prev;
+    if (select.options.length && select.value === "") select.value = select.options[0].value;
     select.disabled = select.options.length === 0;
-    refreshKeyTabState();
+    updateKeyScopeCounts(modelSettingsEl);
   }
 
-  // saveKeyTab 校验用户与非空 Key 后提交：成功后清空输入框并刷新用户摘要（提示与「清除
-  // Key」随之更新）；失败保留已输入的 Key，便于直接重试。
+  // renderBatchResult 展示批量结果：一句汇总 + 失败明细。
+  function renderBatchResult(root, data) {
+    var box = root.querySelector("#key-result");
+    if (!box) return;
+    box.innerHTML = "";
+    var summary = document.createElement("div");
+    summary.className = "batch-summary";
+    summary.textContent = (data && data.message) || "";
+    box.appendChild(summary);
+    var failed = (data && data.failed) || [];
+    if (failed.length) {
+      var ul = document.createElement("ul");
+      ul.className = "batch-fail";
+      failed.forEach(function (f) {
+        var li = document.createElement("li");
+        li.textContent = f.name + "：" + f.error;
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+  }
+
+  // saveKeyTab 把同一个 Key 应用到所选范围（默认全部用户）：一次请求，逐用户反馈结果。
   function saveKeyTab() {
     var root = modelSettingsEl;
     if (!root) return;
-    var userSelect = root.querySelector("#key-user-select");
     var providerSelect = root.querySelector("#key-provider-select");
     var input = root.querySelector("#key-input");
     var error = root.querySelector("#key-error");
-    if (!userSelect || !providerSelect || !input || !error) return;
-    var name = userSelect.value;
-    if (name === "") {
-      error.textContent = "请先选择用户";
-      userSelect.focus();
+    var btn = root.querySelector("#key-ok");
+    if (!providerSelect || !input || !error || !btn) return;
+    if (keyTabUsers.length === 0) {
+      error.textContent = "用户列表尚未加载，请稍候…";
       return;
     }
     if (providerSelect.disabled || providerSelect.value === "") {
       error.textContent = "Provider 列表加载中，请稍候…";
+      return;
+    }
+    var targets = selectedKeyTargets();
+    if (!keyTabScopeAll && targets.length === 0) {
+      error.textContent = "请至少勾选一个用户";
       return;
     }
     var key = input.value.trim();
@@ -2080,42 +2447,13 @@
       return;
     }
     error.textContent = "";
-    submitUserAPIKey(name, key, providerSelect.value, function () {
-      if (root !== modelSettingsEl) return;
-      if (input.value.trim() === key) input.value = "";
-      loadKeyTabUsers(); // 刷新用户摘要，使提示与「清除 Key」反映新状态
-    });
-  }
-
-  // clearKeyTab 清除所选用户的专属 Key：确认文案由 clearUserAPIKey 按该用户实际存储的
-  // provider 生成；成功后刷新用户摘要（用户表的 Key 徽标由 clearUserAPIKey 内部 listUsers 更新）。
-  function clearKeyTab() {
-    var root = modelSettingsEl;
-    if (!root) return;
-    var userSelect = root.querySelector("#key-user-select");
-    if (!userSelect || userSelect.value === "") return;
-    var name = userSelect.value;
-    var u = keyTabUsers[name];
-    if (!u || !u.hasPersonalKey) return;
-    clearUserAPIKey(name, u.personalKeyProvider || "", function () {
-      loadKeyTabUsers();
-    });
-  }
-
-  // clearUserAPIKey 清除该用户的专属 Key；确认文案按用户实际配置的 provider 命名，
-  // 未配置时使用通用文案。done 是可选回调：成功后调用，让「用户 API Key」标签页刷新用户摘要。
-  function clearUserAPIKey(name, providerId, done) {
-    var providerName = providerDisplayName(providerId) || providerId;
-    var confirmText = providerName ?
-      "确认清除 \"" + name + "\" 的 " + providerName + " 专属 API Key？\n" +
-      "其 agent 将退出 " + providerName + " 登录并回退到内置/环境变量凭据。" :
-      "确认清除 \"" + name + "\" 的专属 API Key？\n" +
-      "该用户当前未存储专属 Key，清除操作不会改变其凭据来源。";
-    if (!window.confirm(confirmText)) {
-      return;
-    }
-    clearMsg();
-    fetch("api/users/" + encodeURIComponent(name) + "/apikey", { method: "DELETE" })
+    btn.disabled = true;
+    btn.textContent = "保存中…";
+    fetch("api/apikeys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: key, providerId: providerSelect.value, users: targets })
+    })
       .then(function (res) {
         return res.json().then(function (j) {
           if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
@@ -2123,12 +2461,70 @@
         });
       })
       .then(function (j) {
-        showMsg("用户 " + esc(j.name || name) + "：" + (j.message || "Key 已清除"));
+        if (root !== modelSettingsEl) return;
+        if (input.value.trim() === key) input.value = "";
+        renderBatchResult(root, j);
+        showMsg(j.message || "Key 已应用");
         listUsers();
-        if (done) done();
       })
       .catch(function (err) {
-        showMsg("清除 Key 失败：" + err.message, true);
+        if (root === modelSettingsEl) error.textContent = "应用失败：" + err.message;
+        showMsg("应用 API Key 失败：" + err.message, true);
+      })
+      .finally(function () {
+        btn.textContent = "保存到所选用户";
+        updateKeyScopeCounts(root);
+      });
+  }
+
+  // clearKeyTab 清除所选范围的专属 Key：一次请求，逐用户反馈结果。
+  function clearKeyTab() {
+    var root = modelSettingsEl;
+    if (!root) return;
+    var targets = selectedKeyTargets();
+    var error = root.querySelector("#key-error");
+    var btn = root.querySelector("#key-clear");
+    if (!error || !btn) return;
+    if (keyTabUsers.length === 0) {
+      error.textContent = "用户列表尚未加载，请稍候…";
+      return;
+    }
+    if (!keyTabScopeAll && targets.length === 0) {
+      error.textContent = "请至少勾选一个用户";
+      return;
+    }
+    var scopeText = keyTabScopeAll ? ("全部 " + keyTabUsers.length + " 个用户") : (targets.length + " 个所选用户");
+    if (!window.confirm("确认清除 " + scopeText + " 的专属 API Key？\n" +
+        "运行中的 agent 会退出对应 provider 登录；挂起的用户恢复后回退到内置/环境变量凭据。")) {
+      return;
+    }
+    error.textContent = "";
+    btn.disabled = true;
+    btn.textContent = "清除中…";
+    fetch("api/apikeys/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ users: targets })
+    })
+      .then(function (res) {
+        return res.json().then(function (j) {
+          if (!res.ok) throw new Error((j && j.error) || ("HTTP " + res.status));
+          return j;
+        });
+      })
+      .then(function (j) {
+        if (root !== modelSettingsEl) return;
+        renderBatchResult(root, j);
+        showMsg(j.message || "Key 已清除");
+        listUsers();
+      })
+      .catch(function (err) {
+        if (root === modelSettingsEl) error.textContent = "清除失败：" + err.message;
+        showMsg("清除 API Key 失败：" + err.message, true);
+      })
+      .finally(function () {
+        btn.textContent = "清除所选用户的 Key";
+        updateKeyScopeCounts(root);
       });
   }
 

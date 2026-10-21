@@ -277,6 +277,8 @@ if ($http_accept !~* "text/html") { return 503; }
 | DELETE | `/usermanagement/api/providers/{id}` | 移除自定义端点 |
 | POST | `/usermanagement/api/users/{name}/apikey` | 设置用户专属 provider Key |
 | DELETE | `/usermanagement/api/users/{name}/apikey` | 清除用户专属 provider Key |
+| POST | `/usermanagement/api/apikeys` | 批量设置用户专属 Key（省略 `users` = 全部用户） |
+| POST | `/usermanagement/api/apikeys/clear` | 批量清除用户专属 Key（省略 `users` = 全部用户） |
 | POST / PUT | `/usermanagement/api/users/{name}/expiry` | 设置账号有效期 |
 | DELETE | `/usermanagement/api/users/{name}/expiry` | 清除有效期 |
 | POST / PUT | `/usermanagement/api/users/{name}/tier` | 设置资源档位 |
@@ -770,6 +772,80 @@ curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/users/alice/
 
 ```bash
 curl -sS -u admin:'mf@pass2026' -X DELETE "${BASE}/usermanagement/api/users/alice/apikey"
+```
+
+---
+
+### 批量用户 API Key（新增，暂不占用编号）
+
+管理 UI 的「模型设置 → 用户 API Key」默认把同一个 Key 应用到**所有用户**，也可切「指定用户」
+勾选子集；这两个端点即其后端。它们是对 §4.6 / §4.7 单用户语义的扇出：**一次 Secret 写入**
+（原子），随后仅对 `RUNNING` actor 立即注入 / 登出；挂起用户的凭据先落库，由 30s 协调器和
+resume 路径在恢复时自动生效（批量操作**不会**唤醒整个用户群）。逐用户结果在响应里返回，
+单个用户失败不影响其他用户。
+
+#### `POST /api/apikeys` — 批量设置
+
+**请求体**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `apiKey` | string | 是 | provider Key（去首尾空白后不得为空；响应与日志均不回显） |
+| `providerId` | string | 否 | 缺省 `deepseek`；须在 `/api/providers` 的 `id` 中 |
+| `users` | string[] | 否 | 省略 / `null` / `[]` = atespace 内**全部用户**；显式列表须为 DNS-1123、去重、最多 500 个 |
+
+**成功响应** `200`：
+
+```json
+{
+  "providerId": "deepseek",
+  "total": 3,
+  "ok": ["alice", "bob"],
+  "pending": ["carol"],
+  "failed": [{"name": "dave", "error": "注入失败: ..."}],
+  "message": "已保存 3 个用户的 DeepSeek Key：2 个运行中已注入，1 个将在恢复后自动生效，0 个失败"
+}
+```
+
+- `ok`：运行中且已注入的 actor；`pending`：已落库、等待恢复的用户；`failed`：注入失败或
+  显式列表中不存在的用户（Key 仍已落库，重试幂等）。
+- 切换 provider（该用户原有 provider 与新 provider 不同）时，先对运行中的 actor 登出旧
+  provider；登出失败会记入 `failed`，但新 Key 仍会注入。
+
+**错误**：`400`（请求体非法 / `apiKey` 为空 / provider 不支持 / 用户名非法 / 超过 500 个 /
+显式列表没有有效项）、`500`（Secret 写入失败——此时**未做任何注入**）。
+
+```bash
+# 应用到所有用户
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/apikeys" \
+  -H 'Content-Type: application/json' -d '{"apiKey":"sk-...","providerId":"deepseek"}'
+# 只应用到指定用户
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/apikeys" \
+  -H 'Content-Type: application/json' -d '{"apiKey":"sk-...","users":["alice","bob"]}'
+```
+
+#### `POST /api/apikeys/clear` — 批量清除
+
+**请求体**：`{"users":["alice","bob"]}`；`users` 省略 = 全部用户（其余校验同上）。
+
+**成功响应** `200`：
+
+```json
+{
+  "total": 3,
+  "cleared": ["alice"],
+  "pending": ["bob"],
+  "failed": [],
+  "message": "已处理 3 个用户：1 个已清除，1 个挂起（恢复后无凭据），0 个失败"
+}
+```
+
+`cleared` 包含运行中已登出的用户与本来就没有存储记录的用户；`pending` 是挂起用户（无运行中
+agent 可登出，其存储记录已删除）；`failed` 表示已删除存储记录但 actor 登出失败（可重试）。
+
+```bash
+curl -sS -u admin:'mf@pass2026' -X POST "${BASE}/usermanagement/api/apikeys/clear" \
+  -H 'Content-Type: application/json' -d '{"users":["alice","bob"]}'
 ```
 
 ---

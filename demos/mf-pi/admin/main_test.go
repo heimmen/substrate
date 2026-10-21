@@ -264,6 +264,26 @@ func (s *fakeKeyStore) Delete(name string) error {
 	return nil
 }
 
+func (s *fakeKeyStore) SetMany(keys map[string]providerKey) error {
+	if s.err != nil {
+		return s.err
+	}
+	for name, key := range keys {
+		s.keys[name] = key
+	}
+	return nil
+}
+
+func (s *fakeKeyStore) DeleteMany(names []string) error {
+	if s.err != nil {
+		return s.err
+	}
+	for _, name := range names {
+		delete(s.keys, name)
+	}
+	return nil
+}
+
 // fakeExpiryStore is an in-memory expiryStore for tests.
 type fakeExpiryStore struct {
 	expiries map[string]string
@@ -330,6 +350,7 @@ func (s *fakeTierStore) Delete(name string) error {
 // set/clear calls per host and can be configured to fail. Stored credentials
 // are tracked per (host, provider) because one provider is kept per user.
 type fakeActorAuth struct {
+	mu           sync.Mutex
 	storedByHost map[string]map[string]string // host -> provider -> key
 	setCalls     []string
 	clearCalls   []string
@@ -343,7 +364,7 @@ func newFakeActorAuth() *fakeActorAuth {
 
 // storeKey records a credential for host+providerID, creating the per-host map
 // on first write so reads (isKeyStored, the assertions) never mutate the
-// fixture and len(storedByHost) stays meaningful.
+// fixture and len(storedByHost) stays meaningful. Callers hold f.mu.
 func (f *fakeActorAuth) storeKey(host, providerID, key string) {
 	if f.storedByHost[host] == nil {
 		f.storedByHost[host] = map[string]string{}
@@ -352,6 +373,8 @@ func (f *fakeActorAuth) storeKey(host, providerID, key string) {
 }
 
 func (f *fakeActorAuth) setPersonalKey(_ context.Context, host, providerID, apiKey string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.setErr != nil {
 		return f.setErr
 	}
@@ -361,6 +384,8 @@ func (f *fakeActorAuth) setPersonalKey(_ context.Context, host, providerID, apiK
 }
 
 func (f *fakeActorAuth) clearPersonalKey(_ context.Context, host, providerID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.clearErr != nil {
 		return f.clearErr
 	}
@@ -375,6 +400,8 @@ func (f *fakeActorAuth) clearPersonalKey(_ context.Context, host, providerID str
 // in-memory map, which setPersonalKey populates and clearPersonalKey empties —
 // mirroring pi-web's source=="stored" vs "environment" distinction.
 func (f *fakeActorAuth) isKeyStored(_ context.Context, host, providerID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	_, ok := f.storedByHost[host][providerID]
 	return ok, nil
 }
@@ -427,6 +454,8 @@ func doRequest(s *server, method, path, body string) *httptest.ResponseRecorder 
 		s.handleCreateUser(rec, req)
 	case strings.HasPrefix(path, "/api/users/"):
 		s.handleUserSubresource(rec, req)
+	case strings.HasPrefix(path, "/api/apikeys"):
+		s.handleBatchAPIKeys(rec, req)
 	case path == "/api/providers":
 		s.handleListProviders(rec, req)
 	case path == "/internal/providers/models.json":
@@ -2919,5 +2948,218 @@ func TestUnpinnedEndpointGrows(t *testing.T) {
 	body = `{"id":"gw","name":"GW","baseUrl":"https://h/v1","models":[{"id":"a"},{"id":"b"}]}`
 	if rec := doRequest(s, http.MethodPost, "/api/providers", body); rec.Code != http.StatusOK {
 		t.Errorf("unpinned grow: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---- Batch credential fan-out (POST /api/apikeys, /api/apikeys/clear) ----
+
+func TestBatchSetAPIKeyAllUsersPersistsAndInjectsRunning(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	addActor(f, "mfpi", "bob", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	addActor(f, "mfpi", "carol", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-all","providerId":"deepseek"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[batchSetResponse](t, rec)
+	if resp.Total != 3 || len(resp.OK) != 2 || len(resp.Pending) != 1 || len(resp.Failed) != 0 {
+		t.Fatalf("resp = %+v, want total=3 ok=2 pending=1 failed=0", resp)
+	}
+	if resp.Pending[0] != "carol" {
+		t.Errorf("pending = %v, want [carol]", resp.Pending)
+	}
+	for _, name := range []string{"alice", "bob", "carol"} {
+		if got, ok := store.Get(name); !ok || got.APIKey != "sk-all" || got.ProviderID != "deepseek" {
+			t.Errorf("store[%s] = %+v, ok=%v; want sk-all/deepseek", name, got, ok)
+		}
+	}
+	if len(auth.setCalls) != 2 {
+		t.Errorf("setCalls = %v, want one per RUNNING user", auth.setCalls)
+	}
+	if len(f.resumed) != 0 {
+		t.Errorf("resumed = %v, want none (a batch must not wake suspended users)", f.resumed)
+	}
+}
+
+func TestBatchSetAPIKeySubset(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	addActor(f, "mfpi", "bob", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-one","users":["alice"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := store.Get("alice"); !ok {
+		t.Errorf("alice key was not stored")
+	}
+	if _, ok := store.Get("bob"); ok {
+		t.Errorf("bob key was stored despite not being a target")
+	}
+}
+
+func TestBatchSetAPIKeyUnknownUserIsReported(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-x","users":["alice","nobody"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[batchSetResponse](t, rec)
+	if len(resp.Failed) != 1 || resp.Failed[0].Name != "nobody" {
+		t.Errorf("failed = %+v, want [nobody]", resp.Failed)
+	}
+	if _, ok := store.Get("alice"); !ok {
+		t.Errorf("alice key was not stored")
+	}
+}
+
+func TestBatchSetAPIKeyRejectsInvalidProvider(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-x","providerId":"nope"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.keys) != 0 {
+		t.Errorf("store mutated on invalid provider: %v", store.keys)
+	}
+}
+
+func TestBatchSetAPIKeyRejectsEmptyKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"   "}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBatchSetAPIKeyStoreFailureIsAtomic(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	addActor(f, "mfpi", "bob", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	store.err = errors.New("secret unavailable")
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-x"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.setCalls) != 0 {
+		t.Errorf("actor driven despite store failure: %v", auth.setCalls)
+	}
+}
+
+func TestBatchSetAPIKeyInjectionFailureKeepsStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	auth.setErr = errors.New("actor unreachable")
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-x","users":["alice"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[batchSetResponse](t, rec)
+	if len(resp.Failed) != 1 || resp.Failed[0].Name != "alice" {
+		t.Errorf("failed = %+v, want [alice]", resp.Failed)
+	}
+	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-x" {
+		t.Errorf("stored key = %+v, ok=%v; want it kept for retry", got, ok)
+	}
+}
+
+func TestBatchSetAPIKeyProviderSwitchLogsOutOld(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	store.Set("alice", providerKey{ProviderID: "openai", APIKey: "sk-old"})
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-new","providerId":"deepseek","users":["alice"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|openai" {
+		t.Errorf("clearCalls = %v, want [%s|openai]", auth.clearCalls, aliceHost)
+	}
+	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-new" || got.ProviderID != "deepseek" {
+		t.Errorf("stored key = %+v, ok=%v; want sk-new/deepseek", got, ok)
+	}
+}
+
+func TestBatchClearAPIKeys(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	addActor(f, "mfpi", "bob", "STATUS_SUSPENDED", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	store.Set("alice", providerKey{ProviderID: "deepseek", APIKey: "sk-a"})
+	store.Set("bob", providerKey{ProviderID: "deepseek", APIKey: "sk-b"})
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/apikeys/clear", `{"users":["alice","bob"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decode[batchClearResponse](t, rec)
+	if len(resp.Cleared) != 1 || resp.Cleared[0] != "alice" {
+		t.Errorf("cleared = %v, want [alice]", resp.Cleared)
+	}
+	if len(resp.Pending) != 1 || resp.Pending[0] != "bob" {
+		t.Errorf("pending = %v, want [bob]", resp.Pending)
+	}
+	for _, name := range []string{"alice", "bob"} {
+		if _, ok := store.Get(name); ok {
+			t.Errorf("store[%s] still has a key after clear", name)
+		}
+	}
+	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|deepseek" {
+		t.Errorf("clearCalls = %v, want [%s|deepseek]", auth.clearCalls, aliceHost)
+	}
+}
+
+func TestBatchRejectsInvalidUserName(t *testing.T) {
+	s := newTestServer(newFake())
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"apiKey":"sk-x","users":["Bad_Name"]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBatchRejectsTooManyUsers(t *testing.T) {
+	s := newTestServer(newFake())
+	names := make([]string, batchMaxUsers+1)
+	for i := range names {
+		names[i] = fmt.Sprintf("user-%03d", i)
+	}
+	body, err := json.Marshal(map[string]any{"apiKey": "sk-x", "users": names})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", string(body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }
