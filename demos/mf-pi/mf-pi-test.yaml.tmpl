@@ -67,9 +67,10 @@ metadata:
     # test workers and prod actors on prod workers.
     workload: mf-pi-test
 spec:
-  # Number of physical workers; bounds the max number of concurrently-active
-  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 2).
-  replicas: ${MFPI_WORKER_REPLICAS}
+  # Base (legacy) tier; unused by the demo's users and by the E2E scripts (both
+  # target the small tier). Configurable via ${MFPI_WORKER_REPLICAS_BASE}
+  # (default 0) so a plain deploy does not spend idle worker pods on it.
+  replicas: ${MFPI_WORKER_REPLICAS_BASE}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
 ---

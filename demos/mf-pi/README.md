@@ -69,7 +69,7 @@ docker push localhost:5001/pause:3.10.2
 
 在 `demos/mf-pi` 目录下运行 `./deploy.sh`。所有配置均为可选，未设置时回退到
 kind/离线友好的默认值（`KO_DOCKER_REPO=localhost:5001`、
-`BUCKET_NAME=ate-snapshots`、`MFPI_WORKER_REPLICAS=16`）。`DEEPSEEK_API_KEY` 未
+`BUCKET_NAME=ate-snapshots`、`MFPI_WORKER_REPLICAS_SMALL=48`）。`DEEPSEEK_API_KEY` 未
 导出时会尝试从上一次部署创建的 `mf-pi-provider-config` Secret 中读取：
 
 ```bash
@@ -81,14 +81,14 @@ DEEPSEEK_API_KEY=<key> ./deploy.sh
 ```
 
 也可通过 install-ate harness 部署（`DEEPSEEK_API_KEY`、`BUCKET_NAME`、
-`KO_DOCKER_REPO` 必须设置；`MFPI_WORKER_REPLICAS` 可选，默认 `4`，决定最大同时
+`KO_DOCKER_REPO` 必须设置；`MFPI_WORKER_REPLICAS_SMALL/MID/LARGE` 可选，决定各档位最大同时
 活跃用户数）：
 
 ```bash
 DEEPSEEK_API_KEY=<key> \
 BUCKET_NAME=ate-snapshots \
 KO_DOCKER_REPO=localhost:5001 \
-MFPI_WORKER_REPLICAS=4 \
+MFPI_WORKER_REPLICAS_SMALL=48 \
 ./hack/install-ate-kind.sh --deploy-demo-mf-pi
 ```
 
@@ -582,7 +582,7 @@ worker），由环境变量控制：
 
 | 变量 | 作用 | deploy.sh（生产） | deploy-test.sh（测试） |
 |---|---|---|---|
-| `MFPI_WORKER_REPLICAS` | base 池（legacy，无 CPU request） | `16` | `2` |
+| `MFPI_WORKER_REPLICAS_BASE` | base 池（legacy，无 CPU request） | `0` | `0` |
 | `MFPI_WORKER_REPLICAS_SMALL` | **small 池（默认档位）** | `48` | `8` |
 | `MFPI_WORKER_REPLICAS_MID` | mid 池（每 worker 1 核） | `1` | `1` |
 | `MFPI_WORKER_REPLICAS_LARGE` | large 池（每 worker 2 核） | `1` | `1` |
@@ -595,8 +595,9 @@ MFPI_WORKER_REPLICAS_MID=2 MFPI_WORKER_REPLICAS_LARGE=1 ./deploy.sh
 MFPI_WORKER_REPLICAS_SMALL=32 ./deploy-test.sh   # 独占大节点时才调大
 ```
 
-> `hack/install-ate*.sh --deploy-demo-mf-pi` 的默认：`MFPI_WORKER_REPLICAS=4`、
+> `hack/install-ate*.sh --deploy-demo-mf-pi` 的默认：`MFPI_WORKER_REPLICAS_BASE=0`、
 > `MFPI_WORKER_REPLICAS_SMALL=32`、`MFPI_WORKER_REPLICAS_MID/LARGE=1`。
+> 旧的 `MFPI_WORKER_REPLICAS` 仍作为 `_BASE` 的别名被接受。
 
 > [!IMPORTANT]
 > **mid / large 必须用自己的变量，不能和 small 共用 `MFPI_WORKER_REPLICAS`。**
@@ -616,15 +617,11 @@ MFPI_WORKER_REPLICAS_SMALL=32 ./deploy-test.sh   # 独占大节点时才调大
 若 40 个 worker 同时活跃，总 limit 远超物理核，活跃用户之间会按 request 比例争抢
 CPU —— 对「大部分时间空闲」的 agent 负载这是刻意的取舍。
 
-> [!WARNING]
-> base / mid / large 三个池也由 `MFPI_WORKER_REPLICAS` 控制（默认 16）。如果只用
-> small 档位，部署后记得把它们缩到 0，否则 mid(16×1 核) + large(16×2 核) 会瞬间
-> 把 24 核的节点占满、pod 全部 Pending：
-> ```bash
-> for p in mf-pi-workerpool mf-pi-wp-mid mf-pi-wp-large; do
->   kubectl scale workerpool "$p" -n ate-demo-mf-pi --replicas=0
-> done
-> ```
+> [!NOTE]
+> 每个池都有**自己的**副本数变量（`_BASE` / `_SMALL` / `_MID` / `_LARGE`），
+> 所以一次普通部署不会互相牵连：base 默认 0、mid/large 各默认 1。
+> 早期版本三个池共用 `MFPI_WORKER_REPLICAS`，一次部署会要求 16+48 核、把 24 核节点
+> 直接打满；这个坑已经不存在了。
 
 ### 空闲自动挂起（释放资源）
 
@@ -836,7 +833,7 @@ go test -cover ./...
 | 工作负载标签 | `workload: mf-pi` | `workload: mf-pi-test` |
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
 | userdata 持久卷 | sticky per-actor 卷（随 ActorTemplate） | 同左（test ns 内） |
-| `MFPI_WORKER_REPLICAS` 默认 | `16`（deploy.sh）/ `4`（install-ate） | `2` |
+| `MFPI_WORKER_REPLICAS_BASE` 默认 | `0` | `0` |
 | `MFPI_WORKER_REPLICAS_SMALL` 默认 | `32` | `8`（共用节点；独占大节点可调 32） |
 
 > [!NOTE]
@@ -1003,8 +1000,8 @@ kubectl get workerpool -n ate-demo-mf-pi
 # 方式一：临时扩容（仅对当前集群生效；重新部署会被覆盖）
 kubectl scale workerpool mf-pi-workerpool -n ate-demo-mf-pi --replicas=4
 
-# 方式二：重新部署时设置 MFPI_WORKER_REPLICAS（持久化）
-MFPI_WORKER_REPLICAS=4 ./hack/install-ate-kind.sh --deploy-demo-mf-pi
+# 方式二：重新部署时设置各档位的副本数（持久化）
+MFPI_WORKER_REPLICAS_SMALL=48 ./hack/install-ate-kind.sh --deploy-demo-mf-pi
 ```
 
 ### 首次访问返回 503（服务正在启动）

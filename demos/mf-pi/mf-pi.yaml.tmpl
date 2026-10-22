@@ -66,9 +66,12 @@ metadata:
   labels:
     workload: mf-pi
 spec:
-  # Number of physical workers; bounds the max number of concurrently-active
-  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 4).
-  replicas: ${MFPI_WORKER_REPLICAS}
+  # Base (legacy) tier: no resource requests and no longer used by any user —
+  # every user is on a real tier (small by default). Configurable via
+  # ${MFPI_WORKER_REPLICAS_BASE} (default 0) so a plain deploy does not spend
+  # 16 idle worker pods on a tier nobody runs on. Set it (and point a template
+  # at this pool) only if you deliberately want the base tier back.
+  replicas: ${MFPI_WORKER_REPLICAS_BASE}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
 ---

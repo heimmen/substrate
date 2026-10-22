@@ -14,7 +14,7 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|3|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|4|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|5|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS}|2|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_BASE}|2|g" \
       -e "s|\${MFPI_DEPLOY_REV}|0|g" \
       "$t" > /tmp/mfpi-render-check.yaml
   python3 - /tmp/mfpi-render-check.yaml "$t" <<'PYEOF'

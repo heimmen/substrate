@@ -91,7 +91,7 @@ demo-mf-pi_render() {
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|${MFPI_WORKER_REPLICAS_SMALL:-32}|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|${MFPI_WORKER_REPLICAS_MID:-1}|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|${MFPI_WORKER_REPLICAS_LARGE:-1}|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS}|${MFPI_WORKER_REPLICAS:-4}|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_BASE}|${MFPI_WORKER_REPLICAS_BASE:-${MFPI_WORKER_REPLICAS:-0}}|g" \
       demos/mf-pi/mf-pi.yaml.tmpl
 }
 
@@ -111,8 +111,8 @@ demo-mf-pi_deploy() {
 
   # Number of physical workers; bounds max concurrently-active users.
   # Defaults to 4 when unset.
-  MFPI_WORKER_REPLICAS="${MFPI_WORKER_REPLICAS:-4}"
-  log_step "  worker replicas: ${MFPI_WORKER_REPLICAS}"
+  MFPI_WORKER_REPLICAS_BASE="${MFPI_WORKER_REPLICAS_BASE:-${MFPI_WORKER_REPLICAS:-0}}"
+  log_step "  worker replicas (base tier): ${MFPI_WORKER_REPLICAS_BASE}"
 
   # Render to a temp file first so the immutable ActorTemplate can be replaced
   # when its spec changed before ko apply (see ensure_at_recreate_if_changed).
@@ -138,7 +138,8 @@ demo-mf-pi_delete() {
 demo-mf-pi_usage() {
   echo ""
   echo "  Required env: DEEPSEEK_API_KEY, BUCKET_NAME, KO_DOCKER_REPO"
-  echo "  Optional env: MFPI_WORKER_REPLICAS (default 4; max concurrently-active users)"
+  echo "  Optional env: MFPI_WORKER_REPLICAS_SMALL/_MID/_LARGE (seats per tier);"
+  echo "                MFPI_WORKER_REPLICAS_BASE (default 0; legacy base pool)"
   echo "  Deploys: mf-agent actors + the mfpi-admin user-management UI (user data persists on a sticky per-actor volume)"
   echo "  UI access: http://<hostname>:58681/usermanagement/ (via run-nginx.sh)"
   echo "  See demos/mf-pi/docs/mfpi.md for the walkthrough."

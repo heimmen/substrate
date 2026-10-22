@@ -11,7 +11,10 @@
 #   KO_DOCKER_REPO        (default localhost:5001)
 #   BUCKET_NAME           (default ate-snapshots)
 #   DEEPSEEK_API_KEY      (default: read from the mf-pi-provider-config secret)
-#   MFPI_WORKER_REPLICAS  (default 16)
+#   MFPI_WORKER_REPLICAS_BASE   (default 0; legacy base pool)
+#   MFPI_WORKER_REPLICAS_SMALL  (default 48)
+#   MFPI_WORKER_REPLICAS_MID    (default 1)
+#   MFPI_WORKER_REPLICAS_LARGE  (default 1)
 #   KO_DEFAULTBASEIMAGE   (default localhost:5001/distroless-static-debian13)
 #   MFPI_SKIP_REFRESH     (set 1 to skip refreshing existing users after an
 #                          ActorTemplate spec change; default is to refresh)
@@ -60,7 +63,9 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
       -o jsonpath='{.data.DEEPSEEK_API_KEY}' 2>/dev/null | base64 -d
   )"
 fi
-: "${MFPI_WORKER_REPLICAS:=16}"
+# Base (legacy) tier: unused by the demo, so it defaults to 0. The old
+# MFPI_WORKER_REPLICAS name is still honoured as an alias.
+: "${MFPI_WORKER_REPLICAS_BASE:=${MFPI_WORKER_REPLICAS:-0}}"
 # The small tier is the default tier for mf-pi users and is sized separately
 # (more workers, smaller requests) so it can pack many concurrent users onto
 # one node. See the small WorkerPool in mf-pi.yaml.tmpl.
@@ -89,7 +94,7 @@ render() {
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-48}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS}|$(esc_repl "${MFPI_WORKER_REPLICAS:-16}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_BASE}|$(esc_repl "${MFPI_WORKER_REPLICAS_BASE:-0}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
       "${TEMPLATE}"
 }
@@ -287,7 +292,7 @@ refresh_existing_users() {
     echo "  CLI; recover it manually, then re-run ./refresh-actor.sh -y <user>:" >&2
     echo "    kubectl -n ${NAMESPACE} scale workerpool mf-pi-workerpool --replicas=0" >&2
     echo "    # wait for the actor to report STATUS_SUSPENDED, then:" >&2
-    echo "    kubectl -n ${NAMESPACE} scale workerpool mf-pi-workerpool --replicas=${MFPI_WORKER_REPLICAS:-16}" >&2
+    echo "    kubectl -n ${NAMESPACE} scale workerpool mf-pi-workerpool --replicas=${MFPI_WORKER_REPLICAS_BASE:-0}" >&2
   fi
 }
 
@@ -391,7 +396,7 @@ cmd_deploy() {
   fi
   echo "  workload image digest: ${MF_PI_DIGEST}"
   echo "  pause image digest:    ${PAUSE_DIGEST}"
-  echo "  worker replicas:       ${MFPI_WORKER_REPLICAS:-16}"
+  echo "  workers (base/small/mid/large): ${MFPI_WORKER_REPLICAS_BASE:-0}/${MFPI_WORKER_REPLICAS_SMALL:-48}/${MFPI_WORKER_REPLICAS_MID:-1}/${MFPI_WORKER_REPLICAS_LARGE:-1}"
 
   local manifest
   manifest="$(mktemp)"
