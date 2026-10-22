@@ -120,8 +120,10 @@ metadata:
     workload: mf-pi-mid-test
 spec:
   # Number of physical workers; bounds the max number of concurrently-active
-  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 2).
-  replicas: ${MFPI_WORKER_REPLICAS}
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS_MID}
+  # (default 1). Keep this tiny: each mid worker reserves a whole core and it
+  # shares a node with the production pools.
+  replicas: ${MFPI_WORKER_REPLICAS_MID}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
   template:
@@ -147,8 +149,9 @@ metadata:
     workload: mf-pi-large-test
 spec:
   # Number of physical workers; bounds the max number of concurrently-active
-  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 2).
-  replicas: ${MFPI_WORKER_REPLICAS}
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS_LARGE}
+  # (default 1). Each large worker reserves two cores; keep it minimal here.
+  replicas: ${MFPI_WORKER_REPLICAS_LARGE}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
   template:

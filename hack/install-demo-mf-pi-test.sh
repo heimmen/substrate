@@ -92,6 +92,8 @@ demo-mf-pi-test_render() {
       -e "s|\${MF_PI_DIGEST}|${MF_PI_DIGEST:-placeholder}|g" \
       -e "s|\${PAUSE_DIGEST}|${PAUSE_DIGEST:-placeholder}|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|${MFPI_WORKER_REPLICAS_SMALL:-8}|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_MID}|${MFPI_WORKER_REPLICAS_MID:-1}|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|${MFPI_WORKER_REPLICAS_LARGE:-1}|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|${MFPI_WORKER_REPLICAS:-2}|g" \
       demos/mf-pi/mf-pi-test.yaml.tmpl
 }

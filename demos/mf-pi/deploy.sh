@@ -64,7 +64,12 @@ fi
 # The small tier is the default tier for mf-pi users and is sized separately
 # (more workers, smaller requests) so it can pack many concurrent users onto
 # one node. See the small WorkerPool in mf-pi.yaml.tmpl.
-: "${MFPI_WORKER_REPLICAS_SMALL:=32}"
+: "${MFPI_WORKER_REPLICAS_SMALL:=48}"
+# mid/large reserve a whole core (or two) per worker, so they default to a
+# single seat each: both tiers share the node with the small pool, and the old
+# shared MFPI_WORKER_REPLICAS default of 16 would have asked for 48 cores.
+: "${MFPI_WORKER_REPLICAS_MID:=1}"
+: "${MFPI_WORKER_REPLICAS_LARGE:=1}"
 # ko builds ateom-gvisor (and other Go images) on this offline-friendly base.
 export KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-localhost:5001/distroless-static-debian13}"
 
@@ -81,7 +86,9 @@ render() {
       -e "s|\${DEEPSEEK_API_KEY}|$(esc_repl "${DEEPSEEK_API_KEY:-placeholder}")|g" \
       -e "s|\${MF_PI_DIGEST}|$(esc_repl "${MF_PI_DIGEST}")|g" \
       -e "s|\${PAUSE_DIGEST}|$(esc_repl "${PAUSE_DIGEST}")|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-32}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-48}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|$(esc_repl "${MFPI_WORKER_REPLICAS:-16}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
       "${TEMPLATE}"

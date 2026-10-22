@@ -74,6 +74,11 @@ fi
 # when testing on a bigger/dedicated node, e.g.
 #   MFPI_WORKER_REPLICAS_SMALL=32 ./deploy-test.sh
 : "${MFPI_WORKER_REPLICAS_SMALL:=8}"
+# mid/large reserve a whole core (or two) per worker. On the shared dev node the
+# test environment defaults them to 1 each — enough to exercise those tiers —
+# rather than inheriting the old shared default of 2 (which cost 2 + 4 cores).
+: "${MFPI_WORKER_REPLICAS_MID:=1}"
+: "${MFPI_WORKER_REPLICAS_LARGE:=1}"
 # ko builds ateom-gvisor (and other Go images) on this offline-friendly base.
 export KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-localhost:5001/distroless-static-debian13}"
 
@@ -91,6 +96,8 @@ render() {
       -e "s|\${MF_PI_DIGEST}|$(esc_repl "${MF_PI_DIGEST}")|g" \
       -e "s|\${PAUSE_DIGEST}|$(esc_repl "${PAUSE_DIGEST}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-8}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|$(esc_repl "${MFPI_WORKER_REPLICAS:-2}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
       "${TEMPLATE}"

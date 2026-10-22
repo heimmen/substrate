@@ -83,7 +83,7 @@ metadata:
 spec:
   # Number of physical workers; bounds the max number of concurrently-active
   # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS_SMALL}
-  # (default 32). The small tier is the default tier for mf-pi users, so it is
+  # (default 48). The small tier is the default tier for mf-pi users, so it is
   # sized for concurrency independently of the base/mid/large pools.
   replicas: ${MFPI_WORKER_REPLICAS_SMALL}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
@@ -113,8 +113,11 @@ metadata:
     workload: mf-pi-mid
 spec:
   # Number of physical workers; bounds the max number of concurrently-active
-  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 4).
-  replicas: ${MFPI_WORKER_REPLICAS}
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS_MID}
+  # (default 1). Each mid worker reserves a whole core, so this tier is sized
+  # for a few heavy users rather than for bulk concurrency — the tier shares one
+  # node with the small pool, and 16 mid + 16 large would need 48 cores.
+  replicas: ${MFPI_WORKER_REPLICAS_MID}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
   template:
@@ -137,8 +140,9 @@ metadata:
     workload: mf-pi-large
 spec:
   # Number of physical workers; bounds the max number of concurrently-active
-  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS} (default 4).
-  replicas: ${MFPI_WORKER_REPLICAS}
+  # (non-suspended) users. Configurable via ${MFPI_WORKER_REPLICAS_LARGE}
+  # (default 1). Each large worker reserves two cores, so keep this tier small.
+  replicas: ${MFPI_WORKER_REPLICAS_LARGE}
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
   template:

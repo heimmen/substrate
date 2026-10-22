@@ -582,18 +582,27 @@ worker），由环境变量控制：
 
 | 变量 | 作用 | deploy.sh（生产） | deploy-test.sh（测试） |
 |---|---|---|---|
-| `MFPI_WORKER_REPLICAS` | base / mid / large 池 | `16` | `2` |
-| `MFPI_WORKER_REPLICAS_SMALL` | **small 池（默认档位）** | `32` | `8` |
+| `MFPI_WORKER_REPLICAS` | base 池（legacy，无 CPU request） | `16` | `2` |
+| `MFPI_WORKER_REPLICAS_SMALL` | **small 池（默认档位）** | `48` | `8` |
+| `MFPI_WORKER_REPLICAS_MID` | mid 池（每 worker 1 核） | `1` | `1` |
+| `MFPI_WORKER_REPLICAS_LARGE` | large 池（每 worker 2 核） | `1` | `1` |
 
 ```bash
-MFPI_WORKER_REPLICAS=8 MFPI_WORKER_REPLICAS_SMALL=32 ./deploy.sh
+MFPI_WORKER_REPLICAS=0 MFPI_WORKER_REPLICAS_SMALL=48 \
+MFPI_WORKER_REPLICAS_MID=2 MFPI_WORKER_REPLICAS_LARGE=1 ./deploy.sh
 # 测试环境默认 small=8：test 通常与生产共用同一台开发节点，
 # 32（生产）+ 32（测试）会把 24 核节点顶到 ~100% 并产生 Pending。
 MFPI_WORKER_REPLICAS_SMALL=32 ./deploy-test.sh   # 独占大节点时才调大
 ```
 
 > `hack/install-ate*.sh --deploy-demo-mf-pi` 的默认：`MFPI_WORKER_REPLICAS=4`、
-> `MFPI_WORKER_REPLICAS_SMALL=32`。
+> `MFPI_WORKER_REPLICAS_SMALL=32`、`MFPI_WORKER_REPLICAS_MID/LARGE=1`。
+
+> [!IMPORTANT]
+> **mid / large 必须用自己的变量，不能和 small 共用 `MFPI_WORKER_REPLICAS`。**
+> 它们每个 worker 独占 1 核 / 2 核，旧版共用时默认 16 就会要 **16 + 32 = 48 核**，
+> 24 核节点必然大面积 Pending。现在默认各 1，一次普通部署的总需求是
+> `48×0.25 + 1×1 + 1×2 = 15 核`（约 67%），安全。
 
 **small 档位的 CPU 是按「单机塞更多并发」调的**（`mf-pi-wp-small`）：
 

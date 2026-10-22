@@ -12,6 +12,8 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${MF_PI_DIGEST}|${DIGEST}|g" \
       -e "s|\${PAUSE_DIGEST}|sha256:placeholder|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|3|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_MID}|4|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|5|g" \
       -e "s|\${MFPI_WORKER_REPLICAS}|2|g" \
       -e "s|\${MFPI_DEPLOY_REV}|0|g" \
       "$t" > /tmp/mfpi-render-check.yaml
@@ -132,6 +134,16 @@ assert small_res["requests"]["cpu"] == "250m", small_res
 assert small_res["limits"]["cpu"] == "1", small_res
 assert small_res["requests"]["memory"] == "1Gi", small_res
 assert small_res["limits"]["memory"] == "1Gi", small_res
+
+# mid/large are per-worker dedicated cores (1 and 2), so they must be sized by
+# their OWN replica variables — sharing MFPI_WORKER_REPLICAS with the small tier
+# would ask for 16 and 32 cores respectively and pin the node at 100%.
+# This render substitutes MID=4 / LARGE=5 (see the sed above).
+mid, large = wps["mf-pi-wp-mid"], wps["mf-pi-wp-large"]
+assert mid["spec"]["replicas"] == 4, mid["spec"]["replicas"]
+assert large["spec"]["replicas"] == 5, large["spec"]["replicas"]
+assert mid["spec"]["template"]["resources"]["requests"]["cpu"] == "1", mid
+assert large["spec"]["template"]["resources"]["requests"]["cpu"] == "2", large
 
 # mfpi-admin Deployment: no MinIO broker env; expiry/tier ConfigMaps wired;
 # shared-skills PVC mounted with SKILLS_DIR set.
