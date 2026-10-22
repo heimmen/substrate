@@ -73,7 +73,13 @@ port_forward() {
   # Run with nohup + disown so the tunnel survives the script's exit (a plain
   # `&` job gets SIGHUP when the parent shell finishes, so the forwarded UI
   # port would be dead right after this script returns).
-  nohup kubectl port-forward -n "${namespace}" "svc/${service}" "${local_port}:${remote_port}" \
+  #
+  # Pin the tunnel to IPv4 loopback: nginx proxies to 127.0.0.1, but kubectl can
+  # end up listening on [::1] alone (e.g. when a previous forward left the IPv6
+  # socket behind), which the health probe above does not catch and which shows
+  # up as intermittent 502s from nginx.
+  nohup kubectl port-forward --address 127.0.0.1 \
+    -n "${namespace}" "svc/${service}" "${local_port}:${remote_port}" \
     >/dev/null 2>&1 &
   disown
   # Give the tunnel a moment to establish before nginx starts proxying to it.
