@@ -6,21 +6,36 @@
 <title>秒方用户管理</title>
 <style>
   :root {
-    --bg: #f5f6f8;
-    --card: #ffffff;
-    --border: #e2e5ea;
-    --text: #1f2329;
-    --muted: #6b7280;
-    --accent: #2563eb;
-    --danger: #dc2626;
-    --green: #16a34a;
-    --green-bg: #dcfce7;
-    --gray: #6b7280;
-    --gray-bg: #f3f4f6;
-    --blue: #2563eb;
-    --blue-bg: #dbeafe;
-    --red: #dc2626;
-    --red-bg: #fee2e2;
+    /* 中性层：暖灰底 + 白卡片，靠 1px 暖灰描边分层，不用阴影 */
+    --bg: #FAFAFA;
+    --rail: #F3F1EE;
+    --card: #FFFFFF;
+    --border: #E7E3DE;
+    --hover: #F1EEEA;
+    /* 文字：正文 12.3:1，次要 5.45:1（原 #6b7280 on #f5f6f8 仅 4.6:1） */
+    --text: #303234;
+    --muted: #6B6660;
+    /* 品牌砖红：白字对比 5.05:1 */
+    --accent: #CC3733;
+    --accent-hover: #B62F2B;
+    --accent-bg: #F3DBD8;
+    --on-accent: #FFFFFF;
+    /* 语义色：红-琥珀-冷蓝三级可分 */
+    --danger: #8C1D18;
+    --danger-bg: #FDF2F0;
+    --warn: #8A6A1F;
+    --warn-bg: #FDF6E3;
+    --info: #3B6EF5;
+    --info-bg: #EEF3FE;
+    /* 旧变量名保留（badge/dropdown 等仍引用） */
+    --green: #2F7D52;
+    --green-bg: #E8F5EE;
+    --gray: #6B6660;
+    --gray-bg: #F1EEEA;
+    --blue: #3B6EF5;
+    --blue-bg: #EEF3FE;
+    --red: #8C1D18;
+    --red-bg: #FDF2F0;
   }
   * { box-sizing: border-box; }
   body {
@@ -38,8 +53,19 @@
     align-items: center;
     justify-content: space-between;
   }
-  header h1 { font-size: 18px; margin: 0; }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
   header .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  /* 品牌标记：与产品工作台一致的砖红圆角方块 */
+  header .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-mark {
+    width: 30px; height: 30px; flex: none;
+    border-radius: 9px;
+    background: var(--accent);
+    color: var(--on-accent);
+    display: grid; place-items: center;
+    font-size: 15px; font-weight: 700; line-height: 1;
+    user-select: none;
+  }
   .container {
     width: 100%;
     max-width: 100%;
@@ -49,7 +75,7 @@
   .card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 12px;
     padding: 16px;
     margin-bottom: 20px;
     overflow-x: auto;
@@ -60,43 +86,45 @@
     flex: 1;
     padding: 8px 12px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 14px;
   }
   input[type="file"] {
     padding: 8px 4px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 14px;
     color: var(--text);
-    background: #fff;
+    background: var(--card);
   }
   input[type="file"]::file-selector-button {
-    background: #eef0f3;
+    background: var(--rail);
     color: var(--text);
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 6px 12px;
     margin-right: 8px;
     cursor: pointer;
   }
-  input[type="file"]::file-selector-button:hover { background: #e2e5ea; }
+  input[type="file"]::file-selector-button:hover { background: var(--hover); }
   button {
     padding: 8px 16px;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 14px;
     cursor: pointer;
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
   }
   button:disabled { opacity: 0.6; cursor: not-allowed; }
-  button.secondary { background: #eef0f3; color: var(--text); }
-  button.danger { background: var(--danger); }
+  button.secondary { background: var(--rail); color: var(--text); }
+  /* 破坏性操作：浅红底 + 深红字，避免与"实心品牌红主按钮"抢语义 */
+  button.danger { background: var(--danger-bg); color: var(--danger); }
+  button.danger:hover { background: #F8E4DF; }
   button.mini { padding: 4px 10px; font-size: 13px; }
   #msg {
     padding: 10px 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     margin-bottom: 12px;
     font-size: 14px;
     display: none;
@@ -108,25 +136,26 @@
   th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
   td.actions { white-space: nowrap; }
-  td a, td a:visited { color: var(--accent); text-decoration: none; }
-  td a:hover { text-decoration: underline; }
+  /* 表格里的用户名：默认用正文色，hover 才亮品牌红——红只留给"动作/错误" */
+  td a, td a:visited { color: var(--text); text-decoration: none; font-weight: 500; }
+  td a:hover { color: var(--accent); text-decoration: underline; }
   .dropdown { position: relative; display: inline-block; }
   .dropdown-toggle {
     padding: 4px 10px;
     font-size: 13px;
-    background: #eef0f3;
+    background: var(--rail);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     cursor: pointer;
   }
-  .dropdown-toggle:hover { background: #e2e5ea; }
+  .dropdown-toggle:hover { background: var(--hover); }
   .dropdown-menu {
     position: fixed;
     min-width: 140px;
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 12px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.12);
     z-index: 1000;
     padding: 4px;
@@ -142,7 +171,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    border-radius: 6px;
+    border-radius: 8px;
     cursor: pointer;
   }
   .dropdown-menu button:hover { background: var(--gray-bg); }
@@ -175,7 +204,7 @@
   }
   .modal {
     background: var(--card);
-    border-radius: 8px;
+    border-radius: 12px;
     box-shadow: 0 12px 32px rgba(0,0,0,0.2);
     padding: 16px;
     width: 100%;
@@ -187,9 +216,9 @@
     width: 100%;
     padding: 8px 12px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 14px;
-    background: #fff;
+    background: var(--card);
     color: var(--text);
     margin-bottom: 12px;
   }
@@ -212,10 +241,10 @@
     width: 100%;
     padding: 8px 12px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 14px;
     font-family: inherit;
-    background: #fff;
+    background: var(--card);
     color: var(--text);
     margin-bottom: 12px;
     resize: vertical;
@@ -225,7 +254,7 @@
   .endpoint-list { margin-bottom: 12px; }
   .endpoint-item {
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 10px 12px;
     margin-bottom: 8px;
     display: flex;
@@ -243,7 +272,7 @@
   .endpoint-item .endpoint-meta code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     background: var(--gray-bg);
-    border-radius: 4px;
+    border-radius: 6px;
     padding: 1px 4px;
   }
   .endpoint-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
@@ -256,7 +285,7 @@
     justify-content: space-between;
     gap: 8px;
     border: 1px solid var(--accent);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 8px 10px;
     margin-bottom: 12px;
     background: var(--gray-bg);
@@ -323,7 +352,7 @@
   .modal-hint code, .modal-note code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     background: var(--gray-bg);
-    border-radius: 4px;
+    border-radius: 6px;
     padding: 1px 4px;
   }
   /* 模型目录：一行一个模型卡片，容量/输入类型可折叠；候选勾选对话框独立于管理器。 */
@@ -346,10 +375,10 @@
   .endpoint-rows-actions .modal-hint { margin: 0; }
   .model-row {
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 8px 10px;
     margin-bottom: 8px;
-    background: #fff;
+    background: var(--card);
   }
   .model-row-head { display: flex; align-items: center; gap: 6px; }
   .modal .model-row-head input[type="text"] {
@@ -383,7 +412,7 @@
     min-height: 60px;
     overflow-y: auto;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 4px;
     margin-bottom: 12px;
   }
@@ -392,7 +421,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 13px;
     cursor: pointer;
   }
@@ -419,7 +448,7 @@
     display: flex;
     gap: 4px;
     background: var(--gray-bg);
-    border-radius: 8px;
+    border-radius: 12px;
     padding: 3px;
     margin-bottom: 12px;
   }
@@ -427,7 +456,7 @@
     flex: 1 1 0;
     background: transparent;
     color: var(--muted);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 7px 10px;
     font-size: 13px;
   }
@@ -445,11 +474,11 @@
     max-height: 46vh;
     padding: 10px 12px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 13px;
     line-height: 1.5;
-    background: #fff;
+    background: var(--card);
     color: var(--text);
     margin-bottom: 8px;
     resize: vertical;
@@ -469,19 +498,19 @@
   /* 指定用户：可滚动的勾选列表。 */
   .user-picker {
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     max-height: 180px;
     overflow-y: auto;
     padding: 4px;
     margin-bottom: 12px;
-    background: #fff;
+    background: var(--card);
   }
   .user-picker label {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 13px;
     cursor: pointer;
   }
@@ -499,9 +528,12 @@
 </head>
 <body>
 <header>
-  <div>
-    <h1>秒方用户管理</h1>
-    <div class="sub" id="atespace-info">正在加载 atespace 信息…</div>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">秒</span>
+    <div>
+      <h1>秒方用户管理</h1>
+      <div class="sub" id="atespace-info">正在加载 atespace 信息…</div>
+    </div>
   </div>
   <div class="toolbar" style="margin-bottom: 0">
     <button class="secondary" id="model-settings-btn"

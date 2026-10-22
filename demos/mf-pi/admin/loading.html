@@ -10,48 +10,86 @@
      script below), so the "已等待 N 秒" counter is never restarted by a reload. -->
 <noscript><meta http-equiv="refresh" content="3"></noscript>{{end}}
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    /* 与 usermanagement 共用同一套暖灰 + 砖红配色 */
+    --bg: #FAFAFA;
+    --rail: #F3F1EE;
+    --card: #FFFFFF;
+    --border: #E7E3DE;
+    --text: #303234;
+    --muted: #6B6660;
+    --accent: #CC3733;
+    --on-accent: #FFFFFF;
+    --warn: #8A6A1F;
+    --warn-bg: #FDF6E3;
+    --warn-border: #EFDFB8;
+    --warn-bar: #E0B84A;
+    --danger: #8C1D18;
+    --danger-bg: #FDF2F0;
+    --danger-border: #F1D8D2;
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    background: #f5f6f8; color: #1f2430; padding: 24px;
+    background: var(--bg); color: var(--text); padding: 24px;
   }
+  /* 扁平卡片：1px 暖灰描边分层，不用重投影 */
   .card {
-    width: 100%; max-width: 460px; background: #fff; border-radius: 14px; padding: 32px 28px;
-    box-shadow: 0 8px 30px rgba(20, 30, 50, .10); text-align: center;
+    width: 100%; max-width: 460px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 32px 28px;
+    box-shadow: 0 1px 2px rgba(48, 50, 52, .04); text-align: center;
   }
   .spinner {
     width: 46px; height: 46px; margin: 4px auto 20px; border-radius: 50%;
-    border: 4px solid #dfe3ea; border-top-color: #3b6ef5; animation: spin 1s linear infinite;
+    border: 4px solid var(--rail); border-top-color: var(--accent);
+    animation: spin 1s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  h1 { font-size: 19px; margin: 0 0 10px; font-weight: 600; }
-  .msg { font-size: 14px; line-height: 1.6; color: #4a5265; margin: 0 0 18px; }
-  .who { font-size: 13px; color: #7b8296; margin: 0 0 4px; }
-  .who code { background: #eef1f6; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
-  .elapsed { font-size: 13px; color: #7b8296; }
+  h1 { font-size: 19px; margin: 0 0 10px; font-weight: 600; letter-spacing: .2px; }
+  .msg { font-size: 14px; line-height: 1.6; color: var(--muted); margin: 0 0 18px; }
+  .who { font-size: 13px; color: var(--muted); margin: 0 0 4px; }
+  .who code { background: var(--rail); border-radius: 6px; padding: 1px 6px; font-size: 12px; color: var(--text); }
+  .elapsed { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* 警示：左侧色条 + 浅琥珀底，与错误块区分 */
   .hint {
     display: none; margin-top: 18px; padding: 12px 14px; border-radius: 10px; font-size: 13px;
-    line-height: 1.6; background: #fff8e6; border: 1px solid #f2dfae; color: #7a5a12; text-align: left;
+    line-height: 1.6; background: var(--warn-bg); border: 1px solid var(--warn-border);
+    border-left: 3px solid var(--warn-bar); color: var(--warn); text-align: left;
   }
   .hint.show { display: block; }
   .actions { margin-top: 22px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
   a.btn, button.btn {
-    appearance: none; border: 1px solid #cfd6e2; background: #fff; color: #2b3242; cursor: pointer;
-    font-size: 13px; padding: 8px 16px; border-radius: 8px; text-decoration: none; line-height: 1.2;
+    appearance: none; border: 1px solid var(--border); background: var(--card); color: var(--text);
+    cursor: pointer; font-size: 13px; padding: 8px 16px; border-radius: 8px;
+    text-decoration: none; line-height: 1.2;
   }
-  a.btn.primary, button.btn.primary { background: #3b6ef5; border-color: #3b6ef5; color: #fff; }
+  a.btn:hover, button.btn:hover { background: var(--rail); }
+  a.btn.primary, button.btn.primary {
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+  }
+  a.btn.primary:hover, button.btn.primary:hover { background: #B62F2B; border-color: #B62F2B; }
   .error .spinner { display: none; }
-  .error h1 { color: #b3261e; }
+  .error h1 { color: var(--danger); }
+  .card.error { background: var(--danger-bg); border-color: var(--danger-border); }
   @media (prefers-color-scheme: dark) {
-    body { background: #14171c; color: #e7eaf0; }
-    .card { background: #1d2129; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
-    .msg { color: #aeb6c4; }
-    .who code { background: #262b34; }
-    .hint { background: #2c2717; border-color: #4d431f; color: #e8cf8a; }
-    a.btn, button.btn { background: #262b34; border-color: #38404e; color: #dfe4ec; }
-    a.btn.primary, button.btn.primary { background: #3b6ef5; border-color: #3b6ef5; color: #fff; }
+    :root {
+      --bg: #16130F;
+      --rail: #26211C;
+      --card: #1E1A16;
+      --border: #2E2823;
+      --text: #EDE8E1;
+      --muted: #A8A099;
+      --warn: #E8CF8A;
+      --warn-bg: #2A2418;
+      --warn-border: #4A3E20;
+      --warn-bar: #C9A24A;
+      --danger: #E98B7F;
+      --danger-bg: #2A1A17;
+      --danger-border: #4A2A24;
+    }
+    .card { box-shadow: 0 1px 2px rgba(0, 0, 0, .35); }
   }
 </style>
 </head>
