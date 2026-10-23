@@ -1924,10 +1924,13 @@ spec:
         # Idle auto-suspend: a small/mid-tier actor with no input for
         # IDLE_TIMEOUT is suspended to release its worker. IDLE_TIERS lists
         # the tiers subject to this; large-tier actors are never auto-suspended.
+        # Deploy-time knobs: MFPI_IDLE_TIMEOUT (default 90m) and
+        # MFPI_IDLE_TIERS (default small,mid; set it to "off" to disable
+        # auto-suspend entirely — an empty value means "default", not "off").
         - name: IDLE_TIMEOUT
-          value: "90m"
+          value: "${MFPI_IDLE_TIMEOUT}"
         - name: IDLE_TIERS
-          value: small,mid
+          value: "${MFPI_IDLE_TIERS}"
         - name: ROUTER_ADDR
           value: http://atenet-router.ate-system.svc:80
         # Shared, administrator-managed skills live on the mfpi-shared-skills PVC.

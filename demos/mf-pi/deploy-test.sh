@@ -84,6 +84,13 @@ fi
 # rather than inheriting the old shared default of 2 (which cost 2 + 4 cores).
 : "${MFPI_WORKER_REPLICAS_MID:=1}"
 : "${MFPI_WORKER_REPLICAS_LARGE:=1}"
+# Idle auto-suspend knobs. Unset keeps the defaults; MFPI_IDLE_TIERS=off
+# disables the sweep. An *empty* value is normalised to "off" on purpose: the
+# container cannot tell an empty env var from an unset one, so an empty value
+# would silently fall back to the default tiers instead of pausing.
+MFPI_IDLE_TIMEOUT="${MFPI_IDLE_TIMEOUT-90m}"
+MFPI_IDLE_TIERS="${MFPI_IDLE_TIERS-small,mid}"
+if [ -z "${MFPI_IDLE_TIERS}" ]; then MFPI_IDLE_TIERS=off; fi
 # ko builds ateom-gvisor (and other Go images) on this offline-friendly base.
 export KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-localhost:5001/distroless-static-debian13}"
 
@@ -103,6 +110,10 @@ render() {
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-8}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
+
+      -e "s|\${MFPI_IDLE_TIMEOUT}|$(esc_repl "${MFPI_IDLE_TIMEOUT}")|g" \
+
+      -e "s|\${MFPI_IDLE_TIERS}|$(esc_repl "${MFPI_IDLE_TIERS}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_BASE}|$(esc_repl "${MFPI_WORKER_REPLICAS_BASE:-0}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
       "${TEMPLATE}"

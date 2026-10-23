@@ -631,20 +631,38 @@ CPU —— 对「大部分时间空闲」的 agent 负载这是刻意的取舍�
 下次访问时由路由器**懒恢复**重新载入，该次访问同时重新计时。
 
 - **「输入」信号**：nginx 对每个 `/<username>/` 请求转发前都会执行
-  `auth_request /_mfpi_auth`，因此 admin 服务**成功鉴权**即是一次可靠输入
+  `auth_request /_mfpi_gate`，因此 admin 服务**成功鉴权**即是一次可靠输入
   （含 API 轮询与 WebSocket 升级）。
 - **范围**：仅 `IDLE_TIERS`（默认 `small,mid`）内的档位生效；**large 档位
   Actor 永不因空闲被自动挂起**（设计上常驻）。
+- ⚠️ **计时器是内存态**：只记录「本进程启动后成功鉴权过」的用户。admin 每次重启
+  （含任何部署）都会清空，**重启后没人再登录过的 actor 永远不会被自动挂起**；
+  启动日志会打印 `mfpi-admin idle auto-suspend: …` 说明当前是否生效。
 - 被挂起的用户下次访问时会先看到「**Agent 正在载入**」提示页（见
   [Agent 载入中的提示页](#agent-载入中的提示页)），恢复完成后自动进入界面。
-- **配置**：可在 `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl` 的 mfpi-admin env
-  中调整 `IDLE_TIMEOUT` 与 `IDLE_TIERS`（也可直接用 `kubectl set env` 覆盖）。
 - 与「激活有效期」的区别：有效期是管理员设定的**绝对到期**；空闲挂起是**相对
   最近一次输入**的自动回收，属于平台级的资源复用策略。
 
+#### 开关：用部署变量，不要直接 `kubectl set env`
+
+`IDLE_TIMEOUT` / `IDLE_TIERS` 由部署时的环境变量渲染进 Deployment：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MFPI_IDLE_TIMEOUT` | `90m` | 多久无输入挂起 |
+| `MFPI_IDLE_TIERS` | `small,mid` | 生效档位；**`off` = 关闭** |
+
 ```bash
-kubectl -n ate-demo-mf-pi set env deploy/mfpi-admin IDLE_TIMEOUT=45m IDLE_TIERS=small,mid
+MFPI_IDLE_TIERS=off ./deploy.sh      # 关闭自动挂起（推荐，可复现）
+MFPI_IDLE_TIERS= ./deploy.sh         # 空值同样被归一化成 off
+MFPI_IDLE_TIMEOUT=30m ./deploy.sh    # 改成 30 分钟，档位保持默认
 ```
+
+> [!WARNING]
+> **不要用 `kubectl set env` 暂停它**：那只是改线上对象，下一次 `./deploy.sh`
+> 会按模板把 `small,mid` 写回去（本项目就发生过：06:17 暂停、15:23 被一次部署恢复）。
+> 另外 **`IDLE_TIERS` 设为空字符串并不会关闭**：容器里无法区分「空」与「未设置」，
+> 空值会回落到默认 `small,mid`；要关闭必须用 `off`。
 
 ### Agent 载入中的提示页
 

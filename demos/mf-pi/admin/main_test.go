@@ -1752,6 +1752,60 @@ func TestParseIdleTiers(t *testing.T) {
 	}
 }
 
+// TestIdleTiersEnv covers the off switch. An empty value must NOT disable the
+// sweep (the container cannot tell empty from unset, so empty means "default");
+// only an explicit off/none/disabled does. That ambiguity previously made a
+// pause look effective when it was not.
+func TestIdleTiersEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		env    string
+		setEnv bool
+		want   []string // nil means disabled
+	}{
+		{name: "unset keeps default", setEnv: false, want: []string{"small", "mid"}},
+		{name: "empty keeps default", env: "", setEnv: true, want: []string{"small", "mid"}},
+		{name: "off disables", env: "off", setEnv: true, want: nil},
+		{name: "none disables", env: "none", setEnv: true, want: nil},
+		{name: "DISABLED disables", env: "DISABLED", setEnv: true, want: nil},
+		{name: "list", env: "small,mid,large", setEnv: true, want: []string{"small", "mid", "large"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setEnv {
+				t.Setenv("IDLE_TIERS", tc.env)
+			} else {
+				// t.Setenv cannot unset, so unset it explicitly and restore after.
+				prev, had := os.LookupEnv("IDLE_TIERS")
+				if err := os.Unsetenv("IDLE_TIERS"); err != nil {
+					t.Fatalf("unsetenv: %v", err)
+				}
+				t.Cleanup(func() {
+					if had {
+						os.Setenv("IDLE_TIERS", prev)
+					}
+				})
+			}
+			cfg := serverConfigFromEnv()
+			if tc.want == nil {
+				if len(cfg.idleTiers) != 0 {
+					t.Fatalf("idleTiers = %v, want disabled", cfg.idleTiers)
+				}
+				return
+			}
+			got := parseIdleTiers(strings.Join(cfg.idleTiers, ","))
+			if len(got) != len(tc.want) {
+				t.Fatalf("idleTiers = %v, want %v", cfg.idleTiers, tc.want)
+			}
+			for _, tier := range tc.want {
+				if !got[tier] {
+					t.Errorf("idleTiers = %v, missing %q", cfg.idleTiers, tier)
+				}
+			}
+		})
+	}
+}
+
 func TestHandleSetTierValid(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))

@@ -1337,6 +1337,8 @@ func (s *server) reconcileExpirations(ctx context.Context) {
 // lazily resumed by the router on the next user access. If the actor has no
 // recorded input yet (e.g. the admin restarted), it is not considered idle.
 // Best-effort: a failed suspend is logged and retried on the next tick.
+//
+// IDLE_TIERS=off disables the sweep entirely (empty idleTiers).
 func (s *server) reconcileIdle(ctx context.Context) {
 	if s.idle == nil || s.idleTimeout <= 0 || len(s.idleTiers) == 0 {
 		return
@@ -1615,7 +1617,16 @@ func serverConfigFromEnv() serverConfig {
 		}
 	}
 	if v := os.Getenv("IDLE_TIERS"); v != "" {
-		cfg.idleTiers = strings.Split(v, ",")
+		// An explicit off switch. Note an *empty* value cannot mean "off": the
+		// container cannot tell an empty env var from an unset one, so empty
+		// keeps the default below (this used to be an easy way to believe the
+		// policy was paused when it was not).
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "off", "none", "disabled":
+			cfg.idleTiers = nil
+		default:
+			cfg.idleTiers = strings.Split(v, ",")
+		}
 	} else {
 		cfg.idleTiers = idleTiersDefault
 	}
@@ -1763,6 +1774,15 @@ func main() {
 	addr := "0.0.0.0:" + envOr("PORT", defaultPort)
 	log.Printf("mfpi-admin serving on %s (atespace=%s template=%s/%s)",
 		addr, cfg.atespace, cfg.templateNamespace, cfg.templateName)
+	// State the idle policy explicitly: it is easy to believe auto-suspend is
+	// paused when it is not (and vice versa), and the timers are in-memory, so
+	// each restart starts with nobody known to be idle.
+	if len(cfg.idleTiers) == 0 || cfg.idleTimeout <= 0 {
+		log.Printf("mfpi-admin idle auto-suspend: DISABLED")
+	} else {
+		log.Printf("mfpi-admin idle auto-suspend: %s for tiers %v (from each user's last authenticated input; in-memory, reset on restart)",
+			cfg.idleTimeout, cfg.idleTiers)
+	}
 
 	httpSrv := &http.Server{
 		Addr:              addr,
