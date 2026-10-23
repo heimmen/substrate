@@ -32,6 +32,8 @@
 #                          sticky userdata volumes are node-local)
 #   MFPI_SKIP_NGINX      (set 1 to skip recreating the mfpi-nginx-test gateway
 #                          on 59681 after the cluster deploy)
+#   MFPI_SKIP_GIT_PULL   (set 1 to NOT 'git pull' /home/liuchong/git/miaofang-agent
+#                          before building; default builds the latest origin code)
 #
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
@@ -110,9 +112,7 @@ render() {
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-8}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
-
       -e "s|\${MFPI_IDLE_TIMEOUT}|$(esc_repl "${MFPI_IDLE_TIMEOUT}")|g" \
-
       -e "s|\${MFPI_IDLE_TIERS}|$(esc_repl "${MFPI_IDLE_TIERS}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_BASE}|$(esc_repl "${MFPI_WORKER_REPLICAS_BASE:-0}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
@@ -136,6 +136,20 @@ build_workload_image() {
     echo "  set MFPI_WORKLOAD_SOURCE to the miaofang-agent checkout, or" >&2
     echo "  set MFPI_SKIP_WORKLOAD_BUILD=1 to use the already-pushed mf-agent image" >&2
     return 1
+  fi
+  # Always pull the latest miaofang-agent code before building, so a deploy picks
+  # up upstream changes instead of stale files already checked out on this host.
+  # Only runs when the source is a git repository; skip it explicitly (offline /
+  # CI / intentional local-only build) with MFPI_SKIP_GIT_PULL=1. A failed pull
+  # aborts the deploy because we can no longer guarantee we built "latest".
+  if [[ "${MFPI_SKIP_GIT_PULL:-0}" != "1" ]] && git -C "${src}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "pulling latest miaofang-agent from origin into ${src} ..."
+    if ! git -C "${src}" pull --ff-only 2>&1; then
+      echo "ERROR: could not pull latest code from '${src}' (see above); refusing to build a" >&2
+      echo "  possibly-stale workload image. Run 'git -C ${src} pull' manually, or set" >&2
+      echo "  MFPI_SKIP_GIT_PULL=1 to build the currently checked-out code anyway." >&2
+      return 1
+    fi
   fi
   echo "building workload image from ${src} (latest source) ..."
   ( cd "${src}" && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source ) \
@@ -319,17 +333,18 @@ refresh_existing_users() {
   fi
 }
 
-# refresh_nginx_test_gateway recreates the 59681 test gateway container so it
-# re-reads the latest nginx-test.conf.
+# refresh_nginx_test_gateway resets the 59681 test gateway via
+# stop-nginx-test.sh + run-nginx-test.sh so the network forwarding lands in a
+# known-good state at the end of a deploy.
 #
 # Unlike deploy.sh, the TEST gateway does not bake a config into an image: it
 # uses the same mfpi-nginx image as production but bind-mounts nginx-test.conf
 # over /etc/nginx/conf.d/default.conf at runtime (run-nginx-test.sh). So no
-# image rebuild is needed here — "refreshing" means recreating the
-# mfpi-nginx-test container with the current nginx-test.conf and htpasswd. An
-# existing container's binds (htpasswd + nginx-test.conf) are preserved so the
-# admin password set by the last run-nginx-test.sh is not reset, and the
-# 59880/59882 port-forward tunnels are left untouched. Skipped with
+# image rebuild is needed here — "refreshing" means tearing down the gateway
+# (kill the 59880/59882 port-forwards and remove the 59681 container) and
+# bringing it back up via run-nginx-test.sh, which re-establishes the
+# port-forwards (replacing any stale tunnel left behind by a router pod restart)
+# and recreates the container reading the current nginx-test.conf. Skipped with
 # MFPI_SKIP_NGINX=1 (e.g. CI where nginx isn't managed here).
 refresh_nginx_test_gateway() {
   if [[ "${MFPI_SKIP_NGINX:-0}" == "1" ]]; then
@@ -338,54 +353,14 @@ refresh_nginx_test_gateway() {
   fi
   if ! command -v docker >/dev/null 2>&1; then
     echo "WARNING: docker not found; skipping mfpi-nginx-test gateway refresh." >&2
-    echo "  The 59681 proxy still runs its old config; recreate it separately:" >&2
-    echo "  ./run-nginx-test.sh" >&2
+    echo "  The test proxy and its port-forwards are not managed here; set them up" >&2
+    echo "  manually: ./stop-nginx-test.sh && ./run-nginx-test.sh" >&2
     return 0
   fi
 
-  echo "Refreshing mfpi-nginx-test gateway (recreate 59681 container from nginx-test.conf)..."
-  local name="mfpi-nginx-test"
-  local bind_specs=() host_network=
-  # Use --type container: a bare `docker inspect mfpi-nginx-test` also matches
-  # the mfpi-nginx IMAGE (shared with prod), returning 0 even when the test
-  # container is absent, which would wrongly drop the binds/network.
-  if docker inspect --type container "${name}" >/dev/null 2>&1; then
-    # Reuse the running container's binds (/tmp/mfpi-admin-test.htpasswd ->
-    # htpasswd, PWD/nginx-test.conf -> default.conf) and host-network mode.
-    mapfile -t bind_specs < <(docker inspect --type container "${name}" \
-      --format '{{range .HostConfig.Binds}}{{.}}{{"\n"}}{{end}}' 2>/dev/null)
-    host_network="$(docker inspect --type container "${name}" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)"
-    docker rm -f "${name}" >/dev/null 2>&1 || true
-  else
-    # No existing container: mirror run-nginx-test.sh defaults (distinct
-    # test htpasswd path) so the gateway comes up the same way it would via
-    # that script.
-    local htpasswd="${TMPDIR:-/tmp}/mfpi-admin-test.htpasswd"
-    if [[ ! -f "${htpasswd}" ]]; then
-      printf '%s:%s\n' "${ADMIN_USER:-admin}" \
-        "$(openssl passwd -apr1 "${ADMIN_PASSWORD:-mf@pass2026}")" > "${htpasswd}"
-      chmod 644 "${htpasswd}"
-    fi
-    bind_specs=(
-      "${htpasswd}:/etc/nginx/mfpi-admin.htpasswd:ro"
-      "$(pwd)/nginx-test.conf:/etc/nginx/conf.d/default.conf:ro"
-    )
-    host_network="host"
-  fi
-
-  local args=(-d --name "${name}")
-  local spec
-  for spec in "${bind_specs[@]}"; do
-    [[ -n "${spec}" ]] && args+=("-v" "${spec}")
-  done
-  if [[ "${host_network}" == "host" ]]; then
-    args+=("--network" "host")
-  else
-    args+=("-p" "59681:59681")
-  fi
-  args+=("mfpi-nginx:latest")
-
-  docker run "${args[@]}"
+  echo "Resetting the mfpi-nginx-test gateway and re-establishing port-forwards (59880/59882)..."
+  ./stop-nginx-test.sh
+  ./run-nginx-test.sh
   echo "mfpi-nginx-test gateway refreshed:"
   echo "  proxy:      http://localhost:59681/<username>"
   echo "  management: http://localhost:59681/usermanagement/"

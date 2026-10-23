@@ -28,6 +28,8 @@
 #                          sticky userdata volumes are node-local)
 #   MFPI_SKIP_NGINX      (set 1 to skip rebuilding/recreating the mfpi-nginx
 #                          gateway on 58681 after the cluster deploy)
+#   MFPI_SKIP_GIT_PULL   (set 1 to NOT 'git pull' /home/liuchong/git/miaofang-agent
+#                          before building; default builds the latest origin code)
 #
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
@@ -101,9 +103,7 @@ render() {
       -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-48}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
-
       -e "s|\${MFPI_IDLE_TIMEOUT}|$(esc_repl "${MFPI_IDLE_TIMEOUT}")|g" \
-
       -e "s|\${MFPI_IDLE_TIERS}|$(esc_repl "${MFPI_IDLE_TIERS}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_BASE}|$(esc_repl "${MFPI_WORKER_REPLICAS_BASE:-0}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
@@ -127,6 +127,20 @@ build_workload_image() {
     echo "  set MFPI_WORKLOAD_SOURCE to the miaofang-agent checkout, or" >&2
     echo "  set MFPI_SKIP_WORKLOAD_BUILD=1 to use the already-pushed mf-agent image" >&2
     return 1
+  fi
+  # Always pull the latest miaofang-agent code before building, so a deploy picks
+  # up upstream changes instead of stale files already checked out on this host.
+  # Only runs when the source is a git repository; skip it explicitly (offline /
+  # CI / intentional local-only build) with MFPI_SKIP_GIT_PULL=1. A failed pull
+  # aborts the deploy because we can no longer guarantee we built "latest".
+  if [[ "${MFPI_SKIP_GIT_PULL:-0}" != "1" ]] && git -C "${src}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "pulling latest miaofang-agent from origin into ${src} ..."
+    if ! git -C "${src}" pull --ff-only 2>&1; then
+      echo "ERROR: could not pull latest code from '${src}' (see above); refusing to build a" >&2
+      echo "  possibly-stale workload image. Run 'git -C ${src} pull' manually, or set" >&2
+      echo "  MFPI_SKIP_GIT_PULL=1 to build the currently checked-out code anyway." >&2
+      return 1
+    fi
   fi
   echo "building workload image from ${src} (latest source) ..."
   ( cd "${src}" && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source ) \
@@ -307,16 +321,18 @@ refresh_existing_users() {
   fi
 }
 
-# refresh_nginx_gateway rebuilds the mfpi-nginx image and recreates the
-# 58681 gateway container so a running proxy picks up the latest nginx.conf.
+# refresh_nginx_gateway rebuilds the mfpi-nginx image from nginx.conf and then
+# resets the gateway via stop-nginx.sh + run-nginx.sh so the network forwarding
+# is brought into a known-good state at the end of a deploy.
 #
 # Unlike the cluster resources above, mfpi-nginx is a plain host Docker
 # container (--network host) managed by build-image.sh / run-nginx.sh — it is
 # NOT part of the manifest applied by ko, so a redeploy would otherwise leave
-# a stale proxy running. This function rebuilds the image from nginx.conf and
-# recreates the container in place, preserving an existing htpasswd bind mount
-# and leaving the port-forward tunnels (58680/58682) untouched. It is skipped
-# entirely with MFPI_SKIP_NGINX=1 (e.g. CI where nginx isn't managed here).
+# a stale proxy running. Rebuilding the image picks up the latest nginx.conf;
+# run-nginx.sh then re-establishes the 58680->atenet-router and
+# 58682->mfpi-admin port-forwards (replacing any stale tunnel left behind by a
+# router pod restart) and recreates the 58681 container. Skipped entirely with
+# MFPI_SKIP_NGINX=1 (e.g. CI where nginx isn't managed here).
 refresh_nginx_gateway() {
   if [[ "${MFPI_SKIP_NGINX:-0}" == "1" ]]; then
     echo "MFPI_SKIP_NGINX=1; skipping the mfpi-nginx gateway refresh."
@@ -324,60 +340,27 @@ refresh_nginx_gateway() {
   fi
   if ! command -v docker >/dev/null 2>&1; then
     echo "WARNING: docker not found; skipping mfpi-nginx gateway refresh." >&2
-    echo "  The 58681 proxy still runs its old config; rebuild/recreate it" >&2
-    echo "  separately: ./build-image.sh && docker rm -f mfpi-nginx && ./run-nginx.sh" >&2
+    echo "  The proxy and its port-forwards are not managed here; set them up" >&2
+    echo "  manually: ./stop-nginx.sh && ./run-nginx.sh" >&2
     return 0
   fi
 
-  echo "Refreshing mfpi-nginx gateway (rebuild image + recreate 58681 container)..."
+  # Rebuild the mfpi-nginx image so the proxy picks up the latest nginx.conf
+  # (routes/providers). nginx.conf lives outside ko, so a redeploy would
+  # otherwise leave a stale proxy running.
+  echo "Rebuilding mfpi-nginx image from nginx.conf..."
   if ! ./build-image.sh; then
     echo "WARNING: mfpi-nginx image build failed; leaving the running proxy untouched." >&2
     return 0
   fi
 
-  # Recreate the container with the same runtime shape as run-nginx.sh, but
-  # preserve an existing htpasswd bind mount (so the admin password set by the
-  # last run-nginx.sh is not reset) and never touch the healthy port-forwards.
-  local bind_specs=() host_network=
-  # Use --type container: a bare `docker inspect mfpi-nginx` also matches the
-  # IMAGE named mfpi-nginx, so it returns 0 (success) even when the container
-  # is absent, which would wrongly take the "reuse existing" branch and drop
-  # the bind/network flags.
-  if docker inspect --type container mfpi-nginx >/dev/null 2>&1; then
-    # Reuse the running container's binds (e.g. /tmp/mfpi-admin.htpasswd ->
-    # /etc/nginx/mfpi-admin.htpasswd:ro) and its host-network mode.
-    mapfile -t bind_specs < <(docker inspect --type container mfpi-nginx \
-      --format '{{range .HostConfig.Binds}}{{.}}{{"\n"}}{{end}}' 2>/dev/null)
-    host_network="$(docker inspect --type container mfpi-nginx --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)"
-    docker rm -f mfpi-nginx >/dev/null 2>&1 || true
-  else
-    # No existing container: run with the same default credentials run-nginx.sh
-    # would use (admin / mf@pass2026), generated into a stable path.
-    local htpasswd="${TMPDIR:-/tmp}/mfpi-admin.htpasswd"
-    if [[ ! -f "${htpasswd}" ]]; then
-      printf '%s:%s\n' "${ADMIN_USER:-admin}" \
-        "$(openssl passwd -apr1 "${ADMIN_PASSWORD:-mf@pass2026}")" > "${htpasswd}"
-      chmod 644 "${htpasswd}"
-    fi
-    bind_specs=("${htpasswd}:/etc/nginx/mfpi-admin.htpasswd:ro")
-    host_network="host"
-  fi
-
-  local args=(-d --name mfpi-nginx)
-  # Each bind spec needs its own -v flag.
-  local spec
-  for spec in "${bind_specs[@]}"; do
-    [[ -n "${spec}" ]] && args+=("-v" "${spec}")
-  done
-  if [[ "${host_network}" == "host" ]]; then
-    # --network host ignores -p; keep -p only for the non-host fallback.
-    args+=("--network" "host")
-  else
-    args+=("-p" "58681:58681")
-  fi
-  args+=("mfpi-nginx:latest")
-
-  docker run "${args[@]}"
+  # Tear down the gateway (kills the 58680/58682 port-forwards and removes the
+  # 58681 container) and bring it back up via run-nginx.sh, which re-establishes
+  # the port-forwards and recreates the 58681 container. This is the canonical
+  # way to get the network forwarding in a known-good state after a deploy.
+  echo "Resetting the mfpi-nginx gateway and re-establishing port-forwards (58680/58682)..."
+  ./stop-nginx.sh
+  ./run-nginx.sh
   echo "mfpi-nginx gateway refreshed:"
   echo "  proxy:      http://localhost:58681/<username>"
   echo "  management: http://localhost:58681/usermanagement/"
