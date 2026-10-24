@@ -121,6 +121,41 @@ func TestLoadingPageCounterIsMonotonic(t *testing.T) {
 	}
 }
 
+// TestLoadingPageRetryActionIsUnambiguous pins the wording of the retry control
+// and the promise it makes. The old label («立即重试») left it unclear whether
+// retrying reconnects (keeping what was already generated), discards it, or
+// force-reloads the page; the button now says what it does and a fine print
+// states that generated content is kept.
+func TestLoadingPageRetryActionIsUnambiguous(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+
+	body := doLoading(s, loadingReq("/alice/", "")).Body.String()
+
+	if strings.Contains(body, "立即重试") {
+		t.Errorf("ambiguous label 立即重试 must not come back")
+	}
+	if !strings.Contains(body, ">重试连接</a>") {
+		t.Errorf("retry control should read 重试连接")
+	}
+	// The button must be an in-place retry, not a page navigation: the JS binds
+	// to this id and calls retry() after preventDefault().
+	if !strings.Contains(body, `id="retry-now"`) {
+		t.Errorf("retry control is missing id=retry-now (no in-place binding)")
+	}
+	if !strings.Contains(body, "retryNow.addEventListener('click'") {
+		t.Errorf("retry control is not wired to an in-place retry")
+	}
+	if !strings.Contains(body, "已生成的内容会保留") {
+		t.Errorf("missing the statement that generated content is kept")
+	}
+	// It stays usable without JS (plain link to the original URL).
+	if !strings.Contains(body, `href="/alice/"`) {
+		t.Errorf("retry control lost its no-JS fallback href")
+	}
+}
+
 func TestLoadingPageResumingActor(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_RESUMING", fixedNow.Add(-time.Hour))

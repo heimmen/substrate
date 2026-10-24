@@ -60,6 +60,11 @@
   }
   .hint.show { display: block; }
   .actions { margin-top: 22px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  /* 说明「重试连接」的语义，避免误以为会丢弃已生成内容 */
+  .fineprint {
+    margin: 12px 0 0; font-size: 12px; line-height: 1.6; color: var(--muted);
+  }
+  .fineprint strong { color: var(--text); font-weight: 600; }
   a.btn, button.btn {
     appearance: none; border: 1px solid var(--border); background: var(--card); color: var(--text);
     cursor: pointer; font-size: 13px; padding: 8px 16px; border-radius: 8px;
@@ -108,12 +113,19 @@
     </div>
     <div class="actions">
       {{if .AutoRefresh}}
-        <a class="btn primary" href="{{.RetryURL}}">立即重试</a>
+        <a class="btn primary" id="retry-now" href="{{.RetryURL}}"
+           title="立即重新连接；不会丢弃已生成的内容">重试连接</a>
         <a class="btn" href="/usermanagement/">用户管理</a>
       {{else}}
         <a class="btn primary" href="/usermanagement/">返回用户管理</a>
       {{end}}
     </div>
+    {{if .AutoRefresh}}
+    <p class="fineprint">
+      「重试连接」只是重新建立连接，<strong>已生成的内容会保留</strong>；
+      也可以什么都不做，本页会自动重试。
+    </p>
+    {{end}}
   </div>
   <script>
     (function () {
@@ -164,6 +176,17 @@
             else { schedule(); }
           });
         }).catch(function () { schedule(); });
+      }
+      // 「重试连接」：不重新加载页面，只是立刻发起一次连接尝试（等价于自动重试，
+      // 只是不等那 3 秒）。因此已生成的内容、计时器都不会受影响。没有 JS 时它
+      // 退化为普通链接（href 指向原地址），仍然可用。
+      var retryNow = document.getElementById('retry-now');
+      if (retryNow) {
+        retryNow.addEventListener('click', function (e) {
+          e.preventDefault();
+          retryNow.setAttribute('aria-busy', 'true');
+          retry();
+        });
       }
       schedule();
     })();
