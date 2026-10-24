@@ -39,6 +39,7 @@ func doLoading(s *server, req *http.Request) *httptest.ResponseRecorder {
 func TestLoadingPageSuspendedActor(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	addActorSnapshot(f, "mfpi", "alice") // returning user: suspended after use, has a snapshot
 	s := newTestServer(f)
 
 	rec := doLoading(s, loadingReq("/alice/", ""))
@@ -159,6 +160,7 @@ func TestLoadingPageRetryActionIsUnambiguous(t *testing.T) {
 func TestLoadingPageResumingActor(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_RESUMING", fixedNow.Add(-time.Hour))
+	addActorSnapshot(f, "mfpi", "alice") // returning user: waking from a snapshot
 	s := newTestServer(f)
 
 	rec := doLoading(s, loadingReq("/alice/", ""))
@@ -203,6 +205,7 @@ func TestLoadingPageMissingActorIsAnError(t *testing.T) {
 func TestLoadingPageResolvesUserFromCookie(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	addActorSnapshot(f, "mfpi", "alice")
 	s := newTestServer(f)
 
 	// Bare-origin fallback: no path user, only the cookie. No original URI
@@ -247,23 +250,61 @@ func TestLoadingPageIgnoresInvalidCookieUser(t *testing.T) {
 
 func TestLoadingCopyForStatus(t *testing.T) {
 	tests := []struct {
-		status string
-		want   string
+		status      string
+		hasSnapshot bool
+		want        string
 	}{
-		{"STATUS_RESUMING", "正在唤醒"},
-		{"STATUS_SUSPENDED", "正在唤醒"},
-		{"STATUS_RUNNING", "正在启动"},
-		{"STATUS_PAUSED", "正在切换状态"},
-		{"STATUS_CRASHED", "正在重启"},
-		{"STATUS_UNSPECIFIED", "正在载入"},
+		// Coming back: there is a snapshot to restore, so "waking" is accurate.
+		{"STATUS_RESUMING", true, "正在唤醒"},
+		{"STATUS_SUSPENDED", true, "正在唤醒"},
+		// First ever start: nothing to restore, so do not say "waking".
+		{"STATUS_RESUMING", false, "欢迎使用"},
+		{"STATUS_SUSPENDED", false, "欢迎使用"},
+		{"STATUS_RUNNING", false, "正在启动"},
+		{"STATUS_RUNNING", true, "正在启动"},
+		{"STATUS_PAUSED", false, "正在切换状态"},
+		{"STATUS_CRASHED", false, "正在重启"},
+		{"STATUS_UNSPECIFIED", false, "正在载入"},
 	}
 	for _, tc := range tests {
-		title, message := loadingCopyForStatus(actorStatus(tc.status))
+		title, message := loadingCopyForStatus(actorStatus(tc.status), tc.hasSnapshot)
 		if !strings.Contains(title, tc.want) {
-			t.Errorf("%s: title = %q, want it to contain %q", tc.status, title, tc.want)
+			t.Errorf("%s (snapshot=%v): title = %q, want it to contain %q",
+				tc.status, tc.hasSnapshot, title, tc.want)
 		}
 		if message == "" {
-			t.Errorf("%s: empty message", tc.status)
+			t.Errorf("%s (snapshot=%v): empty message", tc.status, tc.hasSnapshot)
 		}
+	}
+}
+
+// TestLoadingPageFirstUseDoesNotSayWaking is the user-visible regression guard: a
+// brand-new actor has no snapshot, so its interstitial must not claim the agent
+// is being woken (new users found "I never used this, why is it waking?").
+func TestLoadingPageFirstUseDoesNotSayWaking(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "newbie", "STATUS_RESUMING", fixedNow) // no snapshot
+	s := newTestServer(f)
+
+	body := doLoading(s, loadingReq("/newbie/", "")).Body.String()
+	if strings.Contains(body, "正在唤醒") {
+		t.Errorf("first-use page must not say 正在唤醒; body:\n%s", body)
+	}
+	if !strings.Contains(body, "欢迎使用") {
+		t.Errorf("first-use page should welcome the user; body:\n%s", body)
+	}
+}
+
+// TestLoadingPageReturningUserSaysWaking is the counterpart: a suspended actor
+// that does have a snapshot is genuinely being restored.
+func TestLoadingPageReturningUserSaysWaking(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "returning", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	addActorSnapshot(f, "mfpi", "returning")
+	s := newTestServer(f)
+
+	body := doLoading(s, loadingReq("/returning/", "")).Body.String()
+	if !strings.Contains(body, "正在唤醒") {
+		t.Errorf("returning user should see 正在唤醒; body:\n%s", body)
 	}
 }

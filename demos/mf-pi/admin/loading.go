@@ -85,7 +85,12 @@ func (s *server) handleLoadingPage(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case err == nil:
-			data.Title, data.Message = loadingCopyForStatus(actor.GetStatus())
+			// A suspended/restoring actor that has a snapshot is being *woken*;
+			// one without any snapshot has never run before, so this is a first
+			// start — telling a brand-new user we are "waking" their agent is
+			// confusing ("I have never used this").
+			hasSnapshot := actor.GetLatestSnapshotInfo() != nil
+			data.Title, data.Message = loadingCopyForStatus(actor.GetStatus(), hasSnapshot)
 		case status.Code(err) == codes.NotFound:
 			data.Title = "用户不存在"
 			data.Message = "未找到该用户，可能已被删除。"
@@ -109,12 +114,17 @@ func (s *server) handleLoadingPage(w http.ResponseWriter, r *http.Request) {
 
 // loadingCopyForStatus maps an actor status to the interstitial's title and
 // body. Unknown/transitional states fall back to the generic loading copy.
-func loadingCopyForStatus(st ateapipb.Actor_Status) (title, message string) {
+//
+// hasSnapshot distinguishes "coming back" from "starting for the first time":
+// an actor that has never been suspended has no snapshot, so there is nothing
+// to restore and the copy must not claim the agent is being woken.
+func loadingCopyForStatus(st ateapipb.Actor_Status, hasSnapshot bool) (title, message string) {
 	switch st {
-	case ateapipb.Actor_STATUS_RESUMING:
-		return "正在唤醒 Agent…", "Agent 之前处于挂起状态以节省资源，正在从快照恢复，请稍候。"
-	case ateapipb.Actor_STATUS_SUSPENDED:
-		return "正在唤醒 Agent…", "Agent 处于挂起状态，正在申请资源并恢复会话。"
+	case ateapipb.Actor_STATUS_RESUMING, ateapipb.Actor_STATUS_SUSPENDED:
+		if hasSnapshot {
+			return "正在唤醒 Agent…", "Agent 之前处于挂起状态以节省资源，正在从快照恢复，请稍候。"
+		}
+		return "欢迎使用秒方 Agent", "首次使用需要初始化你的 Agent（约 20–40 秒）；完成后即可开始第一个会话。"
 	case ateapipb.Actor_STATUS_RUNNING:
 		return "Agent 正在启动…", "Agent 已就绪，Web 服务正在启动，马上就好。"
 	case ateapipb.Actor_STATUS_SUSPENDING, ateapipb.Actor_STATUS_PAUSING, ateapipb.Actor_STATUS_PAUSED:

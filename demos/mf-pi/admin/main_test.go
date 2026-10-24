@@ -444,6 +444,21 @@ func addActor(f *fakeControlClient, atespace, name, status string, createTime ti
 	}
 }
 
+// addActorSnapshot marks an existing fake actor as having a snapshot. That is
+// what distinguishes a returning user (something to restore -> "waking") from a
+// first-ever start (no snapshot -> welcome copy).
+func addActorSnapshot(f *fakeControlClient, atespace, name string) {
+	a := f.actors[actKey(atespace, name)]
+	if a == nil {
+		return
+	}
+	a.LatestSnapshotInfo = &ateapipb.SnapshotInfo{
+		Data: &ateapipb.SnapshotInfo_External{
+			External: &ateapipb.ExternalSnapshotInfo{SnapshotUriPrefix: "gs://test-actor/snapshot"},
+		},
+	}
+}
+
 func doRequest(s *server, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	rec := httptest.NewRecorder()
