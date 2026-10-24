@@ -74,7 +74,8 @@
   }
   .card h2 { font-size: 15px; margin: 0 0 12px; }
   form { display: flex; gap: 8px; }
-  input[type="text"] {
+  input[type="text"],
+  input[type="password"] {
     flex: 1;
     padding: 8px 12px;
     border: 1px solid var(--border);
@@ -204,7 +205,18 @@
   }
   .modal-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
   .modal-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-  .modal select, .modal input[type="text"] {
+  /* 密钥输入行：密码框 + 「显示/隐藏」切换，避免明文暴露又能核对长 key */
+  .key-row { display: flex; gap: 8px; align-items: stretch; }
+  .key-row input { flex: 1 1 auto; min-width: 0; }
+  .key-row .reveal {
+    flex: none; padding: 0 12px; font-size: 13px; cursor: pointer;
+    background: var(--rail); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .key-row .reveal:hover { background: var(--hover); }
+  .modal select,
+  .modal input[type="text"],
+  .modal input[type="password"] {
     width: 100%;
     padding: 8px 12px;
     border: 1px solid var(--border);
@@ -2090,7 +2102,10 @@
       '<option value="openai-completions">OpenAI Chat Completions</option>' +
       "</select>" +
       '<label class="modal-label" for="endpoint-apikey">API Key（仅用于探测，不会保存）</label>' +
-      '<input type="text" id="endpoint-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
+      '<div class="key-row">' +
+      '<input type="password" id="endpoint-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
+      '<button type="button" class="reveal" data-target="endpoint-apikey" aria-label="显示或隐藏密钥">显示</button>' +
+      "</div>" +
       '<div class="modal-hint">仅用于「获取可用模型」向该地址发起一次探测，不会写入任何 Secret；' +
       "每个用户的凭据在「用户 API Key」标签页中配置。</div>" +
       // 锁定白名单：勾选后该端点的模型列表成为封闭集合；取消勾选是唯一的解锁路径。
@@ -2148,7 +2163,10 @@
       '<label class="modal-label" for="key-provider-select">Provider</label>' +
       '<select id="key-provider-select"><option value="">加载中…</option></select>' +
       '<label class="modal-label" for="key-input">API Key</label>' +
-      '<input type="text" id="key-input" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
+      '<div class="key-row">' +
+      '<input type="password" id="key-input" placeholder="sk-..." autocomplete="off" spellcheck="false" />' +
+      '<button type="button" class="reveal" data-target="key-input" aria-label="显示或隐藏密钥">显示</button>' +
+      "</div>" +
       '<div class="modal-hint">Key 按用户分别持久化：运行中的 agent 立即注入；挂起的用户会在恢复后自动生效。' +
       "本页只设置凭据，端点由「模型端点」标签页维护。</div>" +
       '<div class="batch-result" id="key-result"></div>' +
@@ -2937,6 +2955,18 @@
     closeAllDropdowns();
     openMenuUser = null;
   }, true);
+
+  // 密钥框的「显示/隐藏」：默认 password，只有管理员主动点击才临时明文显示。
+  // 用事件委托，避免这些输入框是运行时插入的、拿不到引用。
+  document.addEventListener("click", function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest("button.reveal") : null;
+    if (!btn) return;
+    var input = document.getElementById(btn.getAttribute("data-target"));
+    if (!input) return;
+    var reveal = input.type === "password";
+    input.type = reveal ? "text" : "password";
+    btn.textContent = reveal ? "隐藏" : "显示";
+  });
 
   listProviders();
   listUsers();
