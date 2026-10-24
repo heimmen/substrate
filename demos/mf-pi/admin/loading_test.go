@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // actorStatus converts a proto enum name (e.g. "STATUS_SUSPENDED") to its value.
@@ -157,6 +158,95 @@ func TestLoadingPageRetryActionIsUnambiguous(t *testing.T) {
 	}
 }
 
+// TestLoadingPageHasNoAdminEntry guards a permission-leak class of bug: the
+// interstitial is rendered for ordinary users too, so it must not expose any
+// management entry point (a regular user clicking it would just get a
+// basic-auth prompt or a 403). The page keeps only loading progress, the
+// elapsed time and the retry control.
+func TestLoadingPageHasNoAdminEntry(t *testing.T) {
+	t.Run("waking", func(t *testing.T) {
+		f := newFake()
+		addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+		addActorSnapshot(f, "mfpi", "alice")
+		s := newTestServer(f)
+
+		body := doLoading(s, loadingReq("/alice/", "")).Body.String()
+		if strings.Contains(body, "/usermanagement") {
+			t.Errorf("loading page must not link to the admin console")
+		}
+		if strings.Contains(body, "用户管理") || strings.Contains(body, "人员管理") {
+			t.Errorf("loading page must not render admin-only entries")
+		}
+		// The agent-facing control is still there.
+		if !strings.Contains(body, `id="retry-now"`) {
+			t.Errorf("retry control disappeared")
+		}
+	})
+
+	t.Run("missing user", func(t *testing.T) {
+		f := newFake()
+		s := newTestServer(f)
+
+		body := doLoading(s, loadingReq("/nobody/", "")).Body.String()
+		if strings.Contains(body, "/usermanagement") {
+			t.Errorf("missing-user page must not link to the admin console")
+		}
+		if !strings.Contains(body, "联系管理员") {
+			t.Errorf("missing-user page should tell the user to contact an administrator")
+		}
+	})
+}
+
+// TestLoadingPageOldActorWithoutSnapshotIsNotFirstUse covers a case the live
+// cluster made obvious: several long-lived actors have no latestSnapshotInfo
+// (the snapshot was cleared or pruned) yet their users have plenty of history.
+// They must be told the agent is starting, not that this is their first visit.
+func TestLoadingPageOldActorWithoutSnapshotIsNotFirstUse(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "veteran", "STATUS_SUSPENDED", fixedNow.Add(-30*24*time.Hour))
+	s := newTestServer(f)
+
+	body := doLoading(s, loadingReq("/veteran/", "")).Body.String()
+	if strings.Contains(body, "欢迎使用") {
+		t.Errorf("a long-lived actor must not be greeted as a first-time user")
+	}
+	if strings.Contains(body, "正在唤醒") {
+		t.Errorf("without a snapshot there is nothing to wake, so do not claim 正在唤醒")
+	}
+	if !strings.Contains(body, "正在启动") {
+		t.Errorf("expected the neutral 正在启动 copy; body:\n%s", body)
+	}
+}
+
+// TestClassifyLoadingReason pins the three-way rule directly.
+func TestClassifyLoadingReason(t *testing.T) {
+	now := fixedNow
+
+	withSnapshot := &ateapipb.Actor{
+		Metadata:           &ateapipb.ResourceMetadata{Name: "a", CreateTime: timestamppb.New(now.Add(-time.Hour))},
+		LatestSnapshotInfo: &ateapipb.SnapshotInfo{Data: &ateapipb.SnapshotInfo_External{External: &ateapipb.ExternalSnapshotInfo{}}},
+	}
+	if got := classifyLoadingReason(withSnapshot, now); got != loadingRestoring {
+		t.Errorf("with snapshot: got %v, want loadingRestoring", got)
+	}
+
+	fresh := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: "b", CreateTime: timestamppb.New(now.Add(-30 * time.Second))}}
+	if got := classifyLoadingReason(fresh, now); got != loadingFirstStart {
+		t.Errorf("created 30s ago without snapshot: got %v, want loadingFirstStart", got)
+	}
+
+	old := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: "c", CreateTime: timestamppb.New(now.Add(-72 * time.Hour))}}
+	if got := classifyLoadingReason(old, now); got != loadingColdStart {
+		t.Errorf("old actor without snapshot: got %v, want loadingColdStart", got)
+	}
+
+	// Missing create time must not crash or claim "first use".
+	noTime := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: "d"}}
+	if got := classifyLoadingReason(noTime, now); got != loadingColdStart {
+		t.Errorf("missing create time: got %v, want loadingColdStart", got)
+	}
+}
+
 func TestLoadingPageResumingActor(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_RESUMING", fixedNow.Add(-time.Hour))
@@ -250,30 +340,33 @@ func TestLoadingPageIgnoresInvalidCookieUser(t *testing.T) {
 
 func TestLoadingCopyForStatus(t *testing.T) {
 	tests := []struct {
-		status      string
-		hasSnapshot bool
-		want        string
+		status string
+		reason loadingReason
+		want   string
 	}{
 		// Coming back: there is a snapshot to restore, so "waking" is accurate.
-		{"STATUS_RESUMING", true, "正在唤醒"},
-		{"STATUS_SUSPENDED", true, "正在唤醒"},
+		{"STATUS_RESUMING", loadingRestoring, "正在唤醒"},
+		{"STATUS_SUSPENDED", loadingRestoring, "正在唤醒"},
 		// First ever start: nothing to restore, so do not say "waking".
-		{"STATUS_RESUMING", false, "欢迎使用"},
-		{"STATUS_SUSPENDED", false, "欢迎使用"},
-		{"STATUS_RUNNING", false, "正在启动"},
-		{"STATUS_RUNNING", true, "正在启动"},
-		{"STATUS_PAUSED", false, "正在切换状态"},
-		{"STATUS_CRASHED", false, "正在重启"},
-		{"STATUS_UNSPECIFIED", false, "正在载入"},
+		{"STATUS_RESUMING", loadingFirstStart, "欢迎使用"},
+		{"STATUS_SUSPENDED", loadingFirstStart, "欢迎使用"},
+		// No snapshot but not a new actor: neither "waking" nor "welcome".
+		{"STATUS_RESUMING", loadingColdStart, "正在启动"},
+		{"STATUS_SUSPENDED", loadingColdStart, "正在启动"},
+		{"STATUS_RUNNING", loadingColdStart, "正在启动"},
+		{"STATUS_RUNNING", loadingRestoring, "正在启动"},
+		{"STATUS_PAUSED", loadingColdStart, "正在切换状态"},
+		{"STATUS_CRASHED", loadingColdStart, "正在重启"},
+		{"STATUS_UNSPECIFIED", loadingColdStart, "正在载入"},
 	}
 	for _, tc := range tests {
-		title, message := loadingCopyForStatus(actorStatus(tc.status), tc.hasSnapshot)
+		title, message := loadingCopyForStatus(actorStatus(tc.status), tc.reason)
 		if !strings.Contains(title, tc.want) {
-			t.Errorf("%s (snapshot=%v): title = %q, want it to contain %q",
-				tc.status, tc.hasSnapshot, title, tc.want)
+			t.Errorf("%s (reason=%v): title = %q, want it to contain %q",
+				tc.status, tc.reason, title, tc.want)
 		}
 		if message == "" {
-			t.Errorf("%s (snapshot=%v): empty message", tc.status, tc.hasSnapshot)
+			t.Errorf("%s (reason=%v): empty message", tc.status, tc.reason)
 		}
 	}
 }

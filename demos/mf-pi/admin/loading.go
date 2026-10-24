@@ -85,12 +85,13 @@ func (s *server) handleLoadingPage(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case err == nil:
-			// A suspended/restoring actor that has a snapshot is being *woken*;
-			// one without any snapshot has never run before, so this is a first
-			// start — telling a brand-new user we are "waking" their agent is
-			// confusing ("I have never used this").
-			hasSnapshot := actor.GetLatestSnapshotInfo() != nil
-			data.Title, data.Message = loadingCopyForStatus(actor.GetStatus(), hasSnapshot)
+			// Why is the agent not ready yet? Telling a brand-new user we are
+			// "waking" their agent is confusing ("I have never used this"), but
+			// an absent snapshot does NOT imply a new user either: actors whose
+			// snapshot was cleared or pruned keep their data and their history.
+			// So classify into restore / first-start / plain cold start.
+			data.Title, data.Message = loadingCopyForStatus(
+				actor.GetStatus(), classifyLoadingReason(actor, s.now()))
 		case status.Code(err) == codes.NotFound:
 			data.Title = "用户不存在"
 			data.Message = "未找到该用户，可能已被删除。"
@@ -112,19 +113,54 @@ func (s *server) handleLoadingPage(w http.ResponseWriter, r *http.Request) {
 	_ = loadingPageTemplate.Execute(w, data)
 }
 
+// loadingReason explains *why* an actor is not serving yet, which is what the
+// copy has to reflect.
+type loadingReason int
+
+const (
+	// loadingRestoring: the actor has a snapshot, so it is genuinely waking up.
+	loadingRestoring loadingReason = iota
+	// loadingFirstStart: the actor was created moments ago and has no snapshot,
+	// i.e. this really is the user's first visit.
+	loadingFirstStart
+	// loadingColdStart: no snapshot but the actor is not new. It boots from
+	// scratch, but the user may well have history (a cleared or pruned snapshot
+	// does not erase the user's data), so neither "waking" nor "welcome" is
+	// truthful — say it is starting.
+	loadingColdStart
+)
+
+// firstStartWindow is how recently an actor must have been created, with no
+// snapshot, to be treated as a user's very first visit.
+const firstStartWindow = 10 * time.Minute
+
+// classifyLoadingReason decides which copy applies. Erring towards
+// loadingColdStart is deliberate: its wording is true in both cases.
+func classifyLoadingReason(a *ateapipb.Actor, now time.Time) loadingReason {
+	if a.GetLatestSnapshotInfo() != nil {
+		return loadingRestoring
+	}
+	if ct := a.GetMetadata().GetCreateTime(); ct != nil {
+		if now.Sub(ct.AsTime()) < firstStartWindow {
+			return loadingFirstStart
+		}
+	}
+	return loadingColdStart
+}
+
 // loadingCopyForStatus maps an actor status to the interstitial's title and
 // body. Unknown/transitional states fall back to the generic loading copy.
-//
-// hasSnapshot distinguishes "coming back" from "starting for the first time":
-// an actor that has never been suspended has no snapshot, so there is nothing
-// to restore and the copy must not claim the agent is being woken.
-func loadingCopyForStatus(st ateapipb.Actor_Status, hasSnapshot bool) (title, message string) {
+func loadingCopyForStatus(st ateapipb.Actor_Status, reason loadingReason) (title, message string) {
 	switch st {
 	case ateapipb.Actor_STATUS_RESUMING, ateapipb.Actor_STATUS_SUSPENDED:
-		if hasSnapshot {
+		switch reason {
+		case loadingRestoring:
 			return "正在唤醒 Agent…", "Agent 之前处于挂起状态以节省资源，正在从快照恢复，请稍候。"
+		case loadingFirstStart:
+			return "欢迎使用秒方 Agent", "首次使用需要初始化你的 Agent（约 20–40 秒）；完成后即可开始第一个会话。"
+		default:
+			return "正在启动 Agent…", "正在准备你的 Agent 环境，请稍候。"
 		}
-		return "欢迎使用秒方 Agent", "首次使用需要初始化你的 Agent（约 20–40 秒）；完成后即可开始第一个会话。"
 	case ateapipb.Actor_STATUS_RUNNING:
 		return "Agent 正在启动…", "Agent 已就绪，Web 服务正在启动，马上就好。"
 	case ateapipb.Actor_STATUS_SUSPENDING, ateapipb.Actor_STATUS_PAUSING, ateapipb.Actor_STATUS_PAUSED:

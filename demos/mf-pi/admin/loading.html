@@ -111,20 +111,17 @@
       载入时间较长。可能是当前没有空闲 worker，或该 Agent 的会话较大、恢复较慢。
       系统仍在重试，也可以稍后再打开，或联系管理员检查 worker 容量。
     </div>
-    <div class="actions">
-      {{if .AutoRefresh}}
-        <a class="btn primary" id="retry-now" href="{{.RetryURL}}"
-           title="立即重新连接；不会丢弃已生成的内容">重试连接</a>
-        <a class="btn" href="/usermanagement/">用户管理</a>
-      {{else}}
-        <a class="btn primary" href="/usermanagement/">返回用户管理</a>
-      {{end}}
-    </div>
     {{if .AutoRefresh}}
+    <div class="actions">
+      <a class="btn primary" id="retry-now" href="{{.RetryURL}}"
+         title="立即重新连接；不会丢弃已生成的内容">重试连接</a>
+    </div>
     <p class="fineprint">
       「重试连接」只是重新建立连接，<strong>已生成的内容会保留</strong>；
       也可以什么都不做，本页会自动重试。
     </p>
+    {{else}}
+    <p class="fineprint">如果这是你的账号，请联系管理员协助处理。</p>
     {{end}}
   </div>
   <script>
