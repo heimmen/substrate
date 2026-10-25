@@ -2690,6 +2690,49 @@ func TestParseProviderModelsRejectsBadRows(t *testing.T) {
 	}
 }
 
+// TestParseProviderModelsCarriesReasoning guards the request-body path: the
+// handler decodes models into providerModelRequest before building registryModel,
+// so a field missing from that DTO is silently dropped even when the registry
+// struct and the console both support it (that regression shipped once).
+func TestParseProviderModelsCarriesReasoning(t *testing.T) {
+	high := "high"
+	raw := []json.RawMessage{
+		json.RawMessage(`{"id":"on","reasoning":true}`),
+		json.RawMessage(`{"id":"off","reasoning":false}`),
+		json.RawMessage(`{"id":"unset"}`),
+		json.RawMessage(`{"id":"mapped","reasoning":true,"thinkingLevelMap":{"low":null,"high":"high"}}`),
+		json.RawMessage(`"bare-id"`),
+	}
+	byID := map[string]registryModel{}
+	models, err := parseProviderModels(raw)
+	if err != nil {
+		t.Fatalf("parseProviderModels: %v", err)
+	}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+
+	if m := byID["on"]; m.Reasoning == nil || !*m.Reasoning {
+		t.Errorf("reasoning:true was dropped: %+v", byID["on"])
+	}
+	if m := byID["off"]; m.Reasoning == nil || *m.Reasoning {
+		t.Errorf("reasoning:false must survive as an explicit false: %+v", byID["off"])
+	}
+	if m := byID["unset"]; m.Reasoning != nil {
+		t.Errorf("absent reasoning must stay absent: %+v", byID["unset"])
+	}
+	mapped := byID["mapped"]
+	if mapped.ThinkingLevelMap == nil || mapped.ThinkingLevelMap["low"] != nil {
+		t.Errorf("null thinking level lost: %+v", mapped)
+	}
+	if got := mapped.ThinkingLevelMap["high"]; got == nil || *got != high {
+		t.Errorf("mapped thinking level lost: %+v", mapped)
+	}
+	if m := byID["bare-id"]; m.Reasoning != nil {
+		t.Errorf("bare id should carry no capabilities: %+v", m)
+	}
+}
+
 func TestValidateRegistryProviderRejectsUnknownInputModality(t *testing.T) {
 	_, err := validateRegistryProvider("gw", registryProvider{
 		BaseURL: "https://h/v1",
@@ -2697,6 +2740,74 @@ func TestValidateRegistryProviderRejectsUnknownInputModality(t *testing.T) {
 	}, builtinProviderIndex())
 	if err == nil || !strings.Contains(err.Error(), "输入类型只能是 text 或 image") {
 		t.Errorf("err = %v, want the modality refusal", err)
+	}
+}
+
+// Thinking levels only exist when pi sees model.reasoning. Declared models
+// default to false there, so the registry has to be able to carry the flag --
+// otherwise every custom endpoint shows just "关闭" in the thinking selector.
+func TestRegistryModelCarriesReasoning(t *testing.T) {
+	yes := true
+	high := "high"
+	p, err := validateRegistryProvider("gw", registryProvider{
+		BaseURL: "https://h/v1",
+		Models: []registryModel{{
+			ID:               "deepseek-v4-pro",
+			Reasoning:        &yes,
+			ThinkingLevelMap: map[string]*string{"low": nil, "high": &high},
+		}},
+	}, builtinProviderIndex())
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if p.Models[0].Reasoning == nil || !*p.Models[0].Reasoning {
+		t.Fatal("reasoning flag was dropped by validation")
+	}
+
+	// It must survive serialisation into the document pi reads, including the
+	// explicit null (that is how "this level is unavailable" is expressed).
+	rendered, err := marshalRegistryDocument(map[string]registryProvider{"gw": p})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(rendered, `"reasoning": true`) {
+		t.Errorf("rendered registry lost reasoning: %s", rendered)
+	}
+	if !strings.Contains(rendered, `"low": null`) {
+		t.Errorf("rendered registry lost the null thinking level: %s", rendered)
+	}
+	if !strings.Contains(rendered, `"high": "high"`) {
+		t.Errorf("rendered registry lost the mapped thinking level: %s", rendered)
+	}
+
+	// An unset flag must stay absent, not become an explicit false: pi treats
+	// absent and false the same, and absent keeps the document minimal.
+	p2, err := validateRegistryProvider("gw2", registryProvider{
+		BaseURL: "https://h/v1",
+		Models:  []registryModel{{ID: "plain"}},
+	}, builtinProviderIndex())
+	if err != nil {
+		t.Fatalf("validate plain: %v", err)
+	}
+	rendered2, err := marshalRegistryDocument(map[string]registryProvider{"gw2": p2})
+	if err != nil {
+		t.Fatalf("marshal plain: %v", err)
+	}
+	if strings.Contains(rendered2, "reasoning") {
+		t.Errorf("unset reasoning should be omitted, got %s", rendered2)
+	}
+}
+
+func TestValidateRegistryProviderRejectsUnknownThinkingLevel(t *testing.T) {
+	_, err := validateRegistryProvider("gw", registryProvider{
+		BaseURL: "https://h/v1",
+		Models: []registryModel{{
+			ID:               "m",
+			ThinkingLevelMap: map[string]*string{"extreme": nil},
+		}},
+	}, builtinProviderIndex())
+	if err == nil || !strings.Contains(err.Error(), "思考等级") {
+		t.Errorf("err = %v, want the thinking-level refusal", err)
 	}
 }
 

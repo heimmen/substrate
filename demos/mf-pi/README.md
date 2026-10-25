@@ -349,6 +349,19 @@ UI 的 provider 选择器用的是「内置列表 + 注册表」合并后的结�
 **SiliconFlow（硅基流动）** 作为示例（id `siliconflow`，`baseUrl`
 `https://api.siliconflow.cn/v1`）。
 
+**思考等级（推理）**：会话里「选择思考等级」的选项**完全由模型的能力声明决定** —— pi 的判定是
+`model.reasoning` 为真才提供等级，否则只有「关闭」一项（pi-ai `getSupportedThinkingLevels`）；
+而 pi 对**声明式 provider 的模型默认 `reasoning: false`**。所以经本注册表添加的模型如果不勾选，
+思考等级就永远只有「关闭」。因此：
+
+- 模型行展开后有「**支持思考等级**」勾选框，保存后写入 `"reasoning": true`；
+- JSON 输入还可以写 pi 原生的 `"thinkingLevelMap"` 精确控制可选等级，例如
+  `{"low": null, "high": "high", "max": "max"}` 表示只开放 high/max（`null` = 该等级不可用）；
+  键只能是 `off/minimal/low/medium/high/xhigh/max`，服务端会校验；
+- 内置 provider（如 `deepseek`）的模型来自 pi 自带 catalog，本来就带能力（例如
+  `deepseek-v4-pro` 支持 high/max），**不要**把同名 model id 再声明到自定义端点里 ——
+  声明式定义会覆盖 catalog 条目并丢掉这些能力。
+
 **注册表位置与写入方**：ConfigMap `mfpi-provider-models` 的 `provider-models.json` 键，内容
 是一份 `models.json` 文档（生产模板 `mf-pi.yaml.tmpl` 与测试模板 `mf-pi-test.yaml.tmpl` 各
 一份）。`mfpi-admin` 经 Kubernetes API server 读写它（RBAC `mfpi-admin-providers` 授予
@@ -363,7 +376,8 @@ API 协议 / 探测用 Key（不保存）/ 模型列表 / **锁定模型列表�
 该端点回填进表单，改完保存即覆盖。模型列表支持**「获取可用模型」**：用表单当前的地址、协议与 Key 去问端点它提供哪些
 模型（服务端发起，Key 只用于这一次探测），成功后弹出可搜索的勾选框，把选中的模型连同上下文
 窗口、最大输出 token 数一起填入行内；也可以手工逐行填写模型 ID、显示名称、上下文窗口、最大
-输出 token 数与输入类型（文本/图片）。勾选「**锁定模型列表（白名单）**」后该端点的模型列表成为
+输出 token 数与输入类型（文本/图片）；展开模型行还有「**思考（推理）**」勾选框，见下。
+勾选「**锁定模型列表（白名单）**」后该端点的模型列表成为
 **封闭集合**：探测结果里白名单外的模型不可选、手工也加不进去（服务端同样拒绝，需先取消勾选保存
 再重新勾选才能扩展）。seed 里的硅基流动就是锁定的，只提供 5 个模型。「**用户 API Key**」标签页
 默认**应用到所有用户**（也可切「指定用户」勾选子集），保存或清除一次完成，

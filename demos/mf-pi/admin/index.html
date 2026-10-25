@@ -1347,6 +1347,13 @@
       '<label><input type="checkbox" class="model-input-text" /> 文本</label>' +
       '<label><input type="checkbox" class="model-input-image" /> 图片</label>' +
       "</div>" +
+      // pi 只有在 model.reasoning 为真时才提供思考等级；不声明的话选择器
+      // 只有「关闭」一个选项（见 pi-ai getSupportedThinkingLevels）。
+      '<label class="modal-label">思考（推理）</label>' +
+      '<div class="model-input-types">' +
+      '<label><input type="checkbox" class="model-reasoning" /> '
+      + '支持思考等级（勾选后会话里可选 low/medium/high 等）</label>' +
+      "</div>" +
       "</div>" +
       '<div class="modal-error model-row-error"></div>';
 
@@ -1361,7 +1368,9 @@
     var types = model.input || [];
     row.querySelector(".model-input-text").checked = types.indexOf("text") >= 0;
     row.querySelector(".model-input-image").checked = types.indexOf("image") >= 0;
-    expandModelRow(row, types.length > 0 || model.contextWindow != null || model.maxTokens != null);
+    row.querySelector(".model-reasoning").checked = model.reasoning === true;
+    expandModelRow(row, types.length > 0 || model.contextWindow != null
+      || model.maxTokens != null || model.reasoning === true);
 
     row.querySelector(".model-toggle").addEventListener("click", function () {
       expandModelRow(row, !isModelRowExpanded(row));
@@ -1431,6 +1440,7 @@
       if (row.querySelector(".model-input-text").checked) types.push("text");
       if (row.querySelector(".model-input-image").checked) types.push("image");
       if (types.length) m.input = types;
+      if (row.querySelector(".model-reasoning").checked) m.reasoning = true;
       models.push(m);
     });
     if (rows.length === 0) {

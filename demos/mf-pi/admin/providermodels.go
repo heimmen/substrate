@@ -64,10 +64,29 @@ type registryModel struct {
 	// Input lists accepted modalities (text, image). Empty means "not
 	// declared" so the route's own default applies.
 	Input []string `json:"input,omitempty"`
+	// Reasoning marks the model as supporting reasoning/thinking. pi only
+	// offers thinking levels when model.reasoning is true — without it the
+	// session's thinking selector shows just "off". Declared models default to
+	// unsupported in pi, so this must be stated explicitly.
+	Reasoning *bool `json:"reasoning,omitempty"`
+	// ThinkingLevelMap narrows which levels are offered (pi's own field):
+	// a level mapped to null is unavailable, a level mapped to a string is
+	// sent to the provider as that value. Omitted means "all standard levels".
+	// Values are pointers so an explicit null (unsupported) survives the trip.
+	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap,omitempty"`
 }
 
 // modelInputModalities are the modalities a declaration may name.
 var modelInputModalities = map[string]bool{"text": true, "image": true}
+
+// modelThinkingLevels are the thinking levels pi understands (pi-ai's
+// EXTENDED_THINKING_LEVELS). A thinkingLevelMap may only key on these.
+var modelThinkingLevels = map[string]bool{
+	"off": true, "minimal": true, "low": true, "medium": true,
+	"high": true, "xhigh": true, "max": true,
+}
+
+const modelThinkingLevelNames = "off/minimal/low/medium/high/xhigh/max"
 
 // registryProvider is one custom OpenAI-compatible endpoint.
 type registryProvider struct {
@@ -321,6 +340,11 @@ func validateRegistryProvider(id string, p registryProvider, reserved map[string
 		for _, modality := range m.Input {
 			if !modelInputModalities[modality] {
 				return p, fmt.Errorf("模型 %q 的输入类型只能是 text 或 image", m.ID)
+			}
+		}
+		for level := range m.ThinkingLevelMap {
+			if !modelThinkingLevels[level] {
+				return p, fmt.Errorf("模型 %q 的思考等级 %q 非法：可选 %s", m.ID, level, modelThinkingLevelNames)
 			}
 		}
 		models = append(models, m)

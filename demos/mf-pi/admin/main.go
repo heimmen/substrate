@@ -609,6 +609,10 @@ type providerModelRequest struct {
 	ContextWindow *int     `json:"contextWindow"`
 	MaxTokens     *int     `json:"maxTokens"`
 	Input         []string `json:"input"`
+	// Reasoning/ThinkingLevelMap mirror registryModel: pi only offers thinking
+	// levels when the model declares reasoning, so the request must carry it.
+	Reasoning        *bool              `json:"reasoning"`
+	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
 }
 
 // parseProviderModels accepts either an object per model or a bare model id
@@ -638,7 +642,13 @@ func parseProviderModels(raw []json.RawMessage) ([]registryModel, error) {
 		if m.MaxTokens != nil && *m.MaxTokens <= 0 {
 			return nil, modelCapacityError(m.ID, false)
 		}
-		model := registryModel{ID: m.ID, Name: m.Name, Input: m.Input}
+		model := registryModel{
+			ID:               m.ID,
+			Name:             m.Name,
+			Input:            m.Input,
+			Reasoning:        m.Reasoning,
+			ThinkingLevelMap: m.ThinkingLevelMap,
+		}
 		if m.ContextWindow != nil {
 			model.ContextWindow = *m.ContextWindow
 		}
