@@ -752,6 +752,45 @@ kubectl ate suspend actor alice -a mfpi
 curl -s -u alice:<用户密码> -H 'Accept: text/html' http://localhost:58681/alice/ | head -5
 ```
 
+### 临时 CI/CD 页面（`/_cicd_`，演示用）
+
+一个只需点一次的部署页面，入口与用户管理同级、鉴权相同：
+
+```
+http://<host>:58681/_cicd_        # 生产网关（测试环境为 :59681）
+用户名/密码：与 /usermanagement/ 完全一致
+```
+
+页面只有一个 **Deploy latest code** 按钮，点击后在**部署机（宿主机）**执行
+`demos/mf-pi/deploy.sh`，脚本输出实时回显在页面下方（轮询 `/state`，每 800ms）。
+
+**为什么跑在宿主机**：`deploy.sh` 需要仓库、`ko`、`docker` 和 `kubectl`（还要重建
+`mfpi-nginx` 镜像），这些只有宿主机有；admin 跑在 pod 里做不了。所以页面由宿主机
+进程 `cicd_server.py` 提供，nginx 用 `/_cicd_` 反代到 `127.0.0.1:58690` 并复用
+同一份 htpasswd（`nginx.conf` / `nginx-test.conf` 里的 `location ^~ /_cicd_/`）。
+
+```bash
+cd demos/mf-pi
+./cicd-server.sh start      # 启动（默认 ./deploy.sh）
+./cicd-server.sh status
+./cicd-server.sh stop
+./cicd-server.sh logs       # 服务自身日志（部署输出在页面上）
+
+# 传给 deploy.sh 的环境变量直接继承自启动它的 shell：
+MFPI_IDLE_TIERS=off ./cicd-server.sh start        # 部署后保持空闲挂起关闭
+MFPI_SKIP_WORKLOAD_BUILD=1 ./cicd-server.sh start # 跳过 workload 镜像构建，快很多
+```
+
+- 同一时刻只允许一次部署；正在跑时按钮置灰，再次触发返回 409。
+- 服务没启动时，`/_cicd_` 返回 503 并提示执行 `./cicd-server.sh start`（不是裸 502）。
+- 部署会重建 admin 镜像并滚动 nginx/admin，期间 `/usermanagement/` 可能短暂 502。
+
+> [!WARNING]
+> 这是**临时演示工具**：任何能通过管理员 Basic Auth 的人都能在这台机器上执行一次
+> 部署。不要把它暴露到演示机之外。要彻底下线：删掉 `cicd_server.py`、
+> `cicd-server.sh` 和两个 conf 里的 `/_cicd_` location，然后重建 `mfpi-nginx`
+> 镜像（`./build-image.sh`）。
+
 ### 验证持久化
 
 会话历史、skills、`auth.json`、`projects.json` 以及 `$HOME` 下用户自己安装的 Pi 包
