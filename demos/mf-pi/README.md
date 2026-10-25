@@ -358,6 +358,15 @@ UI 的 provider 选择器用的是「内置列表 + 注册表」合并后的结�
 - JSON 输入还可以写 pi 原生的 `"thinkingLevelMap"` 精确控制可选等级，例如
   `{"low": null, "high": "high", "max": "max"}` 表示只开放 high/max（`null` = 该等级不可用）；
   键只能是 `off/minimal/low/medium/high/xhigh/max`，服务端会校验；
+- **`compat` 也原样透传**（pi 的原生对象），它决定「真的会不会思考」：pi 只在
+  `compat.thinkingFormat == "deepseek"` 时才给请求加上 `{"thinking":{"type":"enabled"}}`。
+  只声明 `reasoning` 会出现「等级能选、模型并不思考」。DeepSeek 类网关的典型配置：
+  ```json
+  "compat": {"thinkingFormat": "deepseek", "requiresReasoningContentOnAssistantMessages": true}
+  ```
+  若网关还接受 `reasoning_effort`，再加 `"supportsReasoningEffort": true` —— 否则不同等级
+  发出的请求完全相同（只有开关，没有强度差异）。`thinkingFormat` 的取值按 pi 的枚举校验，
+  其余键原样交给 pi；
 - 内置 provider（如 `deepseek`）的模型来自 pi 自带 catalog，本来就带能力（例如
   `deepseek-v4-pro` 支持 high/max），**不要**把同名 model id 再声明到自定义端点里 ——
   声明式定义会覆盖 catalog 条目并丢掉这些能力。

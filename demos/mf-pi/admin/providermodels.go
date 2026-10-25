@@ -21,6 +21,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -69,6 +70,15 @@ type registryModel struct {
 	// session's thinking selector shows just "off". Declared models default to
 	// unsupported in pi, so this must be stated explicitly.
 	Reasoning *bool `json:"reasoning,omitempty"`
+	// Compat carries pi's provider-compatibility hints for this model (pi's own
+	// object: thinkingFormat, requiresReasoningContentOnAssistantMessages,
+	// supportsReasoningEffort, ...). It matters for thinking: pi only emits the
+	// DeepSeek-style {"thinking":{"type":"enabled"}} request parameter when
+	// compat.thinkingFormat == "deepseek" (see pi-ai openai-completions), so
+	// reasoning alone makes the levels appear without the model ever thinking.
+	// Kept as raw JSON and forwarded verbatim so new pi keys work without us
+	// tracking pi's schema.
+	Compat json.RawMessage `json:"compat,omitempty"`
 	// ThinkingLevelMap narrows which levels are offered (pi's own field):
 	// a level mapped to null is unavailable, a level mapped to a string is
 	// sent to the provider as that value. Omitted means "all standard levels".
@@ -342,6 +352,12 @@ func validateRegistryProvider(id string, p registryProvider, reserved map[string
 				return p, fmt.Errorf("模型 %q 的输入类型只能是 text 或 image", m.ID)
 			}
 		}
+		compat, err := normalizeCompat(m.Compat)
+		if err != nil {
+			return p, fmt.Errorf("模型 %q 的 compat 非法：%w", m.ID, err)
+		}
+		// Unconditional: an explicit null must be cleared, not kept.
+		m.Compat = compat
 		for level := range m.ThinkingLevelMap {
 			if !modelThinkingLevels[level] {
 				return p, fmt.Errorf("模型 %q 的思考等级 %q 非法：可选 %s", m.ID, level, modelThinkingLevelNames)
@@ -404,4 +420,38 @@ func (s *server) handleInternalProviderModels(w http.ResponseWriter, r *http.Req
 		return
 	}
 	_, _ = io.WriteString(w, raw)
+}
+
+// modelThinkingFormats are the thinkingFormat values pi understands. Only that
+// one key is checked here: the rest of compat belongs to pi's own schema and
+// duplicating it would drift, but a typo in thinkingFormat is the mistake that
+// silently disables thinking for DeepSeek-style endpoints.
+var modelThinkingFormats = map[string]bool{
+	"openai": true, "openrouter": true, "together": true, "baseten": true,
+	"deepseek": true, "zai": true, "qwen": true, "chat-template": true,
+	"qwen-chat-template": true, "string-thinking": true, "ant-ling": true,
+}
+
+// normalizeCompat validates that a compat declaration is the JSON object pi
+// expects and that thinkingFormat, if present, is one of pi's values. An
+// explicit null is treated as absent.
+func normalizeCompat(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return nil, fmt.Errorf("需要是 JSON 对象")
+	}
+	if rawFormat, ok := obj["thinkingFormat"]; ok {
+		var format string
+		if err := json.Unmarshal(rawFormat, &format); err != nil {
+			return nil, fmt.Errorf("thinkingFormat 需要是字符串")
+		}
+		if !modelThinkingFormats[format] {
+			return nil, fmt.Errorf("thinkingFormat %q 不是 pi 支持的值（如 deepseek/openai/qwen/zai）", format)
+		}
+	}
+	return trimmed, nil
 }

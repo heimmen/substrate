@@ -2798,6 +2798,69 @@ func TestRegistryModelCarriesReasoning(t *testing.T) {
 	}
 }
 
+// TestRegistryModelCarriesCompat: reasoning only makes the levels *appear*.
+// For DeepSeek-style endpoints pi sends {"thinking":{"type":"enabled"}} only when
+// compat.thinkingFormat == "deepseek", so the registry has to forward compat.
+func TestRegistryModelCarriesCompat(t *testing.T) {
+	body := `{"id":"deepseek-v4.1-flash","reasoning":true,` +
+		`"compat":{"thinkingFormat":"deepseek","requiresReasoningContentOnAssistantMessages":true}}`
+	models, err := parseProviderModels([]json.RawMessage{json.RawMessage(body)})
+	if err != nil {
+		t.Fatalf("parseProviderModels: %v", err)
+	}
+	p, err := validateRegistryProvider("gw", registryProvider{BaseURL: "https://h/v1", Models: models}, builtinProviderIndex())
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if len(p.Models[0].Compat) == 0 {
+		t.Fatal("compat was dropped")
+	}
+	rendered, err := marshalRegistryDocument(map[string]registryProvider{"gw": p})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"thinkingFormat": "deepseek"`, `"requiresReasoningContentOnAssistantMessages": true`} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendered registry missing %s: %s", want, rendered)
+		}
+	}
+
+	// Absent and explicit null both mean "no compat", and must stay out of the
+	// document. Normalisation happens in validateRegistryProvider, so check there.
+	for _, raw := range []string{`{"id":"plain"}`, `{"id":"nulled","compat":null}`} {
+		ms, err := parseProviderModels([]json.RawMessage{json.RawMessage(raw)})
+		if err != nil {
+			t.Fatalf("parse %s: %v", raw, err)
+		}
+		np, err := validateRegistryProvider("gw", registryProvider{BaseURL: "https://h/v1", Models: ms}, builtinProviderIndex())
+		if err != nil {
+			t.Fatalf("validate %s: %v", raw, err)
+		}
+		if len(np.Models[0].Compat) != 0 {
+			t.Errorf("%s: compat should be absent after validation, got %s", raw, np.Models[0].Compat)
+		}
+	}
+}
+
+func TestValidateRegistryProviderRejectsBadCompat(t *testing.T) {
+	cases := []struct{ name, compat, want string }{
+		{"not-object", `["deepseek"]`, "compat"},
+		{"bad-format", `{"thinkingFormat":"deepsek"}`, "thinkingFormat"},
+		{"format-not-string", `{"thinkingFormat":1}`, "thinkingFormat"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := validateRegistryProvider("gw", registryProvider{
+				BaseURL: "https://h/v1",
+				Models:  []registryModel{{ID: "m", Compat: json.RawMessage(c.compat)}},
+			}, builtinProviderIndex())
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("err = %v, want it to mention %q", err, c.want)
+			}
+		})
+	}
+}
+
 func TestValidateRegistryProviderRejectsUnknownThinkingLevel(t *testing.T) {
 	_, err := validateRegistryProvider("gw", registryProvider{
 		BaseURL: "https://h/v1",

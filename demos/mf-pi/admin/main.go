@@ -613,6 +613,7 @@ type providerModelRequest struct {
 	// levels when the model declares reasoning, so the request must carry it.
 	Reasoning        *bool              `json:"reasoning"`
 	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
+	Compat           json.RawMessage    `json:"compat"`
 }
 
 // parseProviderModels accepts either an object per model or a bare model id
@@ -648,6 +649,7 @@ func parseProviderModels(raw []json.RawMessage) ([]registryModel, error) {
 			Input:            m.Input,
 			Reasoning:        m.Reasoning,
 			ThinkingLevelMap: m.ThinkingLevelMap,
+			Compat:           m.Compat,
 		}
 		if m.ContextWindow != nil {
 			model.ContextWindow = *m.ContextWindow
