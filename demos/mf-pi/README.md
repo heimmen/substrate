@@ -256,6 +256,31 @@ kubectl port-forward -n ate-demo-mf-pi svc/mfpi-admin 58682:8080
 
 ### 鉴权
 
+Agent 路径（`/<username>/...`）的凭据是 **HTTP Basic**：nginx 每个请求都跑
+`auth_request /_mfpi_gate`，admin 校验"用户名 = 该路径用户 + 密码正确"。Basic 本身没有
+服务端有效期 —— 浏览器自己缓存凭据，**关浏览器、休眠/锁屏、切换网络**都会丢掉缓存，
+于是下次请求变成 401、弹出密码框。
+
+为了让"多久之后要重新输密码"变成**我们可控**的值，鉴权成功后 admin 会额外下发一个
+**会话 Cookie**（`mfpi_auth`）：
+
+- 默认有效期 **720 分钟（12 小时）**，用 `MFPI_AUTH_COOKIE_TTL` 部署期设置
+  （如 `MFPI_AUTH_COOKIE_TTL=24h ./deploy.sh`；`0` = 关闭，退回纯 Basic）；
+- 之后只带这个 Cookie、不带 `Authorization` 的请求也算已登录 —— **浏览器丢掉 Basic
+  缓存后不会再弹密码框**，直到 Cookie 过期；
+- 签名用该用户的**密码哈希**（HMAC-SHA256），所以不需要新增密钥、重启不失效、
+  **改密码立即让所有旧 Cookie 失效**；用户名在签名内容里，换用户无法重放；
+- HttpOnly + SameSite=Lax，`Max-Age` 与 TTL 一致（因此能跨浏览器重启存活）；
+- 剩余有效期不足一半时自动续期。
+
+实现细节：`auth_request` 子请求的响应头会被 nginx 丢弃，所以 Cookie 由 admin 通过
+`X-Mfpi-Auth-Cookie` 头返回，nginx 用 `auth_request_set $upstream_http_x_mfpi_auth_cookie`
++ `add_header Set-Cookie` 转发给浏览器（见 `nginx.conf` / `nginx-test.conf`）。
+启动日志会打印 `mfpi-admin agent session cookie (mfpi_auth): valid for 12h0m0s`，便于确认。
+
+> 注意：`/_cicd_` 与 `/usermanagement/` 用的是另一套 Basic（管理员口令），不受此 Cookie
+> 影响，仍按浏览器缓存行为。
+
 mfpi-nginx 为多用户 Web UI 提供了两层鉴权：
 
 - **管理页（`/usermanagement/`）**：固定 HTTP Basic Auth。默认账号密码为

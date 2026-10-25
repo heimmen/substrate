@@ -16,6 +16,7 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|5|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_BASE}|2|g" \
       -e "s|\${MFPI_IDLE_TIMEOUT}|90m|g" \
+      -e "s|\${MFPI_AUTH_COOKIE_TTL}|720m|g" \
       -e "s|\${MFPI_IDLE_TIERS}|small,mid|g" \
       -e "s|\${MFPI_DEPLOY_REV}|0|g" \
       "$t" > /tmp/mfpi-render-check.yaml
@@ -153,6 +154,7 @@ admin = get("Deployment", "mfpi-admin")
 admin_pod = admin["spec"]["template"]["spec"]
 admin_env = {e["name"]: e for e in admin_pod["containers"][0]["env"]}
 assert not any(k.startswith("MINIO_") or k.startswith("MFPI_") for k in admin_env), sorted(admin_env)
+assert admin_env["AUTH_COOKIE_TTL"].get("value") == "720m", admin_env.get("AUTH_COOKIE_TTL")
 for k in ("EXPIRY_CONFIGMAP", "TIERS_CONFIGMAP", "DEFAULT_TIER"):
     assert k in admin_env, (k, sorted(admin_env))
 assert admin_env["SKILLS_DIR"].get("value") == "/var/lib/mfpi-skills", admin_env

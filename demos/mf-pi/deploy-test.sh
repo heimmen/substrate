@@ -90,6 +90,9 @@ fi
 # disables the sweep. An *empty* value is normalised to "off" on purpose: the
 # container cannot tell an empty env var from an unset one, so an empty value
 # would silently fall back to the default tiers instead of pausing.
+# How long the agent session cookie keeps a browser signed in (default 12h).
+# 0 disables the cookie; the browser's own Basic-Auth cache then decides again.
+MFPI_AUTH_COOKIE_TTL="${MFPI_AUTH_COOKIE_TTL-720m}"
 MFPI_IDLE_TIMEOUT="${MFPI_IDLE_TIMEOUT-90m}"
 MFPI_IDLE_TIERS="${MFPI_IDLE_TIERS-small,mid}"
 if [ -z "${MFPI_IDLE_TIERS}" ]; then MFPI_IDLE_TIERS=off; fi
@@ -113,6 +116,7 @@ render() {
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
       -e "s|\${MFPI_IDLE_TIMEOUT}|$(esc_repl "${MFPI_IDLE_TIMEOUT}")|g" \
+      -e "s|\${MFPI_AUTH_COOKIE_TTL}|$(esc_repl "${MFPI_AUTH_COOKIE_TTL}")|g" \
       -e "s|\${MFPI_IDLE_TIERS}|$(esc_repl "${MFPI_IDLE_TIERS}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_BASE}|$(esc_repl "${MFPI_WORKER_REPLICAS_BASE:-0}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \

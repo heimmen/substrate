@@ -330,9 +330,12 @@ type server struct {
 	templateName      string
 	client            controlClient
 	passwords         passwordStore
-	keys              keyStore
-	expiries          expiryStore
-	tiers             tierStore
+	// authCookieTTL is how long the "stay signed in" cookie stays valid; see
+	// authcookie.go. Zero disables the cookie (pure Basic on every request).
+	authCookieTTL time.Duration
+	keys          keyStore
+	expiries      expiryStore
+	tiers         tierStore
 	// tierTemplates maps a resource tier name to the ActorTemplate name used to
 	// create a user's actor (derived from templateName at startup). See tier.go.
 	tierTemplates map[string]string
@@ -1510,18 +1513,31 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request) (string, b
 		unauthorized(w, "no password assigned")
 		return "", false
 	}
+	// A valid, unexpired cookie is a credential in its own right: the browser may
+	// have dropped its cached Basic credentials (restart, sleep, network change)
+	// and we do not want to prompt again before MFPI_AUTH_COOKIE_TTL elapses.
+	if valid, _ := s.authCookieState(r, username, hash); valid {
+		s.noteUserInput(username)
+		s.refreshAuthCookie(w, r, username, hash, false)
+		return username, true
+	}
 	user, pass, ok := r.BasicAuth()
 	if !ok || user != username || !checkPassword(hash, pass) {
 		unauthorized(w, "invalid credentials")
 		return "", false
 	}
-	// This is real user input: nginx runs auth_request for every /<username>/
-	// request (including API calls and WebSocket upgrades) before proxying, so
-	// recording here re-arms the idle auto-suspend clock for the actor.
+	s.noteUserInput(username)
+	s.refreshAuthCookie(w, r, username, hash, true)
+	return username, true
+}
+
+// noteUserInput re-arms the idle auto-suspend clock. nginx runs auth_request for
+// every /<username>/ request (including API calls and WebSocket upgrades) before
+// proxying, so a successful authentication is real user activity.
+func (s *server) noteUserInput(username string) {
 	if s.idle != nil {
 		s.idle.touch(username, s.now())
 	}
-	return username, true
 }
 
 // targetUser resolves the user a request is addressed to. For user-scoped
@@ -1739,6 +1755,7 @@ func main() {
 		idleTimeout:       cfg.idleTimeout,
 		idleTiers:         parseIdleTiers(strings.Join(cfg.idleTiers, ",")),
 		idle:              newIdleTracker(),
+		authCookieTTL:     authCookieTTLFromEnv(),
 		now:               time.Now,
 		lastAttempt:       make(map[string]time.Time),
 		resuming:          make(map[string]bool),
@@ -1786,6 +1803,11 @@ func main() {
 	addr := "0.0.0.0:" + envOr("PORT", defaultPort)
 	log.Printf("mfpi-admin serving on %s (atespace=%s template=%s/%s)",
 		addr, cfg.atespace, cfg.templateNamespace, cfg.templateName)
+	if srv.authCookieTTL > 0 {
+		log.Printf("mfpi-admin agent session cookie (%s): valid for %s", authCookieName, srv.authCookieTTL)
+	} else {
+		log.Printf("mfpi-admin agent session cookie: DISABLED (Basic Auth re-prompt on every dropped credential)")
+	}
 	// State the idle policy explicitly: it is easy to believe auto-suspend is
 	// paused when it is not (and vice versa), and the timers are in-memory, so
 	// each restart starts with nobody known to be idle.

@@ -1922,6 +1922,12 @@ spec:
         # Deploy-time knobs: MFPI_IDLE_TIMEOUT (default 90m) and
         # MFPI_IDLE_TIERS (default small,mid; set it to "off" to disable
         # auto-suspend entirely — an empty value means "default", not "off").
+        # Agent session cookie: how long a browser that already authenticated may
+        # keep using /<username>/ without re-entering the password. Basic Auth has
+        # no server-side lifetime, so this cookie is what makes the window
+        # predictable. "0" disables it (pure Basic on every request).
+        - name: AUTH_COOKIE_TTL
+          value: "${MFPI_AUTH_COOKIE_TTL}"
         - name: IDLE_TIMEOUT
           value: "${MFPI_IDLE_TIMEOUT}"
         - name: IDLE_TIERS
