@@ -141,6 +141,95 @@ func TestSkillInstallZip(t *testing.T) {
 	}
 }
 
+// buildZipEntries builds a zip from explicit entry names (no implicit prefix),
+// for archives whose top level mixes the payload with tool-generated junk.
+func buildZipEntries(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestSkillInstallToleratesArchiveJunk covers what macOS "Compress" produces:
+// the payload directory plus __MACOSX/ AppleDouble (._*) files and .DS_Store.
+// Those extra top-level entries used to defeat the single-directory unwrapping,
+// so a perfectly good skill failed with "missing SKILL.md" — the symptom that
+// led people to believe an archive may never contain a top-level folder.
+func TestSkillInstallToleratesArchiveJunk(t *testing.T) {
+	s := newTestStore(t)
+	z := buildZipEntries(t, map[string]string{
+		"my-skill/SKILL.md":            "# skill\n",
+		"my-skill/scripts/run.sh":      "#!/bin/sh\n",
+		"my-skill/.DS_Store":           "junk",
+		"__MACOSX/my-skill/._SKILL.md": "junk",
+		"._my-skill":                   "junk",
+	})
+	if _, err := s.install("junked", bytes.NewReader(z)); err != nil {
+		t.Fatalf("install zip with macOS junk: %v", err)
+	}
+	dir := s.skillDir("junked")
+	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err != nil {
+		t.Fatal("SKILL.md missing after install")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "scripts", "run.sh")); err != nil {
+		t.Fatal("payload file missing after install")
+	}
+	for _, junk := range []string{"__MACOSX", ".DS_Store", "._my-skill"} {
+		if _, err := os.Stat(filepath.Join(dir, junk)); !os.IsNotExist(err) {
+			t.Errorf("archive junk %q must not be extracted into the skill", junk)
+		}
+	}
+}
+
+// TestSkillInstallAcceptsLowercaseSkillMd: SKILL.md is the canonical name, but
+// the archive is unpacked on a case-sensitive file system and users write
+// "skill.md" all the time. Accept it and normalise.
+func TestSkillInstallAcceptsLowercaseSkillMd(t *testing.T) {
+	s := newTestStore(t)
+	z := buildZip(t, map[string]string{"skill.md": "# lower\n"}, "demo")
+	if _, err := s.install("lower", bytes.NewReader(z)); err != nil {
+		t.Fatalf("install lowercase skill.md: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.skillDir("lower"), "SKILL.md")); err != nil {
+		t.Fatal("lowercase skill.md was not normalised to SKILL.md")
+	}
+}
+
+// TestSkillInstallRejectsAmbiguousTopLevel: with two sibling directories there is
+// no way to tell which one is the skill, so it must still fail loudly.
+func TestSkillInstallRejectsAmbiguousTopLevel(t *testing.T) {
+	s := newTestStore(t)
+	z := buildZipEntries(t, map[string]string{
+		"a/SKILL.md":  "# a\n",
+		"b/README.md": "b\n",
+	})
+	if _, err := s.install("ambig", bytes.NewReader(z)); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
+		t.Fatalf("expected missing-SKILL.md error, got %v", err)
+	}
+}
+
+// TestSkillInstallRejectsJunkOnlyArchive: an archive of nothing but tool junk is
+// empty as far as the skill is concerned.
+func TestSkillInstallRejectsJunkOnlyArchive(t *testing.T) {
+	s := newTestStore(t)
+	z := buildZipEntries(t, map[string]string{"__MACOSX/._x": "junk", ".DS_Store": "junk"})
+	if _, err := s.install("empty", bytes.NewReader(z)); err == nil || !strings.Contains(err.Error(), "空") {
+		t.Fatalf("expected empty-archive error, got %v", err)
+	}
+}
+
 func TestSkillInstallRejectsBadInput(t *testing.T) {
 	s := newTestStore(t)
 	cases := []struct {

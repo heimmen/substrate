@@ -454,6 +454,12 @@ session reload（`GET /api/projects` → `GET /api/sessions?cwd=` →
 > skill → actor 10s 拉取安装 → 增量更新 v2 → 卸载 + 用户自建 skill 隔离保护 →
 > 立即应用（扇出 reload）」全流程并逐项断言，无需手动操作。
 
+**打包要求**：包里必须含 `SKILL.md`（文件名大写即可，`skill.md` 也会被接受并自动改名为
+`SKILL.md`）。它可以直接在压缩包根目录，也可以整体套一层目录——那层会被自动剥掉，
+所以「在 Finder 里右键压缩整个 skill 文件夹」是可以的。但**顶层不要并列放多个目录**
+（无法判断哪个才是 skill，会报「缺少 SKILL.md」）。macOS 压缩附带的 `__MACOSX/`、
+`.DS_Store`、`._*` 会被自动忽略，不会影响识别。
+
 **安全与边界**：上传校验——名称必须为 DNS-1123 slug，包内必须含 `SKILL.md`，
 tar/zip 解包拒绝 `../` 与绝对路径条目（zip-slip），单文件大小上限 32 MiB、整包
 64 MiB。管理端 `GET /internal/skills/*` 不做鉴权（actor 侧 env 冻结进 golden 快

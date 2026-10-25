@@ -236,11 +236,27 @@ func (s *skillStore) install(name string, r io.Reader) (skillEntry, error) {
 	if entries, err := os.ReadDir(tmp); err == nil && len(entries) == 1 && entries[0].IsDir() {
 		root = filepath.Join(tmp, entries[0].Name())
 	}
-	if _, err := os.Stat(filepath.Join(root, "SKILL.md")); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return skillEntry{}, fmt.Errorf("skill 包缺少 SKILL.md")
+
+	// The canonical entry point is SKILL.md at the payload root, but people
+	// routinely write it in lower case and the file system is case-sensitive,
+	// so accept any casing and normalise it.
+	skillName := ""
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.EqualFold(e.Name(), "SKILL.md") {
+				skillName = e.Name()
+				break
+			}
 		}
-		return skillEntry{}, err
+	}
+	if skillName == "" {
+		return skillEntry{}, fmt.Errorf(
+			"skill 包缺少 SKILL.md（放在压缩包根目录，或只套一层目录；文件名须为 SKILL.md）")
+	}
+	if skillName != "SKILL.md" {
+		if err := os.Rename(filepath.Join(root, skillName), filepath.Join(root, "SKILL.md")); err != nil {
+			return skillEntry{}, err
+		}
 	}
 
 	// Reject nested managed-skill/state names just in case.
@@ -386,7 +402,11 @@ func (s *skillStore) extractArchive(dest string, r io.Reader) error {
 	if len(payloads) == 0 {
 		return fmt.Errorf("空 skill 包")
 	}
+	extracted := 0
 	for _, p := range payloads {
+		if isArchiveJunk(p.name) {
+			continue
+		}
 		if _, err := validateArchivePath(p.name); err != nil {
 			return err
 		}
@@ -403,8 +423,30 @@ func (s *skillStore) extractArchive(dest string, r io.Reader) error {
 		if err := os.WriteFile(path, p.data, p.mode.Perm()); err != nil {
 			return err
 		}
+		extracted++
+	}
+	if extracted == 0 {
+		return fmt.Errorf("空 skill 包")
 	}
 	return nil
+}
+
+// isArchiveJunk reports entries produced by the archiving tool rather than by
+// the skill's author: macOS "Compress" adds __MACOSX/ with AppleDouble (._*)
+// siblings and Finder drops .DS_Store. They are not part of the payload and,
+// worse, they make the archive look like it has several top-level entries,
+// which defeats the single-directory unwrapping in install() and turns a
+// perfectly good skill into "missing SKILL.md".
+func isArchiveJunk(name string) bool {
+	clean := strings.TrimPrefix(filepath.ToSlash(name), "./")
+	if clean == "__MACOSX" || strings.HasPrefix(clean, "__MACOSX/") {
+		return true
+	}
+	base := clean
+	if i := strings.LastIndex(clean, "/"); i >= 0 {
+		base = clean[i+1:]
+	}
+	return base == ".DS_Store" || strings.HasPrefix(base, "._")
 }
 
 // validateArchivePath rejects entries that escape the extraction root or use

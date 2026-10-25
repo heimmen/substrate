@@ -578,6 +578,11 @@
       <input type="file" id="skill-file-input" accept=".tgz,.tar.gz,.zip" style="flex:1 1 220px;" />
       <button type="submit" id="skill-upload-btn">上传</button>
     </form>
+    <div class="sub" style="color:var(--muted); font-size:12px; margin-top:6px;">
+      打包要求：压缩包内必须有 <code>SKILL.md</code>（大写）。直接放在根目录、或整体套一层目录都可以
+      （那一层会被自动剥掉）；顶层不要并列放多个目录。macOS 压缩自带的
+      <code>__MACOSX/</code>、<code>.DS_Store</code> 会被自动忽略。
+    </div>
 
     <div id="skill-empty" style="display:none; color:var(--muted); text-align:center; padding:20px 0;">
       尚未托管任何 skill
