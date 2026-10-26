@@ -834,6 +834,20 @@ http://<host>:58681/_cicd_        # 生产网关（测试环境为 :59681）
 页面只有一个 **Deploy latest code** 按钮，点击后在**部署机（宿主机）**执行
 `demos/mf-pi/deploy.sh`，脚本输出实时回显在页面下方（轮询 `/state`，每 800ms）。
 
+一次点击做的事，按顺序：
+
+1. **更新 substrate 仓库本身**（`git fetch` + `merge --ff-only`）：`deploy.sh`、admin 源码、
+   nginx 配置、模板都在这个仓库里，不先更新就等于跑旧脚本、部署旧代码。
+   非 fast-forward / 脏工作区**只警告不中止**（演示机上的本地改动不该挡住部署），
+   `CICD_SKIP_REPO_PULL=1` 可完全跳过；
+2. 执行 `./deploy.sh`，由它自己再更新 **workload 仓库**（`miaofang-agent`）并构建镜像
+   （见 [部署](#2-部署) 里的 `pull_workload_source`）；
+3. 应用清单、滚动 admin、刷新 actor 与 nginx 网关。
+
+> 完整一次约 17–25 分钟（含 workload 镜像全量重建）。只是改了 admin/模板时，用
+> `MFPI_SKIP_WORKLOAD_BUILD=1 ./cicd-server.sh start` 启动 runner 可省掉大头——
+> 注意"跳过构建"**不再**影响两个仓库的拉取。
+
 **为什么跑在宿主机**：`deploy.sh` 需要仓库、`ko`、`docker` 和 `kubectl`（还要重建
 `mfpi-nginx` 镜像），这些只有宿主机有；admin 跑在 pod 里做不了。所以页面由宿主机
 进程 `cicd_server.py` 提供，nginx 用 `/_cicd_` 反代到 `127.0.0.1:58690` 并复用

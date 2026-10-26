@@ -63,12 +63,58 @@ def snapshot(since):
         }
 
 
+# REPO_DIR is the substrate checkout that contains this demo (demos/mf-pi -> ../..).
+REPO_DIR = os.path.dirname(os.path.dirname(DEMO_DIR))
+
+
+def pull_repo():
+    """Update the substrate checkout (admin/nginx/templates/deploy.sh) before deploy.
+
+    deploy.sh only pulls the *workload* checkout (miaofang-agent); the script it
+    runs, the admin sources and the manifests all come from this repository. Without
+    this step "Deploy latest code" would run whatever happens to be on disk, which
+    is the same trap the workload pull had. Best-effort on purpose: a diverged or
+    dirty demo checkout must not block an operator's deploy, so we log and continue.
+    Opt out with CICD_SKIP_REPO_PULL=1.
+    """
+    if os.environ.get("CICD_SKIP_REPO_PULL") == "1":
+        publish("[cicd] CICD_SKIP_REPO_PULL=1: not updating %s" % REPO_DIR)
+        return
+    def git(*args):
+        return subprocess.run(["git", "-C", REPO_DIR] + list(args),
+                              capture_output=True, text=True)
+    inside = git("rev-parse", "--is-inside-work-tree")
+    if inside.returncode != 0:
+        publish("[cicd] %s is not a git checkout; using it as-is" % REPO_DIR)
+        return
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "HEAD"
+    remote = os.environ.get("CICD_REPO_REMOTE", "origin")
+    publish("[cicd] updating %s (%s) from %s ..." % (REPO_DIR, branch, remote))
+    fetch = git("fetch", "--prune", remote)
+    if fetch.returncode != 0:
+        publish("[cicd] WARNING: git fetch failed; deploying the checkout as-is:")
+        for line in (fetch.stderr or fetch.stdout).strip().splitlines():
+            publish("[cicd]   " + line)
+        return
+    merge = git("merge", "--ff-only", "%s/%s" % (remote, branch))
+    if merge.returncode != 0:
+        publish("[cicd] WARNING: %s cannot fast-forward to %s/%s; deploying as-is:"
+                % (branch, remote, branch))
+        for line in (merge.stderr or merge.stdout).strip().splitlines():
+            publish("[cicd]   " + line)
+        return
+    head = git("rev-parse", "--short", "HEAD").stdout.strip()
+    subject = git("log", "-1", "--format=%s").stdout.strip()
+    publish("[cicd]   %s now at %s %s" % (REPO_DIR, head, subject))
+
+
 def run_deploy():
     started = STATE["started"]
     publish("$ " + SCRIPT + "   (cwd=%s)" % DEMO_DIR)
     publish("started at " + time.strftime("%Y-%m-%d %H:%M:%S"))
     rc = None
     try:
+        pull_repo()
         env = os.environ.copy()
         env.setdefault("TERM", "dumb")
         proc = subprocess.Popen(
