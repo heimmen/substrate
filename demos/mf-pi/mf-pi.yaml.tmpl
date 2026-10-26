@@ -495,6 +495,16 @@ spec:
       ) &
 
       sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
+      # The userdata volume survives suspend/resume, so the previous instance's
+      # sessiond ownership marker can look valid inside the new sandbox (gVisor
+      # reuses low PIDs). pi-web then refuses to start with
+      #   SessiondStateOwnershipConflictError: another pi-web session daemon
+      #   already owns this state
+      # and the socket never appears, leaving a RUNNING actor that answers 503.
+      # At container boot nothing else can own this state, so drop the stale
+      # marker and socket before starting.
+      rm -f "${PI_WEB_DATA_DIR:-/data}/sessiond-owner.json" 2>/dev/null || true
+      rm -f "$sock" 2>/dev/null || true
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
@@ -928,6 +938,16 @@ spec:
       ) &
 
       sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
+      # The userdata volume survives suspend/resume, so the previous instance's
+      # sessiond ownership marker can look valid inside the new sandbox (gVisor
+      # reuses low PIDs). pi-web then refuses to start with
+      #   SessiondStateOwnershipConflictError: another pi-web session daemon
+      #   already owns this state
+      # and the socket never appears, leaving a RUNNING actor that answers 503.
+      # At container boot nothing else can own this state, so drop the stale
+      # marker and socket before starting.
+      rm -f "${PI_WEB_DATA_DIR:-/data}/sessiond-owner.json" 2>/dev/null || true
+      rm -f "$sock" 2>/dev/null || true
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
@@ -1362,6 +1382,16 @@ spec:
       ) &
 
       sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
+      # The userdata volume survives suspend/resume, so the previous instance's
+      # sessiond ownership marker can look valid inside the new sandbox (gVisor
+      # reuses low PIDs). pi-web then refuses to start with
+      #   SessiondStateOwnershipConflictError: another pi-web session daemon
+      #   already owns this state
+      # and the socket never appears, leaving a RUNNING actor that answers 503.
+      # At container boot nothing else can own this state, so drop the stale
+      # marker and socket before starting.
+      rm -f "${PI_WEB_DATA_DIR:-/data}/sessiond-owner.json" 2>/dev/null || true
+      rm -f "$sock" 2>/dev/null || true
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
@@ -1796,6 +1826,16 @@ spec:
       ) &
 
       sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
+      # The userdata volume survives suspend/resume, so the previous instance's
+      # sessiond ownership marker can look valid inside the new sandbox (gVisor
+      # reuses low PIDs). pi-web then refuses to start with
+      #   SessiondStateOwnershipConflictError: another pi-web session daemon
+      #   already owns this state
+      # and the socket never appears, leaving a RUNNING actor that answers 503.
+      # At container boot nothing else can own this state, so drop the stale
+      # marker and socket before starting.
+      rm -f "${PI_WEB_DATA_DIR:-/data}/sessiond-owner.json" 2>/dev/null || true
+      rm -f "$sock" 2>/dev/null || true
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
