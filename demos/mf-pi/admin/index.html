@@ -127,6 +127,11 @@
   th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
   td.actions { white-space: nowrap; }
+  /* IP 单元格下的补充信息（模板 / ATEOM Pod）：极小字号，弱化为主值的附注 */
+  td .cell-note {
+    font-size: 10px; line-height: 1.35; color: var(--muted);
+    margin-top: 2px; overflow-wrap: anywhere; font-weight: 400;
+  }
   /* 表格里的用户名：默认用正文色，hover 才亮品牌红——红只留给"动作/错误" */
   td a, td a:visited { color: var(--text); text-decoration: none; font-weight: 500; }
   td a:hover { color: var(--accent); text-decoration: underline; }
@@ -533,7 +538,7 @@
   <div class="brand">
     <div>
       <h1>系统设置</h1>
-      <div class="sub" id="atespace-info">正在加载 atespace 信息…</div>
+      <div class="sub" id="atespace-info">每 5 秒自动刷新</div>
     </div>
   </div>
   <div class="toolbar" style="margin-bottom: 0">
@@ -606,8 +611,6 @@
           <th>名称</th>
           <th>状态</th>
           <th>API Key</th>
-          <th>模板</th>
-          <th>ATEOM Pod</th>
           <th>IP</th>
           <th>版本</th>
           <th>年龄</th>
@@ -819,9 +822,12 @@
         '<td class="mono"><a href="' + esc(agentUrl) + '" target="_blank" rel="noopener" title="打开 agent 页面">' + esc(u.name) + "</a></td>" +
         '<td><span class="badge ' + badgeClass(u.status) + '">' + esc(statusLabel(u.status)) + "</span></td>" +
         '<td>' + keyBadge + "</td>" +
-        '<td class="mono">' + esc(u.template) + "</td>" +
-        '<td class="mono">' + esc(u.ateomPod) + "</td>" +
-        '<td class="mono">' + esc(u.ip) + "</td>" +
+        // 模板与 ATEOM Pod 不再单独占列：作为极小字号的补充信息排在 IP 下面。
+        '<td class="mono">' +
+        (u.ip ? esc(u.ip) : '<span class="muted">—</span>') +
+        (u.template ? '<div class="cell-note" title="模板">' + esc(u.template) + "</div>" : "") +
+        (u.ateomPod ? '<div class="cell-note" title="ATEOM Pod">' + esc(u.ateomPod) + "</div>" : "") +
+        "</td>" +
         "<td>" + esc(u.version) + "</td>" +
         "<td>" + esc(u.age) + "</td>" +
         "<td>" + expiryCell + "</td>" +
@@ -889,8 +895,8 @@
       })
       .then(function (data) {
         atespace = data.atespace;
-        document.getElementById("atespace-info").textContent =
-          "atespace: " + esc(data.atespace) + " · 每 5 秒自动刷新";
+        // 副标题只保留刷新节奏：这个页面已经是与具体 atespace 无关的「系统设置」。
+        document.getElementById("atespace-info").textContent = "每 5 秒自动刷新";
         renderUsers(data.users);
       })
       .catch(function (err) {
