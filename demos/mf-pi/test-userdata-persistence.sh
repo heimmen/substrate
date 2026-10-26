@@ -5,7 +5,7 @@
 # What it verifies
 # ----------------
 # The mf-pi test ActorTemplate mounts a sticky userdata ExternalVolumeTemplate
-# at /data/pi-agent and (since the PI_WEB_DATA_DIR=/data/pi-agent fix) pi-web
+# at /data and (since the PI_WEB_DATA_DIR=/data fix) pi-web
 # stores its real data there. The template also redirects HOME and
 # XDG_CONFIG_HOME onto that volume, so user-scope Pi packages/skills under
 # $HOME/.pi/packages are durable too. The sticky volume plugin keeps the
@@ -18,22 +18,22 @@
 # covered by test-image-update-persistence.sh.
 #
 # The test asserts BOTH axes of recovery after a refresh:
-#   * Data recovery: a sentinel written to /data/pi-agent (via the pi-web
+#   * Data recovery: a sentinel written to /data (via the pi-web
 #     workspace file API, which resolves to a path on the PV) is still readable
 #     after suspend + delete + recreate + resume.
 #   * The /data directory itself: a best-effort in-actor probe (runsc exec on
 #     the kind node) checks that the live, refreshed actor still mounts
-#     /data/pi-agent and that the recovered sentinel is present there. This
+#     /data and that the recovered sentinel is present there. This
 #     guards the regression "after a refresh there is no /data dir in the
-#     actor": the persisted store is the PV mounted at /data/pi-agent, so the
+#     actor": the persisted store is the PV mounted at /data, so the
 #     directory must survive. (For manual inspection see exec-actor.sh, which
-#     drops a shell on the node at the actor's persisted /data/pi-agent.)
+#     drops a shell on the node at the actor's persisted /data.)
 #
 # This script:
 #   1. creates a test user (which creates + resumes the actor and returns a
 #      one-time access password),
 #   2. writes a sentinel file into the actor's PV via the pi-web workspace
-#      file API (the workspace path is an absolute path under /data/pi-agent,
+#      file API (the workspace path is an absolute path under /data,
 #      so it lands on the PV),
 #   3. REFRESHES the actor: kubectl ate suspend actor + delete actor +
 #      create actor (the password and PV are preserved),
@@ -82,7 +82,7 @@ else
   KUBECTL_ATE_CMD=(kubectl ate)
 fi
 TEST_USER="${TEST_USER:-persist-test-$(date +%s | tail -c 6)}"
-PROJ_PATH="/data/pi-agent/persist-test"
+PROJ_PATH="/data/persist-test"
 MARKER="persistence-marker.txt"
 SENTINEL="mf-pi-pv-persistence-check-$(date +%s)-$$"
 
@@ -246,7 +246,7 @@ wait_for_suspended() {
 # gVisor sandbox on a distroless worker pod, so there is no ssh/kubectl exec
 # into it. But runsc (the gVisor runtime) is present on the kind node and can
 # `exec` directly into the running "pi-web" container. We use that to confirm
-# the refreshed actor still mounts /data/pi-agent (the sticky PV) and that the
+# the refreshed actor still mounts /data (the sticky PV) and that the
 # recovered sentinel is present there — directly guarding the "no /data dir
 # after refresh" regression. Skips (no-op) when docker / the kind node / runsc
 # are not reachable (e.g. CI without the local kind cluster). A transient or
@@ -283,9 +283,11 @@ verify_in_actor_data_dir() {
   local entries
   entries="$(printf '%s\n' "$data_ls" | grep -vE '^(waiting on|$)' || true)"
   if printf '%s\n' "$entries" | grep -qx 'pi-agent'; then
-    ok "live actor exposes /data/pi-agent after refresh (PV mounted)"
+    bad "live actor /data contains a nested pi-agent/ — mount is still /data/pi-agent?"
+  elif printf '%s\n' "$entries" | grep -qx 'home'; then
+    ok "live actor /data IS the PV root after refresh (home/ present, no nested pi-agent/)"
   elif [[ -n "$entries" ]]; then
-    bad "live actor /data lacks pi-agent after refresh (ls /data: ${entries})"
+    bad "live actor /data does not look like the PV root (ls /data: ${entries})"
   else
     log "WARN in-actor /data check skipped: runsc exec inconclusive (output: ${data_ls:-<none>})"
   fi
@@ -293,25 +295,25 @@ verify_in_actor_data_dir() {
   local marker
   marker="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec mf-agent cat "${PROJ_PATH}/${MARKER}" 2>&1 || true)"
   if printf '%s\n' "$marker" | grep -qF "${SENTINEL}"; then
-    ok "live actor /data/pi-agent contains the recovered sentinel after refresh"
+    ok "live actor /data contains the recovered sentinel after refresh"
   else
     log "WARN in-actor sentinel not readable via runsc (got: ${marker:-<none>}) — relying on API-level recovery check"
   fi
 
   # $HOME must be on the PV: pi-web installs user-scope packages/skills under
   # $HOME/.pi/packages, so a rootfs HOME would silently lose them on any image
-  # update. This guards the HOME=/data/pi-agent/home redirect. Read the env of
+  # update. This guards the HOME=/data/home redirect. Read the env of
   # the sandbox's PID 1 (/proc/1/environ) so we assert the container's own
   # environment, not whatever `runsc exec` happens to pass down.
   local home_out home_entries
-  home_out="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec mf-agent sh -c 'tr "\0" "\n" < /proc/1/environ 2>/dev/null | grep "^HOME="; ls -d /data/pi-agent/home 2>/dev/null' 2>&1 || true)"
+  home_out="$(timeout "${REXEC_TIMEOUT}" docker exec "$NODE" "$runsc" --root "$state" exec mf-agent sh -c 'tr "\0" "\n" < /proc/1/environ 2>/dev/null | grep "^HOME="; ls -d /data/home 2>/dev/null' 2>&1 || true)"
   home_entries="$(printf '%s\n' "$home_out" | grep -vE '^(waiting on|$)' || true)"
-  if printf '%s\n' "$home_entries" | grep -qx 'HOME=/data/pi-agent/home'; then
-    ok "live actor HOME is on the PV (/data/pi-agent/home)"
+  if printf '%s\n' "$home_entries" | grep -qx 'HOME=/data/home'; then
+    ok "live actor HOME is on the PV (/data/home)"
   elif printf '%s\n' "$home_entries" | grep -q '^HOME='; then
-    bad "live actor HOME is not /data/pi-agent/home (got: $(printf '%s' "$home_entries" | grep '^HOME='))"
+    bad "live actor HOME is not /data/home (got: $(printf '%s' "$home_entries" | grep '^HOME='))"
   elif [[ -n "$home_entries" ]]; then
-    log "WARN in-actor HOME env not readable via /proc/1/environ; /data/pi-agent/home exists (output: ${home_entries})"
+    log "WARN in-actor HOME env not readable via /proc/1/environ; /data/home exists (output: ${home_entries})"
   else
     log "WARN in-actor HOME check skipped: runsc exec inconclusive (output: ${home_out:-<none>})"
   fi
@@ -425,7 +427,7 @@ else
   bad "sentinel LOST after refresh (got: ${READ_AFTER})"
 fi
 
-# Best-effort: confirm the live, refreshed actor still mounts /data/pi-agent and
+# Best-effort: confirm the live, refreshed actor still mounts /data and
 # holds the recovered sentinel there (guards the "no /data dir after refresh"
 # regression). Skips gracefully when a kind node / runsc is not reachable. The
 # `|| true` keeps this supplementary probe from ever affecting the suite exit

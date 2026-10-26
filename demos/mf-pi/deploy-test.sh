@@ -222,7 +222,7 @@ resolve_images() {
 # check_cluster_nodes refuses to deploy onto a multi-node cluster by default.
 # mf-pi user data lives on node-local sticky volumes
 # (/var/lib/ateom-gvisor/stickyvolumes, no CSI/PV, no volume affinity), so an
-# actor resumed on another node silently gets an empty /data/pi-agent (and its
+# actor resumed on another node silently gets an empty /data (and its
 # snapshot restore fails). See docs/persistence_gaps.md.
 check_cluster_nodes() {
   if [[ "${MFPI_ALLOW_MULTI_NODE:-0}" == "1" ]]; then
@@ -233,7 +233,7 @@ check_cluster_nodes() {
   if [[ -n "${count}" && "${count}" -gt 1 ]]; then
     echo "ERROR: this cluster has ${count} nodes, but mf-pi user data lives on" >&2
     echo "  node-local sticky volumes (no CSI, no volume affinity). An actor" >&2
-    echo "  resumed on another node loses its /data/pi-agent contents." >&2
+    echo "  resumed on another node loses its /data contents." >&2
     echo "  See docs/persistence_gaps.md. Refusing to deploy." >&2
     echo "  Set MFPI_ALLOW_MULTI_NODE=1 to override (accepting the risk)." >&2
     return 1

@@ -30,7 +30,7 @@
 （revision-checked reload，无需重启），且**已存储的凭据优先于** `DEEPSEEK_API_KEY`
 env：
 
-- 文件：`<agentDir>/auth.json` = `/data/pi-agent/auth.json`（agentDir =
+- 文件：`<agentDir>/auth.json` = `/data/auth.json`（agentDir =
   `PI_CODING_AGENT_DIR`，由 sessiond 导出）。
 - 内容形状：`{ "deepseek": { "type": "api_key", "key": "sk-..." } }`。
 - 可通过 HTTP（pi-web 自带的 api-key 登录流程）写入；真正调 DeepSeek 的是

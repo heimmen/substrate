@@ -7,16 +7,16 @@
 # A plain suspend/resume keeps the sandbox rootfs, so rootfs-only data looks
 # persistent; an image update cannot reuse that snapshot (image digest and
 # ActorTemplate spec changed) and the only durable surface is the sticky
-# `userdata` volume at /data/pi-agent. On top of that, the platform's golden
+# `userdata` volume at /data. On top of that, the platform's golden
 # base snapshot is not restorable against a per-user external volume, so the
 # demo must clear it (see docs/persistence_gaps.md and ensure-no-golden.sh).
 #
 # This script exercises that whole path:
 #   1. creates a test user, opens three pi-web projects that live on the PV:
-#        /data/pi-agent/skills/<skill>          (user-installed skill)
-#        /data/pi-agent/home/.pi/packages/<pkg> (user-installed Pi package,
+#        /data/skills/<skill>          (user-installed skill)
+#        /data/home/.pi/packages/<pkg> (user-installed Pi package,
 #                                                i.e. $HOME/.pi/packages)
-#        /data/pi-agent/projects/<proj>         (uploaded project file)
+#        /data/projects/<proj>         (uploaded project file)
 #      and writes a sentinel into each,
 #   2. runs a REAL redeploy that changes the ActorTemplate spec
 #        MFPI_DEPLOY_REV=$(date +%s) ./deploy-test.sh
@@ -86,9 +86,9 @@ STAMP="$(date +%s)"
 TEST_USER="${TEST_USER:-imgupd-test-$((STAMP % 100000))}"
 NEW_USER="${NEW_USER:-imgupd-new-$((STAMP % 100000))}"
 
-SKILL_PATH="/data/pi-agent/skills/imgupd-skill"
-PKG_PATH="/data/pi-agent/home/.pi/packages/imgupd-pkg"
-PROJ_PATH="/data/pi-agent/projects/imgupd-proj"
+SKILL_PATH="/data/skills/imgupd-skill"
+PKG_PATH="/data/home/.pi/packages/imgupd-pkg"
+PROJ_PATH="/data/projects/imgupd-proj"
 SENTINEL="mf-pi-imgupd-$(date +%s)-$$"
 
 COOKIE_JAR="$(mktemp)"
@@ -332,7 +332,7 @@ if ! PROJ_PID="$(project_write "${PROJ_PATH}" "note.txt" "${SENTINEL}-proj")"; t
   bad "could not write the project sentinel under ${PROJ_PATH}"
   exit 1
 fi
-ok "sentinels written under /data/pi-agent (skill=${SKILL_PID}, pkg=${PKG_PID}, project=${PROJ_PID})"
+ok "sentinels written under /data (skill=${SKILL_PID}, pkg=${PKG_PID}, project=${PROJ_PID})"
 
 # --- 2. image update: real redeploy with a changed ActorTemplate spec ----
 log "forcing an image-update redeploy: MFPI_DEPLOY_REV=${STAMP} ${DEPLOY_SCRIPT}"

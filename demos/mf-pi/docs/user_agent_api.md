@@ -1299,14 +1299,14 @@ Fastify 自身的请求解析错误（非法 JSON、超过 body 上限）不受�
   {
     "id": "0f2ab9c1",
     "cwd": "/data/work/demo",
-    "path": "/data/pi-agent/sessions/20251010T101500-0f2ab9c1.jsonl",
+    "path": "/data/sessions/20251010T101500-0f2ab9c1.jsonl",
     "persisted": true,
     "name": "Fix the build",
     "created": "2025-10-10T10:15:00.000Z",
     "modified": "2025-10-10T10:42:11.000Z",
     "messageCount": 12,
     "firstMessage": "Fix the build",
-    "parentSessionPath": "/data/pi-agent/sessions/20251009T090000-parent.jsonl",
+    "parentSessionPath": "/data/sessions/20251009T090000-parent.jsonl",
     "archived": false,
     "archivedAt": "2025-10-10T10:50:00.000Z"
   }
@@ -1342,7 +1342,7 @@ curl -u alice:secret 'http://localhost:58681/alice/api/sessions?cwd=%2Fdata%2Fwo
 {
   "id": "1c7d2e44",
   "cwd": "/data/work/demo",
-  "path": "/data/pi-agent/sessions/20251010T110000-1c7d2e44.jsonl",
+  "path": "/data/sessions/20251010T110000-1c7d2e44.jsonl",
   "persisted": true,
   "created": "2025-10-10T11:00:00.000Z",
   "modified": "2025-10-10T11:00:00.000Z",
@@ -1636,7 +1636,7 @@ curl -u alice:secret "$BASE/api/sessions/0f2ab9c1/stream-snapshot?cwd=%2Fdata%2F
   "cost": 0.0123,
   "contextUsage": { "tokens": 12800, "contextWindow": 65536, "percent": 19.53 },
   "warnings": [
-    { "severity": "warning", "message": "Skill X failed to load", "source": "skill", "path": "/data/pi-agent/skills/x/SKILL.md" }
+    { "severity": "warning", "message": "Skill X failed to load", "source": "skill", "path": "/data/skills/x/SKILL.md" }
   ],
   "pendingAsk": {
     "askId": "ask-1",
@@ -2074,7 +2074,7 @@ curl -u alice:secret -X POST -H 'content-type: application/json' \
 
 ```bash
 curl -u alice:secret -X POST -H 'content-type: application/json' \
-  -d '{"cwd":"/data/work/demo","dismissId":"skill:/data/pi-agent/skills/x/SKILL.md"}' \
+  -d '{"cwd":"/data/work/demo","dismissId":"skill:/data/skills/x/SKILL.md"}' \
   "$BASE/api/sessions/0f2ab9c1/warnings/dismiss"
 ```
 
@@ -2150,7 +2150,7 @@ interface SessionTreeForkRequest {
 ```json
 {
   "cancelled": false,
-  "session": { "id": "77aa10bb", "cwd": "/data/work/demo", "path": "/data/pi-agent/sessions/20251010T113000-77aa10bb.jsonl", "created": "2025-10-10T11:30:00.000Z", "modified": "2025-10-10T11:30:00.000Z", "messageCount": 4, "firstMessage": "Fix the build" },
+  "session": { "id": "77aa10bb", "cwd": "/data/work/demo", "path": "/data/sessions/20251010T113000-77aa10bb.jsonl", "created": "2025-10-10T11:30:00.000Z", "modified": "2025-10-10T11:30:00.000Z", "messageCount": 4, "firstMessage": "Fix the build" },
   "promptDraft": "Fix the build"
 }
 ```
@@ -2334,7 +2334,7 @@ curl -u alice:secret -X POST -H 'content-type: application/json' \
   "piVersion": "0.84.0",
   "available": true,
   "capabilities": [],
-  "activeAgentProfile": { "schemaVersion": 2, "dir": "/data/pi-agent" },
+  "activeAgentProfile": { "schemaVersion": 2, "dir": "/data" },
   "deprecatedAgentInputs": []
 }
 ```
@@ -4811,7 +4811,7 @@ websocat -H="Authorization: Basic $(printf 'alice:%s' "$USER_PASSWORD" | base64)
 | **atespace** | Actor 的逻辑分组/命名空间。生产 `mfpi`，测试 `mfpi-test`；同时也决定 Agent 面的 Host 后缀（`<user>.<atespace>.actors.resources.substrate.ate.dev`） |
 | **WorkerPool** | 物理 worker（Kubernetes Pod）池，`replicas` 即**同时活跃（RUNNING）用户的上限**；池满时 resume 返回 503 `no free workers` |
 | **Actor 状态** | `STATUS_SUSPENDED`（不占 worker）⇄ `STATUS_RUNNING`（占 worker）；过渡态 `SUSPENDING`/`RESUMING`/`PAUSING`；异常 `PAUSED`/`CRASHED` |
-| **sticky 持久卷（userdata）** | 挂在 Actor 上的 5Gi 卷，映射到节点目录 `<atespace>-<actor>-userdata`，挂载进沙箱 `/data/pi-agent`；`suspend/resume` 与「删+建」刷新后数据都在 |
+| **sticky 持久卷（userdata）** | 挂在 Actor 上的 5Gi 卷，映射到节点目录 `<atespace>-<actor>-userdata`，挂载进沙箱 `/data`；`suspend/resume` 与「删+建」刷新后数据都在 |
 | **golden base 快照** | 模板首次部署时生成的基准快照，用于冷启动恢复 |
 | **就绪门（gate）** | nginx 的 `auth_request /_mfpi_gate`：鉴权 + 判断 Actor 是否 `RUNNING`，未就绪时返回 403 并后台触发 resume |
 | **加载页（loading page）** | Actor 未就绪时给浏览器（`Accept: text/html`）的 HTML 过渡页；API 客户端收到原始 503 |

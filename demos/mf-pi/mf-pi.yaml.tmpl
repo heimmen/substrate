@@ -7,7 +7,7 @@
 # The pi-web image's ENTRYPOINT is "tini -- /usr/local/bin/pi-web-bootstrap"
 # and its CMD is "pi-web-server" (web only). The demo keeps the ENTRYPOINT by
 # setting only `args`: the bootstrap materializes the baked-in skills into
-# /data/pi-agent/skills and then execs the supervisor below, which starts
+# /data/skills and then execs the supervisor below, which starts
 # pi-web-sessiond, waits for its unix socket, and runs pi-web-server on
 # port 80 (see docker/scripts/run-container.sh in the pi-web repo for the
 # same single-container supervisor shape).
@@ -170,7 +170,7 @@ spec:
     image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
-    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # installs the baked-in skills into /data/skills on first start
     # and then execs this single-container supervisor (sessiond + web).
     args:
     - sh
@@ -178,20 +178,17 @@ spec:
     - |
       set -eu
       # Put the user's home (and XDG config) on the userdata volume, which is
-      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # mounted at /data. pi-web installs user-scope Pi packages and
       # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
-      # without this redirection a user-installed skill lives on the ephemeral
-      # sandbox rootfs and disappears on every image update (delete +
-      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
-      # used only as a non-destructive seed source, so any build-time dotfiles
-      # there are preserved.
+      # HOME / XDG_CONFIG_HOME / PI_CODING_AGENT_DIR all point at the userdata
+      # volume (mounted at /data), so a user-installed skill and anything else
+      # under $HOME survives an image update; see docs/persistence_gaps.md.
+      # The volume now *is* /data, so the image's baked-in /data/home seed is
+      # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
-      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
-        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
-      fi
 
       # Single-container supervisor (sessiond + web). User data lives on
-      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # the userdata volume mounted at /data (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
@@ -206,7 +203,7 @@ spec:
       (
         while true; do
           skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
-          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          skills_dst=${PI_CODING_AGENT_DIR:-/data}/skills
           if [ -d "$skills_src" ]; then
             mkdir -p "$skills_dst"
             for skill_dir in "$skills_src"/*/; do
@@ -237,7 +234,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const url = process.env.PI_WEB_MODELS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "models.json");
               if (!url) process.exit(0);
               fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
@@ -286,7 +283,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const base = process.env.PI_WEB_SKILLS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "skills");
               const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
               const log = (...a) => console.log("mfpi-skills:", ...a);
@@ -397,7 +394,7 @@ spec:
 
       # Recover project working directories. projects.json is persisted on the
       # PV, but a project's working directory itself may live outside
-      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # /data (e.g. /dtom2) and is therefore ephemeral: the pi agent
       # refuses to open a session whose stored cwd no longer exists. The actor
       # sandbox is normally restored from a snapshot (golden base or suspend
       # checkpoint), so a one-shot boot-time fix would never re-run; instead
@@ -408,15 +405,15 @@ spec:
           # Durable default location for project workspaces: users who create
           # projects there (or under $HOME, now on the volume) keep their files
           # across an image update.
-          mkdir -p /data/pi-agent/projects
+          mkdir -p /data/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
               const durableRoots = [
-                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
-                process.env.HOME || "/data/pi-agent/home",
+                process.env.PI_CODING_AGENT_DIR || "/data",
+                process.env.HOME || "/data/home",
               ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
@@ -439,7 +436,7 @@ spec:
         done
       ) &
 
-      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
@@ -465,7 +462,7 @@ spec:
 
     volumeMounts:
     - name: userdata
-      mountPath: /data/pi-agent
+      mountPath: /data
     env:
     # atenet-router forwards traffic to the actor on port 80.
     - name: PI_WEB_PORT
@@ -477,22 +474,26 @@ spec:
     - name: HOSTEXEC_MODE
       value: disabled
     # Persist pi-web's data directory AND sessiond socket on the userdata PV
-    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # (mounted at /data): a delete+recreate redeploy (image refresh)
     # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
     # supervisor waits on (see the args block's `sock=` default).
     - name: PI_WEB_DATA_DIR
-      value: /data/pi-agent
+      value: /data
     - name: PI_WEB_SESSIOND_SOCKET
-      value: /data/pi-agent/sessiond.sock
+      value: /data/sessiond.sock
     # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
     # userdata PV so that everything pi-web installs into the user's home —
     # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
     # (POST /api/pi-packages/install) — survives an actor image update
-    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    # (delete + recreate). Anything outside /data is ephemeral.
     - name: HOME
-      value: /data/pi-agent/home
+      value: /data/home
     - name: XDG_CONFIG_HOME
-      value: /data/pi-agent/config
+      value: /data/config
+    # The image's default is /data/pi-agent; with the volume mounted at /data
+    # that would create a nested /data/pi-agent inside the volume, so pin it.
+    - name: PI_CODING_AGENT_DIR
+      value: /data
     # Deploy revision stamp (harmless to the app). deploy.sh renders it from
     # MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh bumps it
     # to force a real ActorTemplate spec change, exercising the
@@ -544,7 +545,7 @@ spec:
     image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
-    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # installs the baked-in skills into /data/skills on first start
     # and then execs this single-container supervisor (sessiond + web).
     args:
     - sh
@@ -552,20 +553,17 @@ spec:
     - |
       set -eu
       # Put the user's home (and XDG config) on the userdata volume, which is
-      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # mounted at /data. pi-web installs user-scope Pi packages and
       # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
-      # without this redirection a user-installed skill lives on the ephemeral
-      # sandbox rootfs and disappears on every image update (delete +
-      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
-      # used only as a non-destructive seed source, so any build-time dotfiles
-      # there are preserved.
+      # HOME / XDG_CONFIG_HOME / PI_CODING_AGENT_DIR all point at the userdata
+      # volume (mounted at /data), so a user-installed skill and anything else
+      # under $HOME survives an image update; see docs/persistence_gaps.md.
+      # The volume now *is* /data, so the image's baked-in /data/home seed is
+      # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
-      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
-        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
-      fi
 
       # Single-container supervisor (sessiond + web). User data lives on
-      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # the userdata volume mounted at /data (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
@@ -580,7 +578,7 @@ spec:
       (
         while true; do
           skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
-          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          skills_dst=${PI_CODING_AGENT_DIR:-/data}/skills
           if [ -d "$skills_src" ]; then
             mkdir -p "$skills_dst"
             for skill_dir in "$skills_src"/*/; do
@@ -611,7 +609,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const url = process.env.PI_WEB_MODELS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "models.json");
               if (!url) process.exit(0);
               fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
@@ -660,7 +658,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const base = process.env.PI_WEB_SKILLS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "skills");
               const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
               const log = (...a) => console.log("mfpi-skills:", ...a);
@@ -771,7 +769,7 @@ spec:
 
       # Recover project working directories. projects.json is persisted on the
       # PV, but a project's working directory itself may live outside
-      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # /data (e.g. /dtom2) and is therefore ephemeral: the pi agent
       # refuses to open a session whose stored cwd no longer exists. The actor
       # sandbox is normally restored from a snapshot (golden base or suspend
       # checkpoint), so a one-shot boot-time fix would never re-run; instead
@@ -782,15 +780,15 @@ spec:
           # Durable default location for project workspaces: users who create
           # projects there (or under $HOME, now on the volume) keep their files
           # across an image update.
-          mkdir -p /data/pi-agent/projects
+          mkdir -p /data/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
               const durableRoots = [
-                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
-                process.env.HOME || "/data/pi-agent/home",
+                process.env.PI_CODING_AGENT_DIR || "/data",
+                process.env.HOME || "/data/home",
               ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
@@ -813,7 +811,7 @@ spec:
         done
       ) &
 
-      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
@@ -839,7 +837,7 @@ spec:
 
     volumeMounts:
     - name: userdata
-      mountPath: /data/pi-agent
+      mountPath: /data
     env:
     # atenet-router forwards traffic to the actor on port 80.
     - name: PI_WEB_PORT
@@ -851,22 +849,26 @@ spec:
     - name: HOSTEXEC_MODE
       value: disabled
     # Persist pi-web's data directory AND sessiond socket on the userdata PV
-    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # (mounted at /data): a delete+recreate redeploy (image refresh)
     # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
     # supervisor waits on (see the args block's `sock=` default).
     - name: PI_WEB_DATA_DIR
-      value: /data/pi-agent
+      value: /data
     - name: PI_WEB_SESSIOND_SOCKET
-      value: /data/pi-agent/sessiond.sock
+      value: /data/sessiond.sock
     # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
     # userdata PV so that everything pi-web installs into the user's home —
     # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
     # (POST /api/pi-packages/install) — survives an actor image update
-    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    # (delete + recreate). Anything outside /data is ephemeral.
     - name: HOME
-      value: /data/pi-agent/home
+      value: /data/home
     - name: XDG_CONFIG_HOME
-      value: /data/pi-agent/config
+      value: /data/config
+    # The image's default is /data/pi-agent; with the volume mounted at /data
+    # that would create a nested /data/pi-agent inside the volume, so pin it.
+    - name: PI_CODING_AGENT_DIR
+      value: /data
     # Deploy revision stamp (harmless to the app). deploy.sh renders it from
     # MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh bumps it
     # to force a real ActorTemplate spec change, exercising the
@@ -919,7 +921,7 @@ spec:
     image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
-    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # installs the baked-in skills into /data/skills on first start
     # and then execs this single-container supervisor (sessiond + web).
     args:
     - sh
@@ -927,20 +929,17 @@ spec:
     - |
       set -eu
       # Put the user's home (and XDG config) on the userdata volume, which is
-      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # mounted at /data. pi-web installs user-scope Pi packages and
       # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
-      # without this redirection a user-installed skill lives on the ephemeral
-      # sandbox rootfs and disappears on every image update (delete +
-      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
-      # used only as a non-destructive seed source, so any build-time dotfiles
-      # there are preserved.
+      # HOME / XDG_CONFIG_HOME / PI_CODING_AGENT_DIR all point at the userdata
+      # volume (mounted at /data), so a user-installed skill and anything else
+      # under $HOME survives an image update; see docs/persistence_gaps.md.
+      # The volume now *is* /data, so the image's baked-in /data/home seed is
+      # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
-      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
-        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
-      fi
 
       # Single-container supervisor (sessiond + web). User data lives on
-      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # the userdata volume mounted at /data (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
@@ -955,7 +954,7 @@ spec:
       (
         while true; do
           skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
-          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          skills_dst=${PI_CODING_AGENT_DIR:-/data}/skills
           if [ -d "$skills_src" ]; then
             mkdir -p "$skills_dst"
             for skill_dir in "$skills_src"/*/; do
@@ -986,7 +985,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const url = process.env.PI_WEB_MODELS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "models.json");
               if (!url) process.exit(0);
               fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
@@ -1035,7 +1034,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const base = process.env.PI_WEB_SKILLS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "skills");
               const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
               const log = (...a) => console.log("mfpi-skills:", ...a);
@@ -1146,7 +1145,7 @@ spec:
 
       # Recover project working directories. projects.json is persisted on the
       # PV, but a project's working directory itself may live outside
-      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # /data (e.g. /dtom2) and is therefore ephemeral: the pi agent
       # refuses to open a session whose stored cwd no longer exists. The actor
       # sandbox is normally restored from a snapshot (golden base or suspend
       # checkpoint), so a one-shot boot-time fix would never re-run; instead
@@ -1157,15 +1156,15 @@ spec:
           # Durable default location for project workspaces: users who create
           # projects there (or under $HOME, now on the volume) keep their files
           # across an image update.
-          mkdir -p /data/pi-agent/projects
+          mkdir -p /data/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
               const durableRoots = [
-                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
-                process.env.HOME || "/data/pi-agent/home",
+                process.env.PI_CODING_AGENT_DIR || "/data",
+                process.env.HOME || "/data/home",
               ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
@@ -1188,7 +1187,7 @@ spec:
         done
       ) &
 
-      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
@@ -1214,7 +1213,7 @@ spec:
 
     volumeMounts:
     - name: userdata
-      mountPath: /data/pi-agent
+      mountPath: /data
     env:
     # atenet-router forwards traffic to the actor on port 80.
     - name: PI_WEB_PORT
@@ -1226,22 +1225,26 @@ spec:
     - name: HOSTEXEC_MODE
       value: disabled
     # Persist pi-web's data directory AND sessiond socket on the userdata PV
-    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # (mounted at /data): a delete+recreate redeploy (image refresh)
     # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
     # supervisor waits on (see the args block's `sock=` default).
     - name: PI_WEB_DATA_DIR
-      value: /data/pi-agent
+      value: /data
     - name: PI_WEB_SESSIOND_SOCKET
-      value: /data/pi-agent/sessiond.sock
+      value: /data/sessiond.sock
     # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
     # userdata PV so that everything pi-web installs into the user's home —
     # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
     # (POST /api/pi-packages/install) — survives an actor image update
-    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    # (delete + recreate). Anything outside /data is ephemeral.
     - name: HOME
-      value: /data/pi-agent/home
+      value: /data/home
     - name: XDG_CONFIG_HOME
-      value: /data/pi-agent/config
+      value: /data/config
+    # The image's default is /data/pi-agent; with the volume mounted at /data
+    # that would create a nested /data/pi-agent inside the volume, so pin it.
+    - name: PI_CODING_AGENT_DIR
+      value: /data
     # Deploy revision stamp (harmless to the app). deploy.sh renders it from
     # MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh bumps it
     # to force a real ActorTemplate spec change, exercising the
@@ -1294,7 +1297,7 @@ spec:
     image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # Only `args` is set (no `command`), so the image's ENTRYPOINT
     # (tini -- /usr/local/bin/pi-web-bootstrap) is preserved: the bootstrap
-    # installs the baked-in skills into /data/pi-agent/skills on first start
+    # installs the baked-in skills into /data/skills on first start
     # and then execs this single-container supervisor (sessiond + web).
     args:
     - sh
@@ -1302,20 +1305,17 @@ spec:
     - |
       set -eu
       # Put the user's home (and XDG config) on the userdata volume, which is
-      # mounted at /data/pi-agent. pi-web installs user-scope Pi packages and
+      # mounted at /data. pi-web installs user-scope Pi packages and
       # skills under $HOME/.pi/packages (POST /api/pi-packages/install), so
-      # without this redirection a user-installed skill lives on the ephemeral
-      # sandbox rootfs and disappears on every image update (delete +
-      # recreate). See docs/persistence_gaps.md. The image's own /data/home is
-      # used only as a non-destructive seed source, so any build-time dotfiles
-      # there are preserved.
+      # HOME / XDG_CONFIG_HOME / PI_CODING_AGENT_DIR all point at the userdata
+      # volume (mounted at /data), so a user-installed skill and anything else
+      # under $HOME survives an image update; see docs/persistence_gaps.md.
+      # The volume now *is* /data, so the image's baked-in /data/home seed is
+      # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
-      if [ -d /data/home ] && [ "$HOME" != /data/home ]; then
-        cp -an /data/home/. "$HOME"/ 2>/dev/null || true
-      fi
 
       # Single-container supervisor (sessiond + web). User data lives on
-      # the userdata volume mounted at /data/pi-agent (externalVolumeTemplate
+      # the userdata volume mounted at /data (externalVolumeTemplate
       # below): everything the agent writes there is persisted by the sticky
       # volume plugin and survives a delete+recreate redeploy (image refresh),
       # so no profile sync or admin broker is involved
@@ -1330,7 +1330,7 @@ spec:
       (
         while true; do
           skills_src=${PI_WEB_IMAGE_SKILLS_DIR:-/opt/pi-web/skills}
-          skills_dst=${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills
+          skills_dst=${PI_CODING_AGENT_DIR:-/data}/skills
           if [ -d "$skills_src" ]; then
             mkdir -p "$skills_dst"
             for skill_dir in "$skills_src"/*/; do
@@ -1361,7 +1361,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const url = process.env.PI_WEB_MODELS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "models.json");
               if (!url) process.exit(0);
               fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) })
@@ -1410,7 +1410,7 @@ spec:
               const fs = require("fs");
               const path = require("path");
               const base = process.env.PI_WEB_SKILLS_URL || "";
-              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data/pi-agent";
+              const agentDir = process.env.PI_CODING_AGENT_DIR || "/data";
               const dst = path.join(agentDir, "skills");
               const statePath = path.join(agentDir, ".mfpi-managed-skills.json");
               const log = (...a) => console.log("mfpi-skills:", ...a);
@@ -1521,7 +1521,7 @@ spec:
 
       # Recover project working directories. projects.json is persisted on the
       # PV, but a project's working directory itself may live outside
-      # /data/pi-agent (e.g. /dtom2) and is therefore ephemeral: the pi agent
+      # /data (e.g. /dtom2) and is therefore ephemeral: the pi agent
       # refuses to open a session whose stored cwd no longer exists. The actor
       # sandbox is normally restored from a snapshot (golden base or suspend
       # checkpoint), so a one-shot boot-time fix would never re-run; instead
@@ -1532,15 +1532,15 @@ spec:
           # Durable default location for project workspaces: users who create
           # projects there (or under $HOME, now on the volume) keep their files
           # across an image update.
-          mkdir -p /data/pi-agent/projects
+          mkdir -p /data/projects
           node -e '
             const fs = require("fs");
             try {
               const raw = fs.readFileSync(process.env.PI_WEB_DATA_DIR + "/projects.json", "utf8");
               const projects = (JSON.parse(raw).projects || []);
               const durableRoots = [
-                process.env.PI_CODING_AGENT_DIR || "/data/pi-agent",
-                process.env.HOME || "/data/pi-agent/home",
+                process.env.PI_CODING_AGENT_DIR || "/data",
+                process.env.HOME || "/data/home",
               ];
               for (const p of projects) {
                 if (p && typeof p.path === "string" && p.path.startsWith("/")) {
@@ -1563,7 +1563,7 @@ spec:
         done
       ) &
 
-      sock=${PI_WEB_SESSIOND_SOCKET:-/data/pi-web/sessiond.sock}
+      sock=${PI_WEB_SESSIOND_SOCKET:-/data/sessiond.sock}
       pi-web-sessiond &
       sessiond_pid=$!
       n=0
@@ -1589,7 +1589,7 @@ spec:
 
     volumeMounts:
     - name: userdata
-      mountPath: /data/pi-agent
+      mountPath: /data
     env:
     # atenet-router forwards traffic to the actor on port 80.
     - name: PI_WEB_PORT
@@ -1601,22 +1601,26 @@ spec:
     - name: HOSTEXEC_MODE
       value: disabled
     # Persist pi-web's data directory AND sessiond socket on the userdata PV
-    # (mounted at /data/pi-agent): a delete+recreate redeploy (image refresh)
+    # (mounted at /data): a delete+recreate redeploy (image refresh)
     # then keeps user data. PI_WEB_SESSIOND_SOCKET must match the path the
     # supervisor waits on (see the args block's `sock=` default).
     - name: PI_WEB_DATA_DIR
-      value: /data/pi-agent
+      value: /data
     - name: PI_WEB_SESSIOND_SOCKET
-      value: /data/pi-agent/sessiond.sock
+      value: /data/sessiond.sock
     # Durable user state: HOME and XDG_CONFIG_HOME are redirected onto the
     # userdata PV so that everything pi-web installs into the user's home —
     # most importantly user-scope Pi packages/skills under $HOME/.pi/packages
     # (POST /api/pi-packages/install) — survives an actor image update
-    # (delete + recreate). Anything outside /data/pi-agent is ephemeral.
+    # (delete + recreate). Anything outside /data is ephemeral.
     - name: HOME
-      value: /data/pi-agent/home
+      value: /data/home
     - name: XDG_CONFIG_HOME
-      value: /data/pi-agent/config
+      value: /data/config
+    # The image's default is /data/pi-agent; with the volume mounted at /data
+    # that would create a nested /data/pi-agent inside the volume, so pin it.
+    - name: PI_CODING_AGENT_DIR
+      value: /data
     # Deploy revision stamp (harmless to the app). deploy.sh renders it from
     # MFPI_DEPLOY_REV (default "0"); test-image-update-persistence.sh bumps it
     # to force a real ActorTemplate spec change, exercising the

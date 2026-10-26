@@ -2,7 +2,7 @@
 
 ## 产品概述
 
-为 `demos/mf-pi` 增加"管理员统一安装 skill"能力：管理员在 `/usermanagement/` 页面上传/删除 skill，平台自动把它分发到**所有用户（每个用户 = 一个 pi-web Actor）**，安装到每个 Actor 的 `${PI_CODING_AGENT_DIR:-/data/pi-agent}/skills`，新会话自动生效，已打开会话可通过"立即应用"热加载。
+为 `demos/mf-pi` 增加"管理员统一安装 skill"能力：管理员在 `/usermanagement/` 页面上传/删除 skill，平台自动把它分发到**所有用户（每个用户 = 一个 pi-web Actor）**，安装到每个 Actor 的 `${PI_CODING_AGENT_DIR:-/data}/skills`，新会话自动生效，已打开会话可通过"立即应用"热加载。
 
 ## 核心功能
 
@@ -31,7 +31,7 @@ flowchart LR
   B --> C[(PVC /var/lib/mfpi-skills)]
   C --> D[manifest.json + tgz 端点]
   D -.10s 轮询 If-None-Match.-> E[Actor 拉取循环]
-  E --> F[/data/pi-agent/skills]
+  E --> F[/data/skills]
   F --> G[sessiond resourceLoader]
   B -.立即应用: 经 router 扇出.-> H[POST /api/sessions/:id/reload]
   H --> G
@@ -81,7 +81,7 @@ flowchart LR
   - 8 个 skill CLI 脚本（install/list/remove/apply 及 -test 变体）语法和执行均通过。
   - 真实集群端到端（E2E）验证全部通过：
     1. 上传新 Skill（hello-skill）：admin 解析打包并生成 sha256 清单；
-    2. Actor 自动增量拉取：各运行中的 Actor 在 10s 内通过后台拉取循环自动下载、校验并解压安装到 `/data/pi-agent/skills/hello-skill`；
+    2. Actor 自动增量拉取：各运行中的 Actor 在 10s 内通过后台拉取循环自动下载、校验并解压安装到 `/data/skills/hello-skill`；
     3. 增量更新（v2）：内容更新后重新打包上传，Actor 自动检测到 sha256 变更并原子覆盖更新；
     4. 卸载与隔离边界保护：用户自建的自定义 Skill 不会被清理，删除托管 Skill 后 Actor 仅删除受托目录并清理 `.mfpi-managed-skills.json`；
     5. 立即应用（扇出 reload）：修复了 reloadActor 对 projects/sessions 数组结构的兼容解析并传入 `{"cwd": "..."}` 请求体，成功将集群内 11 个在线 Actor 全部 reload 成功（`{"online": 11, "reloaded": 11, "failed": 0}`）。

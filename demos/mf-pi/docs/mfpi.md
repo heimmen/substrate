@@ -16,7 +16,7 @@
   `USER pi-web`(1000)，但作为 Actor 会以 root 运行，绑定 80 无碍。
 - **pi-web 单容器需跑 sessiond + web**：镜像 ENTRYPOINT 为
   `tini -- /usr/local/bin/pi-web-bootstrap`（首启把 `/opt/pi-web/skills` 拷到
-  `/data/pi-agent/skills`），CMD 为 `pi-web-server`（只跑 web）。
+  `/data/skills`），CMD 为 `pi-web-server`（只跑 web）。
   `docker/scripts/run-container.sh` 已给出单容器 supervisor 模式
   （先 sessiond，等 unix socket，再 web）。
 - **ActorTemplate `command` 覆盖镜像 ENTRYPOINT+CMD；`args` 只覆盖 CMD、保留
@@ -41,7 +41,7 @@
 | 密码 ConfigMap | `mfpi-user-passwords` | 同左 |
 | provider Secret | `mf-pi-provider-config` | 同左 |
 | per-user key Secret | `mfpi-user-provider-keys` | 同左（`mfpi-admin-keys` Role/RoleBinding） |
-| userdata 卷 | ActorTemplate `userdata` externalVolumeTemplate（sticky，挂载 `/data/pi-agent`） | 同左（test ns 内） |
+| userdata 卷 | ActorTemplate `userdata` externalVolumeTemplate（sticky，挂载 `/data`） | 同左（test ns 内） |
 | Cookie 名 | `mfpi_user` | `mfpi_user_test` |
 | nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
 | 入口端口 | **58681** | 59681 |
@@ -61,7 +61,7 @@ key 的完整设计与实现进度（驱动 actor 内 pi-web api-key 登录流�
 
 另见 `perUserDataVolume.md`：将每用户 userdata（`auth.json` / skills /
 `sessions/` 等）持久化到 sticky per-actor 卷（`externalVolumeTemplate`，挂载
-`/data/pi-agent`）的完整设计；删除重建后数据自动恢复，重置不丢数据。
+`/data`）的完整设计；删除重建后数据自动恢复，重置不丢数据。
 
 另见 `deploy_skill_to_actor.md`：管理员在 `mfpi-admin` 统一上传/卸载 skill，
 经 Actor 内后台拉取循环自动分发到所有用户的设计与实现进度（对应 README 的
@@ -127,7 +127,7 @@ spec:
   - name: mf-agent
     image: "localhost:5001/mf-agent@${MF_PI_DIGEST}"
     # 用 args（非 command）保留镜像 ENTRYPOINT：tini -- pi-web-bootstrap。
-    # bootstrap 首启拷贝 skills 到 /data/pi-agent/skills，然后 exec 下面的 supervisor。
+    # bootstrap 首启拷贝 skills 到 /data/skills，然后 exec 下面的 supervisor。
     args:
     - sh
     - -c
@@ -185,7 +185,7 @@ spec:
 - 镜像其余关键 ENV 已内建（`docker/Dockerfile`）：`HOME=/data/home`、
   `XDG_CONFIG_HOME=/data/config`、`PI_WEB_DATA_DIR=/data/pi-web`、
   `PI_WEB_SESSIOND_SOCKET=/data/pi-web/sessiond.sock`、
-  `PI_CODING_AGENT_DIR=/data/pi-agent`。
+  `PI_CODING_AGENT_DIR=/data`。
 - 凭据只需 `DEEPSEEK_API_KEY`（pi-web 内建 deepseek provider），不再需要
   mf-cc 的 `ANTHROPIC_*` 三项。
 
@@ -262,7 +262,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
   但进程内存快照比 mf-cc（Bun）更大，挂起略慢，属预期。
 - 单容器双进程（sessiond+web）通过 unix socket 通信；Actor 恢复后 socket 需重新
   建立，web 可能短暂 503，等几秒重试（同 mf-cc 首访语义）。
-- 用户数据（`/data/pi-agent`，含 `$HOME=/data/pi-agent/home`）持久化在 sticky
+- 用户数据（`/data`，含 `$HOME=/data/home`）持久化在 sticky
   外部卷上，跨挂起/恢复、删除重建与**镜像更新**都保留；详见
   `perUserDataVolume.md` 与 `persistence_gaps.md`。
 

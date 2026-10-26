@@ -28,7 +28,7 @@
              ┌──────────────────────────────┐
              │  Actor 沙箱 (pi-web 单容器)    │
              │                              │
-             │   /data/pi-agent  ◄──symlink─┼──► 节点目录:
+             │   /data  ◄──symlink─┼──► 节点目录:
              │      (= PV 挂载点)            │  /var/lib/ateom-gvisor/
              └──────────────────────────────┘    stickyvolumes/
                                                 <atespace>-<actor>-userdata
@@ -59,7 +59,7 @@
    > **注意**：mf-pi **不使用**模板的 golden base 快照。deploy 会自动清空它
    > （`ensure-no-golden.sh`），因为该快照记录的是 golden actor 自己那份
    > `userdata` 卷的挂载树，无法对每用户卷恢复（详见 `persistence_gaps.md`）。
-2. atelet 把该 Actor 的 **PV 目录 symlink** 进沙箱挂载点 `/data/pi-agent`。
+2. atelet 把该 Actor 的 **PV 目录 symlink** 进沙箱挂载点 `/data`。
 3. 沙箱入口 `tini -- pi-web-bootstrap sh -c '...'` 先装内置 skills，再拉起
    `pi-web-sessiond` + `pi-web-server`，监听 80 端口。
 4. supervisor 内的两个**恢复循环**（每 10s）补齐 skills 与 project 工作目录——因为
@@ -85,16 +85,16 @@ kubectl ate get actor   alice -a mfpi                                     # 查�
 ## 4. PV（sticky 持久卷，`userdata`）
 
 **声明**（ActorTemplate）：`externalVolumeTemplate` 卷 `userdata`（5Gi），容器
-`volumeMounts` 挂到 `/data/pi-agent`。
+`volumeMounts` 挂到 `/data`。
 
 **稳定名与落盘**：
 - 控制面按 `<atespace>-<actorName>-<volName>` 生成卷 ID（如 `mfpi-alice-userdata`）。
 - sticky 插件在**节点**上维护 backing 目录：
   `/var/lib/ateom-gvisor/stickyvolumes/<卷ID>`。
-- 挂载时（atelet 侧）把该目录 **symlink** 到沙箱里的 `/data/pi-agent`。
-- 于是 `/data/pi-agent` **就是** PV 本身——actor 直接读写，无同步代理、无凭据。
-- 模板还把 `HOME` 指到 `/data/pi-agent/home`、`XDG_CONFIG_HOME` 指到
-  `/data/pi-agent/config`：pi-web 把用户自己安装的 Pi 包/skill 放在
+- 挂载时（atelet 侧）把该目录 **symlink** 到沙箱里的 `/data`。
+- 于是 `/data` **就是** PV 本身——actor 直接读写，无同步代理、无凭据。
+- 模板还把 `HOME` 指到 `/data/home`、`XDG_CONFIG_HOME` 指到
+  `/data/config`：pi-web 把用户自己安装的 Pi 包/skill 放在
   `$HOME/.pi/packages`，这样它们也在 PV 上，镜像更新不丢。
 
 > [!WARNING]
@@ -107,8 +107,8 @@ kubectl ate get actor   alice -a mfpi                                     # 查�
 | 数据 | 位置 | 结果 |
 |---|---|---|
 | 会话历史、`auth.json`、`settings.json`、models | PV | ✅ 原样 |
-| `$HOME`（含用户安装的 `.pi/packages`、`.npm`） | PV（`/data/pi-agent/home`） | ✅ 原样 |
-| `$XDG_CONFIG_HOME` | PV（`/data/pi-agent/config`） | ✅ 原样 |
+| `$HOME`（含用户安装的 `.pi/packages`、`.npm`） | PV（`/data/home`） | ✅ 原样 |
+| `$XDG_CONFIG_HOME` | PV（`/data/config`） | ✅ 原样 |
 | 内置 skills | 镜像 → supervisor 循环补装 | ✅ 补齐 |
 | project 工作目录（如 `/dtom2`，在 PV 外） | 沙箱临时层 | ⚠️ 目录重建（历史内容不恢复） |
 
@@ -140,7 +140,7 @@ kubectl ate purge volumes alice -a mfpi -t ate-demo-mf-pi/mf-pi   # 等价 CLI
 
 > 冷启动代价：首次 resume 约 25–40s（镜像更新后每个用户一次），期间浏览器看到
 > 「Agent 正在载入」提示页；之后 suspend/resume 仍走 actor 自己的快照，速度快。
-> 项目工作目录请放在 `$HOME`（`/data/pi-agent/home`）或 `/data/pi-agent` 下，否则
+> 项目工作目录请放在 `$HOME`（`/data/home`）或 `/data` 下，否则
 > 只会被重建为空目录。
 
 ---

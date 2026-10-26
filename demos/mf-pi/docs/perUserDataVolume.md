@@ -41,7 +41,7 @@
 - `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl`：ActorTemplate 声明
   `volumes: [{name: userdata, externalVolumeTemplate: {capacity: 5Gi,
   storageClassName: standard}}]`，pi-web 容器 `volumeMounts` 挂载到
-  `/data/pi-agent`；supervisor 脚本去掉 `pull/push/do_sync` 同步逻辑；**删除**
+  `/data`；supervisor 脚本去掉 `pull/push/do_sync` 同步逻辑；**删除**
   `mfpi-minio` Deployment/PVC/Service、`mfpi-minio-admin` Secret、
   `mfpi-profile-token` Secret 及其 RBAC、`MFPI_ADMIN_URL` /
   `MFPI_PROFILE_TOKEN` / `MFPI_PROFILE_PUSH_INTERVAL` 环境变量。
@@ -50,14 +50,14 @@
   `/internal/actor/{name}/profile` 路由；UI 用户列表去掉「MinIO Profile」徽标。
 - 脚本：`deploy.sh` / `deploy-test.sh` / `hack/install-demo-mf-pi*.sh` 去掉 token
   与 MinIO 凭据/镜像处理；`validate-templates.sh` 改为断言**无** MinIO/token 残留
-  且 userdata 卷 + `/data/pi-agent` 挂载存在；删除 `check-minio-users.sh`。
+  且 userdata 卷 + `/data` 挂载存在；删除 `check-minio-users.sh`。
 
 ## 数据生命周期
 
 | 事件 | 行为 |
 |---|---|
 | 首次创建用户 | `CreateVolume(稳定名)` → `MountVolume` 创建空 backing 目录并 symlink |
-| 写入 `/data/pi-agent`（含 `$HOME`/`$XDG_CONFIG_HOME`） | 直接落在 worker 节点 backing 目录（持久卷） |
+| 写入 `/data`（含 `$HOME`/`$XDG_CONFIG_HOME`） | 直接落在 worker 节点 backing 目录（持久卷） |
 | 挂起 / 恢复（Full 快照） | 进程与 rootfs 走快照；卷目录原样保留，重挂即原数据 |
 | **删除（重置）** | actor 删除；backing 目录**保留** |
 | **重建同名用户 / 镜像更新后重新部署** | 同一稳定名 → 重新挂到同一目录，**旧数据自动可见**；新镜像功能 + 旧数据 |
@@ -84,7 +84,7 @@
 - sticky 目录由插件创建后不再回收（与 mock 相同），节点磁盘回收交给演示环境管理；
   可用 `list-pvs.sh --detail` 巡检体积。
 - `capacity` / `storageClassName` 被 sticky 插件忽略（无配额）。
-- 项目工作目录若建在 `/data/pi-agent` 或 `$HOME` 之外（如 `/dtom2`），刷新后只会
+- 项目工作目录若建在 `/data` 或 `$HOME` 之外（如 `/dtom2`），刷新后只会
   被重建为空目录；supervisor 会对这类 cwd 打 warning。
 
 ## Todo list（进度跟踪）
@@ -104,7 +104,7 @@
 - [x] **#10 Update `mf-pi.yaml.tmpl` (drop MinIO)** — remove `mfpi-minio` Deployment/PVC/Service,
       `mfpi-minio-admin` Secret, in-actor supervisor `pull/push/do_sync` block + `.mfpi-profile-actor`,
       env `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token`
-      Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data/pi-agent` mount.
+      Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data` mount.
 - [x] **#11 Update `mf-pi-test.yaml.tmpl` (drop MinIO)** — same changes as #10 for the test template.
 - [x] **#12 Delete admin S3 broker** — delete `demos/mf-pi/admin/profile.go` and
       `demos/mf-pi/admin/profile_test.go` (entire `profileStore`/`s3ProfileStore` broker).
@@ -115,19 +115,19 @@
       `MINIO_ROOT_*`, `MINIO_IMAGE`, minio digest localization + `sed` substitutions.
 - [x] **#15 Update verifier scripts** — `check-minio-users.sh` drop/repurpose; rewrite
       `validate-templates.sh` to assert NO minio/profile-token artifacts and the new
-      `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
+      `externalVolumeTemplate` volume + `/data` mount present.
 - [x] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite
       `perUserMinioProfile.md` as sticky-PV doc; update `mfpi.md` + `demos/mf-pi/README.md` (drop MinIO refs).
 - [ ] **#17 Build, test, verify, manual check** — gofmt/build/vet/test (ateapi, atelet, internal/volume,
       mf-pi/admin); `validate-templates.sh`; `make verify`; manual: create actor → write
-      `/data/pi-agent` file → refresh image (delete+recreate) → confirm file persists.
+      `/data` file → refresh image (delete+recreate) → confirm file persists.
 
 ## 镜像更新持久化修复（不改 substrate）
 
 根因与取舍见 `persistence_gaps.md`；以下全部只改 `demos/mf-pi/`。
 
 - [x] **D1 `$HOME` / `$XDG_CONFIG_HOME` 上卷** — 8 个 ActorTemplate 设
-      `HOME=/data/pi-agent/home`、`XDG_CONFIG_HOME=/data/pi-agent/config`；supervisor
+      `HOME=/data/home`、`XDG_CONFIG_HOME=/data/config`；supervisor
       `mkdir -p` + 从镜像 `/data/home` 非破坏播种。pi-web 用户级 Pi 包
       （`$HOME/.pi/packages`）因此跨镜像更新保留。
 - [x] **D2 绕过 golden base 快照** — 新增 `ensure-no-golden.sh`；`deploy.sh` /
@@ -142,3 +142,32 @@
       `README.md` 更新存活矩阵。
 - [ ] **D6 真机验证** — 在 kind 上跑 `./test-image-update-persistence.sh` 与
       `./test-userdata-persistence.sh`，确认全绿（需要已部署的测试环境 + nginx）。
+
+---
+
+## 变更记录：卷根从 `/data/pi-agent` 收敛到 `/data`
+
+早期实现把每用户外部卷挂在 `/data/pi-agent`，因此 actor 里的数据路径一律带
+`pi-agent/` 前缀；镜像默认值也是 `/data/pi-agent`（`PI_CODING_AGENT_DIR`）。
+
+现在改为**卷直接挂 `/data`**，卷根即 actor 的 `/data`：
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| `volumeMounts[userdata].mountPath` | `/data/pi-agent` | **`/data`** |
+| `PI_WEB_DATA_DIR` | `/data/pi-agent` | `/data` |
+| `PI_WEB_SESSIOND_SOCKET` | `/data/pi-agent/sessiond.sock` | `/data/sessiond.sock` |
+| `HOME` | `/data/pi-agent/home` | `/data/home` |
+| `XDG_CONFIG_HOME` | `/data/pi-agent/config` | `/data/config` |
+| `PI_CODING_AGENT_DIR` | 未设置（镜像默认 `/data/pi-agent`） | **显式 `/data`** |
+
+要点：
+
+- **老卷不需要迁移**：卷内容本来就是"`/data/pi-agent` 的内容"，换挂载点只是换了前缀。
+- **actor 必须重建**（ActorTemplate 不可变），`deploy.sh` 的 refresh 会做；
+  `refresh-actor.sh` / `test-userdata-persistence.sh` 已按新布局更新断言。
+- `PI_CODING_AGENT_DIR` 现在**必须显式设置**：镜像默认 `/data/pi-agent` 会在卷里
+  再长出一层 `pi-agent/`。
+- 镜像自带 `/data/home` 的种子拷贝逻辑已删除 —— 卷就是 `/data`，`HOME` 即
+  `/data/home`，那段拷贝会拷贝自身，已无意义（代价：镜像烘焙的 npm 缓存种子丢失，
+  首次装包重新下载）。

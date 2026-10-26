@@ -8,7 +8,7 @@
 # userdata ExternalVolume is mount-type "sticky" (see internal/volume/sticky):
 # DeleteVolume keeps the backing directory on disk and a recreate of the same
 # actor re-attaches the same directory, so whatever the user wrote under
-# /data/pi-agent (including $HOME=/data/pi-agent/home and the skills/packages
+# /data (including $HOME=/data/home and the skills/packages
 # installed there) survives the refresh. The actor is re-attached to the SAME
 # user/volume, so they can log back in with their existing password and their
 # projects / saved files / session are intact.

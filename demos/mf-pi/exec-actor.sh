@@ -9,20 +9,19 @@
 #
 # What we CAN do is open a shell on the kind node over the actor's persisted
 # filesystem — the sticky volume that the control plane mounts at
-# /data/pi-agent inside the actor. This is exactly the actor's data (chat
+# /data inside the actor. This is exactly the actor's data (chat
 # sessions, auth.json, skills, …) and it is what survives a refresh-actor.sh
 # redeploy. Use it to inspect or hand-edit the actor's on-disk state.
 #
-# IMPORTANT: the sticky volume directory IS /data/pi-agent. The PV holds the
-# CONTENTS of that path (auth.json, sessions/, skills/, projects.json, plus the
-# redirected $HOME in home/ and $XDG_CONFIG_HOME in config/) directly — there is
-# no nested pi-agent/ folder inside the PV, and the node path contains no /data
-# prefix. To make that explicit, the shell by default starts in a small view
-# that mirrors the actor layout:
+# IMPORTANT: the sticky volume directory IS the actor's /data. The PV holds the
+# CONTENTS of /data (auth.json, sessions/, skills/, projects.json, plus the
+# redirected $HOME in home/ and $XDG_CONFIG_HOME in config/) directly, and the
+# node path contains no /data prefix. To make that explicit, the shell by default
+# starts in a small view that mirrors the actor layout:
 #
-#   data/pi-agent/...   -> the sticky PV (what the actor sees at /data/pi-agent)
+#   data/...   -> the sticky PV (what the actor sees at /data)
 #
-# In particular data/pi-agent/home/.pi/packages/... is where pi-web installs
+# In particular data/home/.pi/packages/... is where pi-web installs
 # user-scope Pi packages/skills (POST /api/pi-packages/install), so it survives
 # an actor image update. The image's own /data/home is only a seed source now;
 # any other actor path (e.g. /usr, /opt, /tmp, /data/npm-cache) is ephemeral
@@ -85,7 +84,7 @@ fi
 echo "Actor : $ACTOR  (atespace prefix: $PREFIX)"
 echo "Node  : $NODE"
 echo "PV dir: $VOL"
-echo "        (= the actor's /data/pi-agent — this is what survives refresh)"
+echo "        (= the actor's /data — this is what survives refresh)"
 
 if [ "$PRINT" = 1 ]; then
   echo "$VOL"
@@ -93,12 +92,12 @@ if [ "$PRINT" = 1 ]; then
 fi
 
 # Actor-style view: a directory laid out like the actor's paths, so you can
-# `cd data/pi-agent` exactly as you would inside the actor. The PV dir itself
-# holds the /data/pi-agent CONTENTS (no nested pi-agent/), which is confusing
-# to browse directly — hence the view. Keyed by volume name (actor-stable).
+# `cd data` exactly as you would inside the actor. The PV dir itself holds the
+# /data CONTENTS directly, which is easy to misread when browsing it raw — hence
+# the view. Keyed by volume name (actor-stable).
 VIEW="/var/lib/ateom-gvisor/shellviews/$(basename "$VOL")"
 if [ "$RAW" != 1 ]; then
-  docker exec "$NODE" sh -c "mkdir -p '$VIEW/data' && ln -sfn '$VOL' '$VIEW/data/pi-agent'" || true
+  docker exec "$NODE" sh -c "mkdir -p '$VIEW' && ln -sfn '$VOL' '$VIEW/data'" || true
 fi
 
 echo
@@ -106,8 +105,8 @@ if [ "$RAW" = 1 ]; then
   echo "Entering a shell at the PV directory (--raw)."
 else
   echo "Entering a shell in the actor-style view:"
-  echo "  $VIEW/data/pi-agent/  ->  the PV  (= actor /data/pi-agent)"
-  echo "Example: cd data/pi-agent && ls    # auth.json, sessions/, skills/, home/, config/, ..."
+  echo "  $VIEW/data/  ->  the PV  (= actor /data)"
+  echo "Example: cd data && ls    # auth.json, sessions/, skills/, home/, config/, ..."
 fi
 echo "(Substrate workers are gVisor/distroless with no exec endpoint;"
 echo " this is the persisted pod filesystem, not a live process shell.)"

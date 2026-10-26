@@ -163,7 +163,7 @@ curl -sS -u admin:'mf@pass2026' -X DELETE \
 2. 每个 ActorTemplate 的 supervisor 每 60s 拉取一次
    `PI_WEB_MODELS_URL=http://mfpi-admin.<ns>.svc.cluster.local:8080/internal/providers/models.json`，
    把返回文档的 `providers` **合并**进 `$PI_CODING_AGENT_DIR/models.json`
-   （默认 `/data/pi-agent/models.json`）。
+   （默认 `/data/models.json`）。
 3. pi-web 每次请求都重读 `models.json`，因此端点改动**无需重启 sessiond/web、无需重建镜像**，
    ~60s 内出现在各用户的模型列表中。
 
@@ -175,7 +175,7 @@ curl -sS -u admin:'mf@pass2026' -X DELETE \
 ## 6. 移除是「只增不删」（Actor 侧）
 
 从注册表删除端点后，管理面与 `GET /api/providers` 立即不再提供它，但**已经拉取过它的 Actor
-仍保留**本地 `models.json` 中的定义——合并只写不删，而该文件位于用户持久卷 `/data/pi-agent`，
+仍保留**本地 `models.json` 中的定义——合并只写不删，而该文件位于用户持久卷 `/data`，
 跨 Actor 重建保留。要彻底下架，需在 Actor 内手动删除对应条目（可用 `exec-actor.sh`）。
 因此**删除端点不是安全边界**：其模型仍可能留在老用户的选择器里，只是不再有新用户拿到。
 

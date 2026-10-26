@@ -8,7 +8,7 @@
 # The admin is the authoritative source for skills distributed to every user
 # (actor). Each actor runs a 10s background pull loop that diffs the admin's
 # manifest against local state and incrementally installs/updates/removes
-# managed skills under /data/pi-agent/skills. See docs/deploy_skill_to_actor.md.
+# managed skills under /data/skills. See docs/deploy_skill_to_actor.md.
 #
 # This script asserts the full lifecycle, mirroring the manual E2E that was
 # done during #12:
@@ -16,7 +16,7 @@
 #      manifest with a sha256.
 #   2. Auto incremental pull -> a running test actor picks the skill up within
 #      ~10s (its background pull loop downloads, verifies and unpacks it to
-#      /data/pi-agent/skills/<name>).
+#      /data/skills/<name>).
 #   3. Incremental update (v2) -> after re-uploading changed content, the actor
 #      detects the sha256 change and atomically overwrites the installed copy.
 #   4. Unload + isolation boundary -> a user's own, never-managed custom skill
@@ -58,8 +58,8 @@ NODE="${NODE:-kind-control-plane}"
 TEMPLATE="${MFPI_TEMPLATE:-ate-demo-mf-pi-test/mf-pi-small}"
 TEST_USER="${TEST_USER:-skilltest-$(date +%s | tail -c 6)}"
 SKILL_NAME="hello-skill"
-SKILLS_DIR="/data/pi-agent/skills"
-MANAGED_STATE="/data/pi-agent/.mfpi-managed-skills.json"
+SKILLS_DIR="/data/skills"
+MANAGED_STATE="/data/.mfpi-managed-skills.json"
 
 # Resolve the kubectl-ate invocation once (single token preferred):
 if [[ -n "${KUBECTL_ATE_CMD:-}" ]]; then
@@ -118,8 +118,8 @@ actor_uid() {
     | jq -r '.actors[0].metadata.uid // empty' 2>/dev/null || true
 }
 
-# The actor's sticky volume dir on the kind node == its /data/pi-agent
-# (CONTENTS only, no nested pi-agent/). Keyed by volume name.
+# The actor's sticky volume dir on the kind node == its /data
+# (the volume root IS /data). Keyed by volume name.
 actor_pv() {
   docker exec "$NODE" sh -c \
     "ls -d /var/lib/ateom-gvisor/stickyvolumes/*${ATESPACE}-${TEST_USER}-userdata 2>/dev/null \
@@ -159,7 +159,7 @@ wait_for_pv() { # <description> <relative-path-under-pv> <timeout>
 
 read_pv_file() { # <path-relative-to-pv-or-container-data-dir>
   local pv="$(actor_pv)"
-  local rel="${1#/data/pi-agent/}"
+  local rel="${1#/data/}"
   rel="${rel#/}"
   [[ -n "$pv" ]] || return 1
   docker exec "$NODE" cat "$pv/$rel" 2>/dev/null || true

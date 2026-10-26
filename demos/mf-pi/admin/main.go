@@ -13,8 +13,8 @@
 //	GET    /                          serve the embedded admin UI
 //	GET    /healthz                   readiness
 //
-// User data persistence: each actor mounts a sticky userdata volume at
-// /data/pi-agent, so a delete+recreate redeploy keeps the user's data with
+// User data persistence: each actor mounts a sticky userdata volume at /data,
+// so a delete+recreate redeploy keeps the user's data with
 // no broker involved (see docs/save_userdata_pv.md).
 //
 // It authenticates in-cluster exactly like ate-controller/atenet-router: a

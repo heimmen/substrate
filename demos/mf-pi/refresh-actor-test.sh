@@ -6,7 +6,7 @@
 # The userdata external volume is mount-type "sticky" (see
 # internal/volume/sticky): DeleteVolume keeps the backing directory on disk and
 # a recreate of the same actor re-attaches the same directory, so whatever the
-# user wrote under /data/pi-agent is still there after the refresh.
+# user wrote under /data is still there after the refresh.
 #
 # After the refresh the actor is RUNNING again and re-attached to the SAME
 # user/volume, so you can log in with the user's existing password and check

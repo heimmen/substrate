@@ -4,7 +4,7 @@ Branch: `mf_pi_userdata_in_pv` (from `27b0fc873cb73102a00e9f4dd51e2907f6969d2f`)
 
 ## Goal
 Replace the per-user MinIO object store + in-actor broker sync with a persistent volume
-mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh redeploy**
+mounted at `/data`, so a user's data survives an **actor image-refresh redeploy**
 (delete + recreate). Drop the MinIO broker entirely.
 
 ## Hard constraints (from user)
@@ -35,7 +35,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
    - `cmd/atelet/volumes.go:29` (worker plane)
    from `volume.NewMockVolumePlugin()` to the new sticky plugin (via the registry default).
 5. **mf-pi demo** declares one `externalVolumeTemplate` volume (capacity + storageClass) mounted at
-   `/data/pi-agent`; no supervisor sync, no broker, no token.
+   `/data`; no supervisor sync, no broker, no token.
 
 > Note on "PV": in the kind/gVisor demo there is no CSI, so the practical "persistent volume" is a
 > node-local directory that survives actor delete+recreate. The plugin interface is plugin-swappable,
@@ -52,7 +52,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 1. `demos/mf-pi/mf-pi.yaml.tmpl` — remove `mfpi-minio` Deployment/PVC/Service, `mfpi-minio-admin`
    Secret, in-actor supervisor `pull/push/do_sync` block + `.mfpi-profile-actor`, env
    `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token` Secret +
-   RBAC, MinIO `snapshotsConfig` note. ADD: `externalVolumeTemplate` volume + `/data/pi-agent` mount.
+   RBAC, MinIO `snapshotsConfig` note. ADD: `externalVolumeTemplate` volume + `/data` mount.
 2. `demos/mf-pi/mf-pi-test.yaml.tmpl` — same.
 3. `demos/mf-pi/admin/profile.go` — DELETE (entire S3 broker).
 4. `demos/mf-pi/admin/profile_test.go` — DELETE.
@@ -63,7 +63,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
    `MINIO_IMAGE`, minio digest localization + `sed` substitutions.
 8. `demos/mf-pi/check-minio-users.sh` — drop/repurpose (talks to MinIO).
 9. `demos/mf-pi/validate-templates.sh` — rewrite: assert NO minio/profile-token artifacts; assert the
-   new `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
+   new `externalVolumeTemplate` volume + `/data` mount present.
 10. `demos/mf-pi/admin/index.html` — the "已同步" badge reads MinIO object; update/remove.
 11. `demos/mf-pi/perUserMinioProfile.md` — rewrite as the sticky-PV design doc.
 12. `demos/mf-pi/docs/mfpi.md` + `demos/mf-pi/README.md` — drop MinIO persistence / profile-token references.
@@ -71,7 +71,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 ## §5 Verification
 - `go build ./...` and `go test ./cmd/ateapi/... ./cmd/atelet/... ./internal/volume/... ./demos/mf-pi/admin/...`.
 - `demos/mf-pi/validate-templates.sh` passes.
-- Manual demo check: create actor → write file in `/data/pi-agent` → refresh image (delete+recreate)
+- Manual demo check: create actor → write file in `/data` → refresh image (delete+recreate)
   → file still present in new instance.
 - `make verify` (gofmt/boilerplate/licenses/go-modules/go-generate) after `hack/update/go-modules.sh`
   if new deps are added (the sticky plugin needs no new deps — pure stdlib + `ateompath`).
@@ -93,7 +93,7 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
 - [x] **#10 Update `mf-pi.yaml.tmpl` (drop MinIO)** — remove `mfpi-minio` Deployment/PVC/Service,
       `mfpi-minio-admin` Secret, in-actor supervisor `pull/push/do_sync` block + `.mfpi-profile-actor`,
       env `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token`
-      Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data/pi-agent` mount.
+      Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data` mount.
 - [x] **#11 Update `mf-pi-test.yaml.tmpl` (drop MinIO)** — same changes as #10 for the test template.
 - [x] **#12 Delete admin S3 broker** — delete `demos/mf-pi/admin/profile.go` and
       `demos/mf-pi/admin/profile_test.go` (entire `profileStore`/`s3ProfileStore` broker).
@@ -104,17 +104,17 @@ mounted at `/data/pi-agent`, so a user's data survives an **actor image-refresh 
       `MINIO_ROOT_*`, `MINIO_IMAGE`, minio digest localization + `sed` substitutions.
 - [x] **#15 Update verifier scripts** — `check-minio-users.sh` drop/repurpose; rewrite
       `validate-templates.sh` to assert NO minio/profile-token artifacts and the new
-      `externalVolumeTemplate` volume + `/data/pi-agent` mount present.
+      `externalVolumeTemplate` volume + `/data` mount present.
 - [x] **#16 Update docs + UI badge** — `admin/index.html` "已同步" badge (reads MinIO); rewrite
       `perUserMinioProfile.md` as sticky-PV doc; update `demos/mf-pi/docs/mfpi.md` + `demos/mf-pi/README.md` (drop MinIO refs).
 - [x] **#17 Build, test, verify, manual check** — gofmt/build/vet/test (ateapi, atelet, internal/volume,
       mf-pi/admin); `validate-templates.sh`; `make verify`; manual: create actor → write
-      `/data/pi-agent` file → refresh image (delete+recreate) → confirm file persists.
+      `/data` file → refresh image (delete+recreate) → confirm file persists.
       Status: gofmt clean; `go build ./...` OK; vet OK; tests pass (sticky, atelet,
       controlapi, mf-pi/admin, pkg/api/v1alpha1); `validate-templates.sh` OK (both
       templates, 15 docs); go-generate/gofmt/licenses/go-modules OK. Remaining verify
       failures are pre-existing and untouched by this branch (shellcheck on
       clear-user-apikey.sh / set-user-apikey.sh / stop-nginx.sh; boilerplate on
       demos/mf-cc/mfcc-admin.htpasswd). NOTE: the live-cluster manual check (delete +
-      recreate an actor and confirm `/data/pi-agent` data persists) still needs to be
+      recreate an actor and confirm `/data` data persists) still needs to be
       run once a kind cluster with the rebuilt images is available.

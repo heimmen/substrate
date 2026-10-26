@@ -4,7 +4,7 @@
 结论先行：
 
 1. **用户自己安装的 Pi 包 / skill 落在 `$HOME/.pi` 下，而唯一持久面只有
-   `/data/pi-agent`**。镜像里 `HOME=/data/home`，所以 `POST /api/pi-packages/install`
+   `/data`**。镜像里 `HOME=/data/home`，所以 `POST /api/pi-packages/install`
    装出来的东西（`installedPath: "/home/alice/.pi/packages/..."`，
    `docs/user_agent_api.md` §6.1）实际在 `/data/home/.pi/...`——沙箱 rootfs 上，
    任何「新实例」都会丢。
@@ -25,7 +25,7 @@
 
 | 事实 | 证据 |
 |---|---|
-| 只挂了一个 `userdata` 卷到 `/data/pi-agent` | `mf-pi.yaml.tmpl`（`volumeMounts` / `volumes`） |
+| 只挂了一个 `userdata` 卷到 `/data` | `mf-pi.yaml.tmpl`（`volumeMounts` / `volumes`） |
 | pi-web 数据目录/agent 目录被指到 PV，`HOME` 原来没有 | `mf-pi.yaml.tmpl` env（`PI_WEB_DATA_DIR`、`PI_CODING_AGENT_DIR`），`docs/mfpi.md`「镜像其余关键 ENV」 |
 | 用户级 Pi 包安装到 `$HOME/.pi/packages` | `docs/user_agent_api.md` §6.1/§6.2（`piPackageService` 的 `installedPath`） |
 | 镜像更新 = 删模板 + 删/建 actor | `deploy.sh`（`ensure_at_recreate_if_changed`、`refresh_existing_users`）、`refresh-actor.sh` |
@@ -37,7 +37,7 @@
 
 ### 1.1 三种「重置」的差异（修复前的真实语义）
 
-| 操作 | 沙箱 | `/data/pi-agent` 卷 | `$HOME` / `$XDG_CONFIG_HOME`（修复前在 rootfs） | 镜像内置 skill |
+| 操作 | 沙箱 | `/data` 卷 | `$HOME` / `$XDG_CONFIG_HOME`（修复前在 rootfs） | 镜像内置 skill |
 |---|---|---|---|---|
 | suspend / resume | 同一实例现场还原 | 不变 | 随 Full 快照还原 | 随快照 |
 | delete + recreate（同镜像） | 新沙箱 | 原样重挂 | **丢** | supervisor 循环补装 |
@@ -50,7 +50,7 @@
 
 1. controller 用同一个模板在保留 atespace `ate-golden` 里建一个 golden actor，跑一次
    后 suspend，得到 Full 快照写到 `status.goldenSnapshot`。
-2. 这个快照里记录了 9p 挂载 `mf-agent:/data/pi-agent` 的**路径树**——那是 **golden
+2. 这个快照里记录了 9p 挂载 `mf-agent:/data` 的**路径树**——那是 **golden
    actor 自己那份卷**的内容（跑过 bootstrap，所以有 `skills` 等）。
 3. 恢复时，runsc 拿这份路径树去 walk **目标 actor 的卷**。目标卷是空的（新用户）或
    内容不同（老用户），于是：
@@ -74,9 +74,9 @@
 
 ```yaml
 - name: HOME
-  value: /data/pi-agent/home
+  value: /data/home
 - name: XDG_CONFIG_HOME
-  value: /data/pi-agent/config
+  value: /data/config
 ```
 
 supervisor 启动时：
@@ -125,16 +125,16 @@ mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
 
 | 路径 | suspend/resume | delete+recreate（同镜像） | **镜像更新** |
 |---|---|---|---|
-| `/data/pi-agent/*`（auth.json、sessions、skills、projects.json…） | ✅ | ✅ | ✅ |
-| `$HOME` = `/data/pi-agent/home`（含 `.pi/packages`、`.npm`） | ✅ | ✅ | ✅ |
-| `$XDG_CONFIG_HOME` = `/data/pi-agent/config` | ✅ | ✅ | ✅ |
-| `/data/pi-agent/projects/*`（推荐的项目根） | ✅ | ✅ | ✅ |
+| `/data/*`（auth.json、sessions、skills、projects.json…） | ✅ | ✅ | ✅ |
+| `$HOME` = `/data/home`（含 `.pi/packages`、`.npm`） | ✅ | ✅ | ✅ |
+| `$XDG_CONFIG_HOME` = `/data/config` | ✅ | ✅ | ✅ |
+| `/data/projects/*`（推荐的项目根） | ✅ | ✅ | ✅ |
 | project cwd 在持久面之外（如 `/dtom2`） | ✅ | ⚠️ 只重建空目录 | ❌ |
 | `/usr`、`/opt`、`/etc`、`/data` 其他子目录、`/tmp` | 随快照 | ❌ | ❌ |
 | 管理员托管 skill | ✅ | ✅（10s 自愈） | ✅ |
 
-项目路径指引：在 UI 里新建 project 时请把路径放在 `$HOME`（`/data/pi-agent/home`）
-或 `/data/pi-agent` 下；否则 supervisor 只会 `mkdir -p` 重建空目录并打 warning。
+项目路径指引：在 UI 里新建 project 时请把路径放在 `$HOME`（`/data/home`）
+或 `/data` 下；否则 supervisor 只会 `mkdir -p` 重建空目录并打 warning。
 
 ## 5. 仍然存在的限制（需要上游修复）
 

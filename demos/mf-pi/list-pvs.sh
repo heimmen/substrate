@@ -5,12 +5,12 @@
 # Each mf-pi actor's userdata external volume is a sticky volume: the control
 # plane keeps a per-actor directory on the kind node under
 # /var/lib/ateom-gvisor/stickyvolumes/<prefix>-<actor>-userdata and mounts it
-# at /data/pi-agent inside the actor. That directory holds everything pi-web
+# at /data inside the actor. That directory holds everything pi-web
 # persists for the user: auth.json (provider credentials), projects.json,
 # sessions/ (chat history), skills/, settings.json, plus the redirected
 # $HOME in home/ (including user-installed Pi packages/skills under
 # home/.pi/packages) and $XDG_CONFIG_HOME in config/. Anything outside
-# /data/pi-agent is ephemeral sandbox overlay and does not survive an actor
+# /data is ephemeral sandbox overlay and does not survive an actor
 # image update (see docs/persistence_gaps.md).
 #
 # Usage:
@@ -86,7 +86,7 @@ actor_status() {
 }
 
 echo "mf-pi persistent volumes (node: $NODE, atespace: $ATESPACE)"
-echo "path: $STICKY_DIR/<volume>  (mounted at /data/pi-agent inside the actor)"
+echo "path: $STICKY_DIR/<volume>  (mounted at /data inside the actor)"
 echo
 
 # Column headers.
