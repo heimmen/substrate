@@ -67,6 +67,22 @@ docker push localhost:5001/pause:3.10.2
 
 ### 2. 部署
 
+部署时会**先把 workload 源码更新到上游**（默认 `/home/liuchong/git/miaofang-agent`
+的 `origin/main`），再决定是否构建镜像：
+
+```bash
+# 默认：fetch --prune origin <branch> + merge --ff-only，失败即中止（不构建可能过期的镜像）
+./deploy.sh
+MFPI_SKIP_WORKLOAD_BUILD=1 ./deploy.sh   # 跳过镜像构建，但仍然会更新源码
+MFPI_SKIP_GIT_PULL=1      ./deploy.sh    # 完全不碰 checkout（离线 / 固定版本构建）
+MFPI_WORKLOAD_REMOTE=upstream MFPI_WORKLOAD_BRANCH=dev ./deploy.sh   # 换远端/分支
+```
+
+> **为什么单独成一步**：这个 pull 以前写在 `build_workload_image()` 里面，而该函数在
+> `MFPI_SKIP_WORKLOAD_BUILD=1` 时**第一行就 return**，于是"跳过构建"会连带跳过拉代码，
+> 看起来就像"deploy 不会拉最新代码"。现在 pull 在 `resolve_images()` 里独立执行，
+> 与是否构建解耦，并且始终打印更新到的 commit。
+
 在 `demos/mf-pi` 目录下运行 `./deploy.sh`。所有配置均为可选，未设置时回退到
 kind/离线友好的默认值（`KO_DOCKER_REPO=localhost:5001`、
 `BUCKET_NAME=ate-snapshots`、`MFPI_WORKER_REPLICAS_SMALL=48`）。`DEEPSEEK_API_KEY` 未

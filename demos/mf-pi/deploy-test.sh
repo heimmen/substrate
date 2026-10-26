@@ -32,8 +32,14 @@
 #                          sticky userdata volumes are node-local)
 #   MFPI_SKIP_NGINX      (set 1 to skip recreating the mfpi-nginx-test gateway
 #                          on 59681 after the cluster deploy)
-#   MFPI_SKIP_GIT_PULL   (set 1 to NOT 'git pull' /home/liuchong/git/miaofang-agent
-#                          before building; default builds the latest origin code)
+#   MFPI_SKIP_GIT_PULL   (set 1 to leave the miaofang-agent checkout untouched;
+#                          default updates it to its upstream on every deploy,
+#                          independent of MFPI_SKIP_WORKLOAD_BUILD)
+#   MFPI_WORKLOAD_SOURCE (checkout to build from; default
+#                          /home/liuchong/git/miaofang-agent)
+#   MFPI_WORKLOAD_REMOTE / MFPI_WORKLOAD_BRANCH
+#                        (what to pull; default: origin + the checkout's upstream,
+#                          falling back to main)
 #
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
@@ -129,6 +135,50 @@ render() {
 # to reuse an already-pushed image (offline/CI), and MFPI_WORKLOAD_SOURCE to point
 # at a different checkout. The result is tagged mf-agent:latest and pushed so
 # resolve_images below can pin its digest.
+# pull_workload_source updates the miaofang-agent checkout to its upstream before
+# anything is built. It is a separate step on purpose: the pull used to live inside
+# build_workload_image(), so MFPI_SKIP_WORKLOAD_BUILD=1 returned before reaching it
+# and a deploy silently left the checkout stale — which looks exactly like "deploy
+# does not pull latest".
+#
+# Knobs:
+#   MFPI_SKIP_GIT_PULL=1     do not touch the checkout (offline / pinned build)
+#   MFPI_WORKLOAD_SOURCE     checkout path (default /home/liuchong/git/miaofang-agent)
+#   MFPI_WORKLOAD_REMOTE     remote to pull from (default origin)
+#   MFPI_WORKLOAD_BRANCH     branch to pull (default: the checkout's upstream, else main)
+pull_workload_source() {
+  local src="${MFPI_WORKLOAD_SOURCE:-/home/liuchong/git/miaofang-agent}"
+  if [[ "${MFPI_SKIP_GIT_PULL:-0}" == "1" ]]; then
+    echo "MFPI_SKIP_GIT_PULL=1: not updating ${src}; using whatever is checked out."
+    return 0
+  fi
+  if [[ ! -d "${src}" ]] || ! git -C "${src}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "note: ${src} is not a git checkout; using it as-is."
+    return 0
+  fi
+  local remote="${MFPI_WORKLOAD_REMOTE:-origin}"
+  local branch="${MFPI_WORKLOAD_BRANCH:-}"
+  if [[ -z "${branch}" ]]; then
+    branch="$(git -C "${src}" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+    branch="${branch##*/}"
+    [[ -z "${branch}" ]] && branch="main"
+  fi
+  echo "updating ${src} to ${remote}/${branch} ..."
+  if ! git -C "${src}" fetch --prune "${remote}" "${branch}"; then
+    echo "ERROR: could not fetch ${remote}/${branch} for '${src}'; refusing to build a" >&2
+    echo "  possibly-stale workload image. Fix the checkout, or set MFPI_SKIP_GIT_PULL=1" >&2
+    echo "  to build the currently checked-out code anyway." >&2
+    return 1
+  fi
+  if ! git -C "${src}" merge --ff-only "${remote}/${branch}"; then
+    echo "ERROR: '${src}' cannot fast-forward to ${remote}/${branch} (local commits or" >&2
+    echo "  diverged history). Merge/rebase it yourself, or set MFPI_SKIP_GIT_PULL=1 to" >&2
+    echo "  build the currently checked-out code." >&2
+    return 1
+  fi
+  echo "  ${src} now at $(git -C "${src}" rev-parse --short HEAD) $(git -C "${src}" log -1 --format='%s')"
+}
+
 build_workload_image() {
   local repo="${KO_DOCKER_REPO}"
   if [[ "${MFPI_SKIP_WORKLOAD_BUILD:-0}" == "1" ]]; then
@@ -141,20 +191,8 @@ build_workload_image() {
     echo "  set MFPI_SKIP_WORKLOAD_BUILD=1 to use the already-pushed mf-agent image" >&2
     return 1
   fi
-  # Always pull the latest miaofang-agent code before building, so a deploy picks
-  # up upstream changes instead of stale files already checked out on this host.
-  # Only runs when the source is a git repository; skip it explicitly (offline /
-  # CI / intentional local-only build) with MFPI_SKIP_GIT_PULL=1. A failed pull
-  # aborts the deploy because we can no longer guarantee we built "latest".
-  if [[ "${MFPI_SKIP_GIT_PULL:-0}" != "1" ]] && git -C "${src}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "pulling latest miaofang-agent from origin into ${src} ..."
-    if ! git -C "${src}" pull --ff-only 2>&1; then
-      echo "ERROR: could not pull latest code from '${src}' (see above); refusing to build a" >&2
-      echo "  possibly-stale workload image. Run 'git -C ${src} pull' manually, or set" >&2
-      echo "  MFPI_SKIP_GIT_PULL=1 to build the currently checked-out code anyway." >&2
-      return 1
-    fi
-  fi
+  # The checkout is updated by pull_workload_source() (called from
+  # resolve_images), so it happens even when this build is skipped.
   echo "building workload image from ${src} (latest source) ..."
   ( cd "${src}" && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source ) \
     || { echo "workload image build failed (from ${src})" >&2; return 1; }
@@ -166,6 +204,7 @@ build_workload_image() {
 resolve_images() {
   local repo="${KO_DOCKER_REPO}"
   local piweb pause
+  pull_workload_source || return 1
   build_workload_image || return 1
   piweb="$(docker inspect "${repo}/mf-agent:latest" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
   pause="$(docker inspect "${repo}/pause:3.10.2" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
