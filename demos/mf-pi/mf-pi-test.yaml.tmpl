@@ -197,14 +197,14 @@ spec:
       # mounted at /data/pi-agent). projects.json and session files store absolute
       # cwds; left alone they point at a path that no longer exists, and the
       # recovery loop below would recreate it as an EMPTY directory while the real
-      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      # files sit at the migrated path. One-shot: a marker file stops rescans (v3 adds the session-dir rename).
       node -e '
         const fs = require("fs");
         const path = require("path");
         const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
         const from = "/data/pi-agent/";
         const to = "/data/";
-        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        const marker = path.join(dataDir, ".mfpi-layout-v3");
         try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
         let files = 0;
         const rewriteJson = (file) => {
@@ -243,11 +243,42 @@ spec:
             } catch (e) {}
           }
         };
+        // pi-web names each session directory after its cwd ("/" -> "-", wrapped
+        // in "--"), so moving the volume from /data/pi-agent to /data leaves those
+        // directories under the OLD slug: the app then lists zero sessions for the
+        // new cwd and the UI hangs on its loading state. Rename them (merging when
+        // the target already exists).
+        const renameCwdDirs = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (!st.isDirectory()) continue;
+            renameCwdDirs(f);
+            if (!name.startsWith("--data-pi-agent-")) continue;
+            const target = path.join(dir, "--data-" + name.slice("--data-pi-agent-".length));
+            try {
+              if (fs.existsSync(target)) {
+                for (const child of fs.readdirSync(f)) {
+                  try { fs.renameSync(path.join(f, child), path.join(target, child)); } catch (e) {}
+                }
+                try { fs.rmdirSync(f); } catch (e) {}
+              } else {
+                fs.renameSync(f, target);
+              }
+              files++;
+            } catch (e) {}
+          }
+        };
         rewriteJson(path.join(dataDir, "projects.json"));
         rewriteJson(path.join(dataDir, "archived-sessions.json"));
         rewriteJsonl(path.join(dataDir, "sessions"));
         rewriteJsonl(path.join(dataDir, "archived-sessions"));
         rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        renameCwdDirs(path.join(dataDir, "sessions"));
+        renameCwdDirs(path.join(dataDir, "archived-sessions"));
         try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
         if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
       '
@@ -654,14 +685,14 @@ spec:
       # mounted at /data/pi-agent). projects.json and session files store absolute
       # cwds; left alone they point at a path that no longer exists, and the
       # recovery loop below would recreate it as an EMPTY directory while the real
-      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      # files sit at the migrated path. One-shot: a marker file stops rescans (v3 adds the session-dir rename).
       node -e '
         const fs = require("fs");
         const path = require("path");
         const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
         const from = "/data/pi-agent/";
         const to = "/data/";
-        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        const marker = path.join(dataDir, ".mfpi-layout-v3");
         try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
         let files = 0;
         const rewriteJson = (file) => {
@@ -700,11 +731,42 @@ spec:
             } catch (e) {}
           }
         };
+        // pi-web names each session directory after its cwd ("/" -> "-", wrapped
+        // in "--"), so moving the volume from /data/pi-agent to /data leaves those
+        // directories under the OLD slug: the app then lists zero sessions for the
+        // new cwd and the UI hangs on its loading state. Rename them (merging when
+        // the target already exists).
+        const renameCwdDirs = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (!st.isDirectory()) continue;
+            renameCwdDirs(f);
+            if (!name.startsWith("--data-pi-agent-")) continue;
+            const target = path.join(dir, "--data-" + name.slice("--data-pi-agent-".length));
+            try {
+              if (fs.existsSync(target)) {
+                for (const child of fs.readdirSync(f)) {
+                  try { fs.renameSync(path.join(f, child), path.join(target, child)); } catch (e) {}
+                }
+                try { fs.rmdirSync(f); } catch (e) {}
+              } else {
+                fs.renameSync(f, target);
+              }
+              files++;
+            } catch (e) {}
+          }
+        };
         rewriteJson(path.join(dataDir, "projects.json"));
         rewriteJson(path.join(dataDir, "archived-sessions.json"));
         rewriteJsonl(path.join(dataDir, "sessions"));
         rewriteJsonl(path.join(dataDir, "archived-sessions"));
         rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        renameCwdDirs(path.join(dataDir, "sessions"));
+        renameCwdDirs(path.join(dataDir, "archived-sessions"));
         try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
         if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
       '
@@ -1112,14 +1174,14 @@ spec:
       # mounted at /data/pi-agent). projects.json and session files store absolute
       # cwds; left alone they point at a path that no longer exists, and the
       # recovery loop below would recreate it as an EMPTY directory while the real
-      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      # files sit at the migrated path. One-shot: a marker file stops rescans (v3 adds the session-dir rename).
       node -e '
         const fs = require("fs");
         const path = require("path");
         const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
         const from = "/data/pi-agent/";
         const to = "/data/";
-        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        const marker = path.join(dataDir, ".mfpi-layout-v3");
         try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
         let files = 0;
         const rewriteJson = (file) => {
@@ -1158,11 +1220,42 @@ spec:
             } catch (e) {}
           }
         };
+        // pi-web names each session directory after its cwd ("/" -> "-", wrapped
+        // in "--"), so moving the volume from /data/pi-agent to /data leaves those
+        // directories under the OLD slug: the app then lists zero sessions for the
+        // new cwd and the UI hangs on its loading state. Rename them (merging when
+        // the target already exists).
+        const renameCwdDirs = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (!st.isDirectory()) continue;
+            renameCwdDirs(f);
+            if (!name.startsWith("--data-pi-agent-")) continue;
+            const target = path.join(dir, "--data-" + name.slice("--data-pi-agent-".length));
+            try {
+              if (fs.existsSync(target)) {
+                for (const child of fs.readdirSync(f)) {
+                  try { fs.renameSync(path.join(f, child), path.join(target, child)); } catch (e) {}
+                }
+                try { fs.rmdirSync(f); } catch (e) {}
+              } else {
+                fs.renameSync(f, target);
+              }
+              files++;
+            } catch (e) {}
+          }
+        };
         rewriteJson(path.join(dataDir, "projects.json"));
         rewriteJson(path.join(dataDir, "archived-sessions.json"));
         rewriteJsonl(path.join(dataDir, "sessions"));
         rewriteJsonl(path.join(dataDir, "archived-sessions"));
         rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        renameCwdDirs(path.join(dataDir, "sessions"));
+        renameCwdDirs(path.join(dataDir, "archived-sessions"));
         try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
         if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
       '
@@ -1570,14 +1663,14 @@ spec:
       # mounted at /data/pi-agent). projects.json and session files store absolute
       # cwds; left alone they point at a path that no longer exists, and the
       # recovery loop below would recreate it as an EMPTY directory while the real
-      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      # files sit at the migrated path. One-shot: a marker file stops rescans (v3 adds the session-dir rename).
       node -e '
         const fs = require("fs");
         const path = require("path");
         const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
         const from = "/data/pi-agent/";
         const to = "/data/";
-        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        const marker = path.join(dataDir, ".mfpi-layout-v3");
         try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
         let files = 0;
         const rewriteJson = (file) => {
@@ -1616,11 +1709,42 @@ spec:
             } catch (e) {}
           }
         };
+        // pi-web names each session directory after its cwd ("/" -> "-", wrapped
+        // in "--"), so moving the volume from /data/pi-agent to /data leaves those
+        // directories under the OLD slug: the app then lists zero sessions for the
+        // new cwd and the UI hangs on its loading state. Rename them (merging when
+        // the target already exists).
+        const renameCwdDirs = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (!st.isDirectory()) continue;
+            renameCwdDirs(f);
+            if (!name.startsWith("--data-pi-agent-")) continue;
+            const target = path.join(dir, "--data-" + name.slice("--data-pi-agent-".length));
+            try {
+              if (fs.existsSync(target)) {
+                for (const child of fs.readdirSync(f)) {
+                  try { fs.renameSync(path.join(f, child), path.join(target, child)); } catch (e) {}
+                }
+                try { fs.rmdirSync(f); } catch (e) {}
+              } else {
+                fs.renameSync(f, target);
+              }
+              files++;
+            } catch (e) {}
+          }
+        };
         rewriteJson(path.join(dataDir, "projects.json"));
         rewriteJson(path.join(dataDir, "archived-sessions.json"));
         rewriteJsonl(path.join(dataDir, "sessions"));
         rewriteJsonl(path.join(dataDir, "archived-sessions"));
         rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        renameCwdDirs(path.join(dataDir, "sessions"));
+        renameCwdDirs(path.join(dataDir, "archived-sessions"));
         try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
         if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
       '

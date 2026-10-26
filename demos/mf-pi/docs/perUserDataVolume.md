@@ -185,3 +185,18 @@
 - 只在真的有文件被改写时打日志：`mf-pi: migrated legacy /data/pi-agent paths in N file(s)`。
 
 `validate-templates.sh` 断言该迁移段存在，防止以后被误删。
+
+### 会话目录名也要迁移（v3）
+
+pi-web 把每个会话会话目录按 **cwd 的 slug** 命名（`/data/home/workspaces/x` →
+`--data-home-workspaces-x--`）。布局变更后这些目录仍带旧前缀
+（`--data-pi-agent-home-workspaces-x--`），于是**新 cwd 下查不到任何会话**：
+`/api/sessions?cwd=...` 返回空、前端一直停在加载态（浏览器同时还会请求旧 cwd，
+应用返回 404）。
+
+因此迁移多做一步：把 `sessions/`、`archived-sessions/` 下的
+`--data-pi-agent-*--` 目录改名为 `--data-*--`（目标已存在时合并内容）。标记文件
+随之升级为 `.mfpi-layout-v3`，让已迁移过的卷再跑一次补做改名。
+
+线上发生过一次：6 个用户、16 个目录受影响，手工改名后会话立刻恢复
+（chenjia 的 `/data/temp-sessions` 回到 49 个会话）。
