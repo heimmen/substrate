@@ -101,6 +101,11 @@ for at in atl_all:
         (at["metadata"]["name"], "durable HOME mkdir missing")
     assert 'cp -an /data/home/.' not in script, (at["metadata"]["name"], "stale HOME seed copy came back")
     assert "mkdir -p /data/projects" in script, (at["metadata"]["name"], "projects dir missing")
+    # Persisted projects.json / session files still carry absolute cwds; the
+    # supervisor must migrate the legacy /data/pi-agent prefix at boot, or the
+    # recovery loop below recreates those paths as empty directories.
+    assert "migrated legacy /data/pi-agent paths" in script, \
+        (at["metadata"]["name"], "legacy path migration missing")
     assert "outside the durable volume" in script, (at["metadata"]["name"], "project cwd warning missing")
     # Managed-skills pull loop: PI_WEB_SKILLS_URL set (pointing at the admin's
     # /internal/skills base) and the supervisor script contains the 10s loop.

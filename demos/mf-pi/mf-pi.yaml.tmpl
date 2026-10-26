@@ -186,6 +186,64 @@ spec:
       # The volume now *is* /data, so the image's baked-in /data/home seed is
       # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      # Migrate absolute paths persisted by the previous layout (userdata volume
+      # mounted at /data/pi-agent). projects.json and session files store absolute
+      # cwds; left alone they point at a path that no longer exists, and the
+      # recovery loop below would recreate it as an EMPTY directory while the real
+      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      node -e '
+        const fs = require("fs");
+        const path = require("path");
+        const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
+        const from = "/data/pi-agent/";
+        const to = "/data/";
+        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
+        let files = 0;
+        const rewriteJson = (file) => {
+          try {
+            const raw = fs.readFileSync(file, "utf8");
+            if (!raw.includes(from)) return;
+            const doc = JSON.parse(raw);
+            const walk = (o) => {
+              if (Array.isArray(o)) { o.forEach(walk); return; }
+              if (!o || typeof o !== "object") return;
+              for (const k of Object.keys(o)) {
+                const v = o[k];
+                if (typeof v === "string") { if (v.includes(from)) o[k] = v.split(from).join(to); }
+                else walk(v);
+              }
+            };
+            walk(doc);
+            fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+            files++;
+          } catch (e) {}
+        };
+        const rewriteJsonl = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (st.isDirectory()) { rewriteJsonl(f); continue; }
+            if (!name.endsWith(".jsonl")) continue;
+            try {
+              const raw = fs.readFileSync(f, "utf8");
+              if (!raw.includes(from)) continue;
+              fs.writeFileSync(f, raw.split(from).join(to));
+              files++;
+            } catch (e) {}
+          }
+        };
+        rewriteJson(path.join(dataDir, "projects.json"));
+        rewriteJson(path.join(dataDir, "archived-sessions.json"));
+        rewriteJsonl(path.join(dataDir, "sessions"));
+        rewriteJsonl(path.join(dataDir, "archived-sessions"));
+        rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
+        if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
+      '
 
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data (externalVolumeTemplate
@@ -561,6 +619,64 @@ spec:
       # The volume now *is* /data, so the image's baked-in /data/home seed is
       # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      # Migrate absolute paths persisted by the previous layout (userdata volume
+      # mounted at /data/pi-agent). projects.json and session files store absolute
+      # cwds; left alone they point at a path that no longer exists, and the
+      # recovery loop below would recreate it as an EMPTY directory while the real
+      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      node -e '
+        const fs = require("fs");
+        const path = require("path");
+        const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
+        const from = "/data/pi-agent/";
+        const to = "/data/";
+        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
+        let files = 0;
+        const rewriteJson = (file) => {
+          try {
+            const raw = fs.readFileSync(file, "utf8");
+            if (!raw.includes(from)) return;
+            const doc = JSON.parse(raw);
+            const walk = (o) => {
+              if (Array.isArray(o)) { o.forEach(walk); return; }
+              if (!o || typeof o !== "object") return;
+              for (const k of Object.keys(o)) {
+                const v = o[k];
+                if (typeof v === "string") { if (v.includes(from)) o[k] = v.split(from).join(to); }
+                else walk(v);
+              }
+            };
+            walk(doc);
+            fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+            files++;
+          } catch (e) {}
+        };
+        const rewriteJsonl = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (st.isDirectory()) { rewriteJsonl(f); continue; }
+            if (!name.endsWith(".jsonl")) continue;
+            try {
+              const raw = fs.readFileSync(f, "utf8");
+              if (!raw.includes(from)) continue;
+              fs.writeFileSync(f, raw.split(from).join(to));
+              files++;
+            } catch (e) {}
+          }
+        };
+        rewriteJson(path.join(dataDir, "projects.json"));
+        rewriteJson(path.join(dataDir, "archived-sessions.json"));
+        rewriteJsonl(path.join(dataDir, "sessions"));
+        rewriteJsonl(path.join(dataDir, "archived-sessions"));
+        rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
+        if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
+      '
 
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data (externalVolumeTemplate
@@ -937,6 +1053,64 @@ spec:
       # The volume now *is* /data, so the image's baked-in /data/home seed is
       # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      # Migrate absolute paths persisted by the previous layout (userdata volume
+      # mounted at /data/pi-agent). projects.json and session files store absolute
+      # cwds; left alone they point at a path that no longer exists, and the
+      # recovery loop below would recreate it as an EMPTY directory while the real
+      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      node -e '
+        const fs = require("fs");
+        const path = require("path");
+        const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
+        const from = "/data/pi-agent/";
+        const to = "/data/";
+        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
+        let files = 0;
+        const rewriteJson = (file) => {
+          try {
+            const raw = fs.readFileSync(file, "utf8");
+            if (!raw.includes(from)) return;
+            const doc = JSON.parse(raw);
+            const walk = (o) => {
+              if (Array.isArray(o)) { o.forEach(walk); return; }
+              if (!o || typeof o !== "object") return;
+              for (const k of Object.keys(o)) {
+                const v = o[k];
+                if (typeof v === "string") { if (v.includes(from)) o[k] = v.split(from).join(to); }
+                else walk(v);
+              }
+            };
+            walk(doc);
+            fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+            files++;
+          } catch (e) {}
+        };
+        const rewriteJsonl = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (st.isDirectory()) { rewriteJsonl(f); continue; }
+            if (!name.endsWith(".jsonl")) continue;
+            try {
+              const raw = fs.readFileSync(f, "utf8");
+              if (!raw.includes(from)) continue;
+              fs.writeFileSync(f, raw.split(from).join(to));
+              files++;
+            } catch (e) {}
+          }
+        };
+        rewriteJson(path.join(dataDir, "projects.json"));
+        rewriteJson(path.join(dataDir, "archived-sessions.json"));
+        rewriteJsonl(path.join(dataDir, "sessions"));
+        rewriteJsonl(path.join(dataDir, "archived-sessions"));
+        rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
+        if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
+      '
 
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data (externalVolumeTemplate
@@ -1313,6 +1487,64 @@ spec:
       # The volume now *is* /data, so the image's baked-in /data/home seed is
       # unreachable and there is nothing to copy.
       mkdir -p "$HOME" "${XDG_CONFIG_HOME:-$HOME/.config}"
+      # Migrate absolute paths persisted by the previous layout (userdata volume
+      # mounted at /data/pi-agent). projects.json and session files store absolute
+      # cwds; left alone they point at a path that no longer exists, and the
+      # recovery loop below would recreate it as an EMPTY directory while the real
+      # files sit at the migrated path. One-shot: a marker file stops rescans.
+      node -e '
+        const fs = require("fs");
+        const path = require("path");
+        const dataDir = process.env.PI_WEB_DATA_DIR || "/data";
+        const from = "/data/pi-agent/";
+        const to = "/data/";
+        const marker = path.join(dataDir, ".mfpi-layout-v2");
+        try { if (fs.existsSync(marker)) process.exit(0); } catch (e) {}
+        let files = 0;
+        const rewriteJson = (file) => {
+          try {
+            const raw = fs.readFileSync(file, "utf8");
+            if (!raw.includes(from)) return;
+            const doc = JSON.parse(raw);
+            const walk = (o) => {
+              if (Array.isArray(o)) { o.forEach(walk); return; }
+              if (!o || typeof o !== "object") return;
+              for (const k of Object.keys(o)) {
+                const v = o[k];
+                if (typeof v === "string") { if (v.includes(from)) o[k] = v.split(from).join(to); }
+                else walk(v);
+              }
+            };
+            walk(doc);
+            fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+            files++;
+          } catch (e) {}
+        };
+        const rewriteJsonl = (dir) => {
+          let names = [];
+          try { names = fs.readdirSync(dir); } catch (e) { return; }
+          for (const name of names) {
+            const f = path.join(dir, name);
+            let st;
+            try { st = fs.statSync(f); } catch (e) { continue; }
+            if (st.isDirectory()) { rewriteJsonl(f); continue; }
+            if (!name.endsWith(".jsonl")) continue;
+            try {
+              const raw = fs.readFileSync(f, "utf8");
+              if (!raw.includes(from)) continue;
+              fs.writeFileSync(f, raw.split(from).join(to));
+              files++;
+            } catch (e) {}
+          }
+        };
+        rewriteJson(path.join(dataDir, "projects.json"));
+        rewriteJson(path.join(dataDir, "archived-sessions.json"));
+        rewriteJsonl(path.join(dataDir, "sessions"));
+        rewriteJsonl(path.join(dataDir, "archived-sessions"));
+        rewriteJsonl(path.join(dataDir, "temp-sessions"));
+        try { fs.writeFileSync(marker, new Date().toISOString()); } catch (e) {}
+        if (files > 0) console.log("mf-pi: migrated legacy /data/pi-agent paths in " + files + " file(s)");
+      '
 
       # Single-container supervisor (sessiond + web). User data lives on
       # the userdata volume mounted at /data (externalVolumeTemplate

@@ -171,3 +171,17 @@
 - 镜像自带 `/data/home` 的种子拷贝逻辑已删除 —— 卷就是 `/data`，`HOME` 即
   `/data/home`，那段拷贝会拷贝自身，已无意义（代价：镜像烘焙的 npm 缓存种子丢失，
   首次装包重新下载）。
+### 旧绝对路径的一次性迁移
+
+卷里的 `projects.json` 与 `sessions/*.jsonl` 记录的是**绝对 cwd**。布局变更后这些值仍是
+`/data/pi-agent/...`：该路径已不存在，而 supervisor 的"项目 cwd 恢复"循环会把它
+**重建成空目录**，导致用户打开项目看到空工作区（真实文件在迁移后的 `/data/...`）。
+
+因此 supervisor 在**启动最早期**（sessiond 之前）跑一次迁移：
+
+- 改写 `projects.json` / `archived-sessions.json` 里的字符串值、以及
+  `sessions`、`archived-sessions`、`temp-sessions` 下 `.jsonl` 中的 `/data/pi-agent/` 前缀；
+- 用标记文件 `<PI_WEB_DATA_DIR>/.mfpi-layout-v2` 保证只扫一次（后续每次 resume 不再扫）；
+- 只在真的有文件被改写时打日志：`mf-pi: migrated legacy /data/pi-agent paths in N file(s)`。
+
+`validate-templates.sh` 断言该迁移段存在，防止以后被误删。
