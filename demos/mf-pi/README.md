@@ -724,7 +724,7 @@ CPU —— 对「大部分时间空闲」的 agent 负载这是刻意的取舍�
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MFPI_IDLE_TIMEOUT` | `90m` | 多久无输入挂起 |
-| `MFPI_IDLE_TIERS` | `small,mid` | 生效档位；**`off` = 关闭** |
+| `MFPI_IDLE_TIERS` | **`off`** | 生效档位；默认关闭（见下方注意）；`small,mid` 可打开 |
 
 ```bash
 MFPI_IDLE_TIERS=off ./deploy.sh      # 关闭自动挂起（推荐，可复现）
@@ -733,6 +733,13 @@ MFPI_IDLE_TIMEOUT=30m ./deploy.sh    # 改成 30 分钟，档位保持默认
 ```
 
 > [!WARNING]
+> [!WARNING]
+> **默认是关闭的**：当前「挂起后恢复」在每用户外部卷上不可用 —— `Data` 快照连挂起都会失败
+> （`no durable-dir volumes found for DATA snapshot`，actor 卡在 `SUSPENDING`），`Full` 快照能挂起
+> 但恢复时 runsc 报 `inconsistent private memory files on restore`，actor 卡在 `RESUMING`。
+> 唯一可靠的恢复方式是 `delete + create + resume --boot`（`refresh-actor.sh` 就是这么做的）。
+> 因此除非平台侧修好快照恢复，**不要**打开空闲自动挂起 —— 否则用户闲置 90 分钟后回来会连不上。
+
 > **不要用 `kubectl set env` 暂停它**：那只是改线上对象，下一次 `./deploy.sh`
 > 会按模板把 `small,mid` 写回去（本项目就发生过：06:17 暂停、15:23 被一次部署恢复）。
 > 另外 **`IDLE_TIERS` 设为空字符串并不会关闭**：容器里无法区分「空」与「未设置」，

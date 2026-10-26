@@ -595,6 +595,15 @@ spec:
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
+    #
+    # KNOWN LIMITATION: a suspended actor cannot simply be resumed. Data
+    # snapshots do not work at all with this volume setup (suspend fails with
+    # "no durable-dir volumes found for DATA snapshot" and wedges SUSPENDING),
+    # while Full snapshots suspend fine but fail on restore in runsc
+    # ("inconsistent private memory files on restore"). Recovery is
+    # delete+create+resume --boot, i.e. what refresh-actor.sh does. Therefore the
+    # idle auto-suspend sweep must stay OFF (IDLE_TIERS=off); see
+    # docs/persistence_gaps.md.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
@@ -1038,6 +1047,15 @@ spec:
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
+    #
+    # KNOWN LIMITATION: a suspended actor cannot simply be resumed. Data
+    # snapshots do not work at all with this volume setup (suspend fails with
+    # "no durable-dir volumes found for DATA snapshot" and wedges SUSPENDING),
+    # while Full snapshots suspend fine but fail on restore in runsc
+    # ("inconsistent private memory files on restore"). Recovery is
+    # delete+create+resume --boot, i.e. what refresh-actor.sh does. Therefore the
+    # idle auto-suspend sweep must stay OFF (IDLE_TIERS=off); see
+    # docs/persistence_gaps.md.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
@@ -1482,6 +1500,15 @@ spec:
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
+    #
+    # KNOWN LIMITATION: a suspended actor cannot simply be resumed. Data
+    # snapshots do not work at all with this volume setup (suspend fails with
+    # "no durable-dir volumes found for DATA snapshot" and wedges SUSPENDING),
+    # while Full snapshots suspend fine but fail on restore in runsc
+    # ("inconsistent private memory files on restore"). Recovery is
+    # delete+create+resume --boot, i.e. what refresh-actor.sh does. Therefore the
+    # idle auto-suspend sweep must stay OFF (IDLE_TIERS=off); see
+    # docs/persistence_gaps.md.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/
@@ -1926,6 +1953,15 @@ spec:
     # external volume is not part of the rootfs delta: user data persists on
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
+    #
+    # KNOWN LIMITATION: a suspended actor cannot simply be resumed. Data
+    # snapshots do not work at all with this volume setup (suspend fails with
+    # "no durable-dir volumes found for DATA snapshot" and wedges SUSPENDING),
+    # while Full snapshots suspend fine but fail on restore in runsc
+    # ("inconsistent private memory files on restore"). Recovery is
+    # delete+create+resume --boot, i.e. what refresh-actor.sh does. Therefore the
+    # idle auto-suspend sweep must stay OFF (IDLE_TIERS=off); see
+    # docs/persistence_gaps.md.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi/

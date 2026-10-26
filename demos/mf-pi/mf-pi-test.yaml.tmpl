@@ -603,6 +603,19 @@ spec:
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
     # snapshots live under a distinct prefix so they never collide with prod.
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see docs/save_userdata_pv.md).
+    #
+    # NOTE: Data snapshots do NOT work with this volume setup — suspend fails
+    # with "no durable-dir volumes found for DATA snapshot" and wedges the actor
+    # in SUSPENDING. Full snapshots suspend fine, but a plain resume restores
+    # process memory and fails in runsc ("inconsistent private memory files on
+    # restore"), so a suspended actor only comes back via delete+create+resume
+    # --boot (which is what refresh-actor.sh and recover-actors.sh do). Keep the
+    # idle auto-suspend sweep OFF (IDLE_TIERS=off) until the platform's snapshot
+    # restore supports external volumes.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi-test/
@@ -1047,6 +1060,19 @@ spec:
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
     # snapshots live under a distinct prefix so they never collide with prod.
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see docs/save_userdata_pv.md).
+    #
+    # NOTE: Data snapshots do NOT work with this volume setup — suspend fails
+    # with "no durable-dir volumes found for DATA snapshot" and wedges the actor
+    # in SUSPENDING. Full snapshots suspend fine, but a plain resume restores
+    # process memory and fails in runsc ("inconsistent private memory files on
+    # restore"), so a suspended actor only comes back via delete+create+resume
+    # --boot (which is what refresh-actor.sh and recover-actors.sh do). Keep the
+    # idle auto-suspend sweep OFF (IDLE_TIERS=off) until the platform's snapshot
+    # restore supports external volumes.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi-test/
@@ -1492,6 +1518,19 @@ spec:
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
     # snapshots live under a distinct prefix so they never collide with prod.
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see docs/save_userdata_pv.md).
+    #
+    # NOTE: Data snapshots do NOT work with this volume setup — suspend fails
+    # with "no durable-dir volumes found for DATA snapshot" and wedges the actor
+    # in SUSPENDING. Full snapshots suspend fine, but a plain resume restores
+    # process memory and fails in runsc ("inconsistent private memory files on
+    # restore"), so a suspended actor only comes back via delete+create+resume
+    # --boot (which is what refresh-actor.sh and recover-actors.sh do). Keep the
+    # idle auto-suspend sweep OFF (IDLE_TIERS=off) until the platform's snapshot
+    # restore supports external volumes.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi-test/
@@ -1937,6 +1976,19 @@ spec:
     # the node via the sticky volume and survives delete+recreate redeploys
     # (see docs/save_userdata_pv.md).
     # snapshots live under a distinct prefix so they never collide with prod.
+    # Full snapshots (process memory + filesystem delta). The userdata
+    # external volume is not part of the rootfs delta: user data persists on
+    # the node via the sticky volume and survives delete+recreate redeploys
+    # (see docs/save_userdata_pv.md).
+    #
+    # NOTE: Data snapshots do NOT work with this volume setup — suspend fails
+    # with "no durable-dir volumes found for DATA snapshot" and wedges the actor
+    # in SUSPENDING. Full snapshots suspend fine, but a plain resume restores
+    # process memory and fails in runsc ("inconsistent private memory files on
+    # restore"), so a suspended actor only comes back via delete+create+resume
+    # --boot (which is what refresh-actor.sh and recover-actors.sh do). Keep the
+    # idle auto-suspend sweep OFF (IDLE_TIERS=off) until the platform's snapshot
+    # restore supports external volumes.
     onPause: Full
     onCommit: Full
     location: gs://${BUCKET_NAME}/ate-demo-mf-pi-test/

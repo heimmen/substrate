@@ -91,7 +91,10 @@ fi
 # 0 disables the cookie; the browser's own Basic-Auth cache then decides again.
 MFPI_AUTH_COOKIE_TTL="${MFPI_AUTH_COOKIE_TTL-720m}"
 MFPI_IDLE_TIMEOUT="${MFPI_IDLE_TIMEOUT-90m}"
-MFPI_IDLE_TIERS="${MFPI_IDLE_TIERS-small,mid}"
+# Default OFF: resume from an actor snapshot is currently broken against the
+# per-actor external volume (see the snapshotsConfig note in the templates),
+# so suspending an idle actor strands the user on the next visit.
+MFPI_IDLE_TIERS="${MFPI_IDLE_TIERS-off}"
 if [ -z "${MFPI_IDLE_TIERS}" ]; then MFPI_IDLE_TIERS=off; fi
 # ko builds ateom-gvisor (and other Go images) on this offline-friendly base.
 export KO_DEFAULTBASEIMAGE="${KO_DEFAULTBASEIMAGE:-localhost:5001/distroless-static-debian13}"
