@@ -15,6 +15,7 @@ THIS IS A DEMO TOOL. Anyone who can pass the admin Basic Auth can run a deploy
 on this machine. Do not expose it beyond the demo host.
 """
 
+import errno
 import json
 import os
 import subprocess
@@ -406,15 +407,37 @@ PAGE = """<!doctype html>
 """
 
 
-def main():
+def main(argv):
+    # This file is the server process, not the CLI. People reasonably type
+    # `./cicd_server.py stop` (note the underscore) and the argument used to be
+    # ignored, so it tried to bind the port again and died with a raw
+    # "Address already in use" traceback. Point them at the wrapper instead.
+    if len(argv) > 1:
+        sys.stderr.write(
+            "cicd_server.py is the server process and takes no arguments.\n"
+            "Use the wrapper instead:\n"
+            "  ./cicd-server.sh start|stop|status|logs\n"
+            "(note the dash: cicd-server.sh, not cicd_server.py)\n")
+        return 2
     if not os.path.exists(os.path.join(DEMO_DIR, "deploy.sh")):
-        sys.exit("deploy.sh not found next to this script (%s)" % DEMO_DIR)
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        sys.stderr.write("deploy.sh not found next to this script (%s)\n" % DEMO_DIR)
+        return 1
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as exc:
+        if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+            sys.stderr.write(
+                "cannot listen on 127.0.0.1:%d (%s).\n"
+                "Another instance is probably already serving this page; check with:\n"
+                "  ./cicd-server.sh status\n" % (PORT, exc.strerror))
+            return 1
+        raise
     srv.daemon_threads = True
     print("mfpi-cicd listening on http://127.0.0.1:%d/ (execute %s in %s)"
           % (PORT, SCRIPT, DEMO_DIR), flush=True)
     srv.serve_forever()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv))

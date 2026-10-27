@@ -864,6 +864,10 @@ http://<host>:58681/_cicd_        # 生产网关（测试环境为 :59681）
 进程 `cicd_server.py` 提供，nginx 用 `/_cicd_` 反代到 `127.0.0.1:58690` 并复用
 同一份 htpasswd（`nginx.conf` / `nginx-test.conf` 里的 `location ^~ /_cicd_/`）。
 
+
+> 名字容易打错：`cicd-server.sh`（**连字符**）是启停包装器；`cicd_server.py`（下划线）是
+> 服务进程本身、不接收参数。误把 `stop` 传给 .py 会（现在）直接提示改用包装器，
+> 而不是抛 `Address already in use`。
 ```bash
 cd demos/mf-pi
 ./cicd-server.sh start      # 启动（默认 ./deploy.sh）
