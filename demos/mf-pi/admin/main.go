@@ -398,6 +398,14 @@ type userSummary struct {
 	// HasPersonalKey reports whether the admin has stored a per-user provider
 	// API key for this user (shown as a badge in the UI).
 	HasPersonalKey bool `json:"hasPersonalKey"`
+	// HasDefaultKey/DefaultKeyProvider describe the deployment-wide key written by
+	// "apply to all users": users without a personal key inherit it.
+	HasDefaultKey      bool   `json:"hasDefaultKey"`
+	DefaultKeyProvider string `json:"defaultKeyProvider,omitempty"`
+	// KeySource is what the agent will actually use: "personal", "default" (the
+	// deployment-wide key) or "none". A user who was explicitly cleared reports
+	// "none" even while a default exists, which the UI must show as such.
+	KeySource string `json:"keySource"`
 	// PersonalKeyProvider is the provider id the stored key belongs to (empty
 	// when HasPersonalKey is false).
 	PersonalKeyProvider string `json:"personalKeyProvider"`
@@ -703,10 +711,17 @@ func (s *server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defaultKey, hasDefault := s.keys.Get(defaultKeyName)
+	hasDefault = hasDefault && !defaultKey.Cleared && defaultKey.APIKey != ""
 	users := make([]userSummary, 0, len(all))
 	for _, a := range all {
 		name := a.GetMetadata().GetName()
 		u := s.summarize(a)
+		u.HasDefaultKey = hasDefault
+		if hasDefault {
+			u.DefaultKeyProvider = defaultKey.ProviderID
+		}
+		u.KeySource = s.keySource(name)
 		if key, ok := s.keys.Get(name); ok {
 			u.HasPersonalKey = true
 			u.PersonalKeyProvider = key.ProviderID
@@ -1000,6 +1015,24 @@ func (s *server) providerIDList() string {
 // provider's environment variable, if any) before the Secret entry is purged,
 // so a failed logout leaves the Secret entry intact for a retry. Clearing a user
 // with no stored key is an idempotent success and never touches the actor.
+// keySource reports which credential the agent would use for the user: their own
+// ("personal"), the deployment default ("default"), or nothing ("none" — either no
+// key anywhere or an explicit clear that blocks inheritance).
+func (s *server) keySource(name string) string {
+	resolved, ok := s.keys.Resolve(name)
+	if !ok || resolved.APIKey == "" {
+		return "none"
+	}
+	if raw, hasRaw := s.keys.Get(name); hasRaw && !raw.Cleared && raw.APIKey != "" {
+		return "personal"
+	}
+	return "default"
+}
+
+// handleClearAPIKey forgets a user's credential. It records an explicit clear
+// marker instead of deleting the entry: with a deployment default in place,
+// deleting would make the user silently fall back to it, so "clear" would look
+// like it did nothing.
 func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name string) {
 	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
@@ -1015,7 +1048,7 @@ func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name 
 		if status.Code(err) == codes.NotFound {
 			// The actor is gone; there is nothing to log out of. Purge the
 			// stored key so the record matches (idempotent clear).
-			if err := s.keys.Delete(name); err != nil {
+			if err := s.keys.Set(name, providerKey{Cleared: true}); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除存储的 Key 失败: " + err.Error()})
 				return
 			}
@@ -1042,7 +1075,7 @@ func (s *server) handleClearAPIKey(w http.ResponseWriter, r *http.Request, name 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "清除失败，已保留存储的 Key（可重试）: " + err.Error()})
 		return
 	}
-	if err := s.keys.Delete(name); err != nil {
+	if err := s.keys.Set(name, providerKey{Cleared: true}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "已退出登录，但清除存储条目失败: " + err.Error()})
 		return
 	}
@@ -1196,7 +1229,9 @@ func (s *server) waitForRunning(ctx context.Context, name string) error {
 // caller: on any problem it returns a warning string (callers must succeed even
 // if key injection cannot run right now).
 func (s *server) injectStoredKey(ctx context.Context, name string, alreadyResumed bool) string {
-	key, ok := s.keys.Get(name)
+	// Resolve (not Get): a user without a personal key still gets the deployment
+	// default injected, which is how new users work out of the box.
+	key, ok := s.keys.Resolve(name)
 	if !ok {
 		return ""
 	}
@@ -1269,7 +1304,7 @@ func (s *server) reconcileKeys(ctx context.Context) {
 	}
 	for _, a := range resp.GetActors() {
 		name := a.GetMetadata().GetName()
-		key, ok := s.keys.Get(name)
+		key, ok := s.keys.Resolve(name)
 		if !ok {
 			continue
 		}

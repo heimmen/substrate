@@ -108,11 +108,14 @@ func (s *server) handleBatchAPIKeys(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "列出用户失败: " + err.Error()})
 		return
 	}
+	// nil names means "every user": that scope also updates the deployment default,
+	// so users created later inherit it instead of starting with no key.
+	allUsers := names == nil
 	if clear {
-		s.batchClearAPIKeys(ctx, w, targets, failed)
+		s.batchClearAPIKeys(ctx, w, targets, failed, allUsers)
 		return
 	}
-	s.batchSetAPIKeys(ctx, w, targets, failed, req)
+	s.batchSetAPIKeys(ctx, w, targets, failed, req, allUsers)
 }
 
 // normalizeBatchNames trims, de-duplicates and validates the explicit target
@@ -193,7 +196,7 @@ func (s *server) resolveBatchTargets(ctx context.Context, names []string) ([]bat
 // batchSetAPIKeys persists one key for every target, then injects it into the
 // reachable (RUNNING) actors. Store failures abort the whole batch; per-user
 // injection failures are reported but never roll back the stored credential.
-func (s *server) batchSetAPIKeys(ctx context.Context, w http.ResponseWriter, targets []batchTarget, failed []batchFailure, req batchAPIKeyRequest) {
+func (s *server) batchSetAPIKeys(ctx context.Context, w http.ResponseWriter, targets []batchTarget, failed []batchFailure, req batchAPIKeyRequest, allUsers bool) {
 	key := strings.TrimSpace(req.APIKey)
 	if key == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "apiKey 不能为空"})
@@ -222,9 +225,14 @@ func (s *server) batchSetAPIKeys(ctx context.Context, w http.ResponseWriter, tar
 		return
 	}
 
-	batch := make(map[string]providerKey, len(targets))
+	batch := make(map[string]providerKey, len(targets)+1)
 	for _, t := range targets {
 		batch[t.name] = providerKey{ProviderID: providerID, APIKey: key}
+	}
+	if allUsers {
+		// The default covers everyone who has no personal entry, including users
+		// created after this action.
+		batch[defaultKeyName] = providerKey{ProviderID: providerID, APIKey: key}
 	}
 	if err := s.keys.SetMany(batch); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 Key 失败: " + err.Error()})
@@ -318,16 +326,31 @@ func (s *server) applyOneKey(ctx context.Context, t batchTarget, providerID, api
 // batchClearAPIKeys deletes the stored credentials in one Secret write, then
 // logs out of the provider on every reachable RUNNING actor. Suspended users
 // have nothing to log out of, so they are reported as pending.
-func (s *server) batchClearAPIKeys(ctx context.Context, w http.ResponseWriter, targets []batchTarget, failed []batchFailure) {
+func (s *server) batchClearAPIKeys(ctx context.Context, w http.ResponseWriter, targets []batchTarget, failed []batchFailure, allUsers bool) {
 	storedNames := make([]string, 0, len(targets))
 	for _, t := range targets {
 		if t.hadPrevious {
 			storedNames = append(storedNames, t.name)
 		}
 	}
-	if err := s.keys.DeleteMany(storedNames); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除存储的 Key 失败: " + err.Error()})
-		return
+	if allUsers {
+		// Clearing everyone also removes the default, so nobody (and no future
+		// user) inherits anything.
+		if err := s.keys.DeleteMany(append(storedNames, defaultKeyName)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除存储的 Key 失败: " + err.Error()})
+			return
+		}
+	} else {
+		// Clearing a subset must survive the default: leave an explicit marker per
+		// target so Resolve does not fall back to it.
+		markers := make(map[string]providerKey, len(targets))
+		for _, t := range targets {
+			markers[t.name] = providerKey{Cleared: true}
+		}
+		if err := s.keys.SetMany(markers); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "清除存储的 Key 失败: " + err.Error()})
+			return
+		}
 	}
 
 	cleared, pending, applyFailed := s.clearBatchKeys(ctx, targets)

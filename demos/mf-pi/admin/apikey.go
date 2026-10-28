@@ -42,7 +42,14 @@ import (
 type providerKey struct {
 	ProviderID string `json:"providerId"`
 	APIKey     string `json:"apiKey"`
+	// Cleared records an explicit "this user has no key" so the deployment default
+	// is not inherited; without it, clearing one user would silently fall back.
+	Cleared bool `json:"cleared,omitempty"`
 }
+
+// defaultKeyName is the Secret entry that "apply to all users" writes. Users
+// without their own entry — including users created later — resolve to it.
+const defaultKeyName = "__default__"
 
 // parseStoredKey decodes one Secret value into a providerKey. Entries written
 // before multi-provider support hold a bare API key rather than JSON; those are
@@ -62,8 +69,13 @@ func parseStoredKey(raw string) providerKey {
 // keyStore persists per-user provider API keys. Implemented by secretKeyStore
 // in production and by a fake in tests.
 type keyStore interface {
-	// Get returns the stored credential for the user, and whether one exists.
+	// Get returns the credential stored FOR THE USER (no fallback), and whether one
+	// exists — including an explicit clear marker.
 	Get(name string) (key providerKey, ok bool)
+	// Resolve returns the credential that actually applies to the user: their own
+	// entry, else the deployment default written by "apply to all users". A user
+	// with an explicit clear marker resolves to nothing.
+	Resolve(name string) (key providerKey, ok bool)
 	// Set stores (overwrites) the credential for the user.
 	Set(name string, key providerKey) error
 	// Delete removes any stored credential for the user (idempotent).
@@ -125,6 +137,20 @@ func (s *secretKeyStore) Get(name string) (providerKey, bool) {
 	defer s.mu.RUnlock()
 	k, ok := s.data[name]
 	return k, ok
+}
+
+// Resolve implements keyStore: personal entry first, then the deployment default.
+func (s *secretKeyStore) Resolve(name string) (providerKey, bool) {
+	if k, ok := s.Get(name); ok {
+		if k.Cleared || k.APIKey == "" {
+			return providerKey{}, false
+		}
+		return k, true
+	}
+	if k, ok := s.Get(defaultKeyName); ok && !k.Cleared && k.APIKey != "" {
+		return k, true
+	}
+	return providerKey{}, false
 }
 
 func (s *secretKeyStore) Set(name string, key providerKey) error {

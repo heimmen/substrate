@@ -805,15 +805,28 @@
       var tr = document.createElement("tr");
       // 用户名链接到对应的 agent 页面：http://<hostname>:58681/<username>/
       var agentUrl = window.location.origin + "/" + encodeURIComponent(u.name) + "/";
-      // Key 徽标：显示该用户已存储 Key 的 provider 展示名，未设置则显示灰色未设置。
-      var keyProviderId = u.personalKeyProvider || "";
-      var keyProviderName = providerDisplayName(keyProviderId);
-      var keyBadge = u.hasPersonalKey ?
-        '<span class="badge green" title="' + esc(keyProviderName ?
-          "已为该用户存储 " + keyProviderName + " 的专属 API Key" :
-          "已为该用户存储专属 API Key") + '">' +
-        esc(keyProviderName || "已设置") + "</span>" :
-        '<span class="badge gray" title="未存储专属 Key，agent 将使用内置/环境变量凭据">未设置</span>';
+        // Key 徽标三态：专属 Key / 继承部署默认 Key（新建用户自动获得）/ 未设置。
+        var keyProviderId = u.personalKeyProvider || "";
+        var keyProviderName = providerDisplayName(keyProviderId);
+        var defaultProviderName = providerDisplayName(u.defaultKeyProvider || "");
+        // u.keySource 由服务端给出「实际生效」的来源：personal / default / none，
+        // 显式清除过的用户是 none（不会被默认 Key 顶回来）。
+        var keyBadge;
+        var src = u.keySource || (u.hasPersonalKey ? "personal" : (u.hasDefaultKey ? "default" : "none"));
+        if (src === "personal") {
+          keyBadge = '<span class="badge green" title="' + esc(keyProviderName ?
+            "已为该用户存储 " + keyProviderName + " 的专属 API Key" :
+            "已为该用户存储专属 API Key") + '">' +
+            esc(keyProviderName || "已设置") + "</span>";
+        } else if (src === "default") {
+          keyBadge = '<span class="badge blue" title="' + esc(
+            "该用户没有专属 Key，继承部署级默认 Key" +
+            (defaultProviderName ? "（" + defaultProviderName + "）" : "") +
+            "；在「模型设置 → 用户 API Key」里对“所有用户”保存的 Key 会作为默认，新建用户自动继承") +
+            '">默认' + esc(defaultProviderName ? "·" + defaultProviderName : "") + "</span>";
+        } else {
+          keyBadge = '<span class="badge gray" title="未存储专属 Key，也没有部署级默认 Key；agent 将使用内置/环境变量凭据">未设置</span>';
+        }
       var expiryCell = expiryDisplayHtml(u);
       var tierBadge = u.tier ?
         '<span class="badge blue" title="该用户的资源档位（作用于新建/重建，存量用户不变）">' + esc(u.tier) + "</span>" :

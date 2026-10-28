@@ -243,6 +243,21 @@ func newFakeKeyStore() *fakeKeyStore {
 	return &fakeKeyStore{keys: map[string]providerKey{}}
 }
 
+// Resolve mirrors secretKeyStore: personal entry wins, then the default entry,
+// while an explicit clear marker blocks inheritance.
+func (s *fakeKeyStore) Resolve(name string) (providerKey, bool) {
+	if k, ok := s.Get(name); ok {
+		if k.Cleared || k.APIKey == "" {
+			return providerKey{}, false
+		}
+		return k, true
+	}
+	if k, ok := s.Get(defaultKeyName); ok && !k.Cleared && k.APIKey != "" {
+		return k, true
+	}
+	return providerKey{}, false
+}
+
 func (s *fakeKeyStore) Get(name string) (providerKey, bool) {
 	k, ok := s.keys[name]
 	return k, ok
@@ -1006,7 +1021,7 @@ func TestHandleSetAPIKeyInjectFailureKeepsStoredKey(t *testing.T) {
 	}
 	// Store-first policy: the key is retained even though injection failed.
 	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-x" {
-		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
+		t.Errorf("stored key = %+v, ok=%v; want retained sk-x", got, ok)
 	}
 }
 
@@ -1023,7 +1038,7 @@ func TestHandleSetAPIKeyResumeFailureKeepsStoredKey(t *testing.T) {
 		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
 	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-x" {
-		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
+		t.Errorf("stored key = %+v, ok=%v; want retained sk-x", got, ok)
 	}
 	if len(auth.setCalls) != 0 {
 		t.Errorf("actor driven despite resume failure: setCalls=%v", auth.setCalls)
@@ -1045,8 +1060,13 @@ func TestHandleClearAPIKeyHappyPath(t *testing.T) {
 	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|"+defaultProviderID {
 		t.Errorf("clearCalls = %v, want [%s]", auth.clearCalls, aliceHost)
 	}
-	if _, ok := store.Get("alice"); ok {
-		t.Errorf("stored key still present after successful clear")
+	// Clear records an explicit marker (blocking the deployment default) rather
+	// than deleting the entry; what matters is that no credential resolves.
+	if key, ok := store.Resolve("alice"); ok {
+		t.Errorf("stored key still resolves after successful clear: %+v", key)
+	}
+	if raw, ok := store.Get("alice"); !ok || !raw.Cleared {
+		t.Errorf("store[alice] = %+v (ok=%v), want a clear marker", raw, ok)
 	}
 }
 
@@ -1064,8 +1084,8 @@ func TestHandleClearAPIKeyMissingActorPurgesStore(t *testing.T) {
 	if len(auth.clearCalls) != 0 {
 		t.Errorf("clearPersonalKey driven for a missing actor: %v", auth.clearCalls)
 	}
-	if _, ok := store.Get("alice"); ok {
-		t.Errorf("stored key not purged for missing actor")
+	if key, ok := store.Resolve("alice"); ok {
+		t.Errorf("stored key still resolves for a missing actor: %+v", key)
 	}
 }
 
@@ -1084,7 +1104,7 @@ func TestHandleClearAPIKeyLogoutFailureKeepsStoredKey(t *testing.T) {
 	}
 	// Clear-first policy: a failed logout keeps the Secret entry for a retry.
 	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-x" {
-		t.Errorf("stored key = %q, ok=%v; want retained sk-x", got, ok)
+		t.Errorf("stored key = %+v, ok=%v; want retained sk-x", got, ok)
 	}
 }
 
@@ -2107,8 +2127,8 @@ func TestHandleClearAPIKeyUsesStoredProvider(t *testing.T) {
 	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|openai" {
 		t.Errorf("clearCalls = %v, want [%s|openai]", auth.clearCalls, aliceHost)
 	}
-	if _, ok := store.Get("alice"); ok {
-		t.Errorf("stored key not purged")
+	if key, ok := store.Resolve("alice"); ok {
+		t.Errorf("stored key still resolves after clear: %+v", key)
 	}
 	resp := decode[map[string]string](t, rec)
 	if resp["providerId"] != "openai" {
@@ -3352,6 +3372,52 @@ func TestBatchSetAPIKeyProviderSwitchLogsOutOld(t *testing.T) {
 	}
 }
 
+// TestDefaultKeyInheritance covers "apply to all users" as a deployment default:
+// users created later inherit it, a subset clear still wins over it, and clearing
+// everyone removes it.
+func TestDefaultKeyInheritance(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+
+	// Apply to all users (users omitted => every user).
+	rec := doRequest(s, http.MethodPost, "/api/apikeys", `{"providerId":"deepseek","apiKey":"sk-all"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply-all status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if raw, ok := store.Get(defaultKeyName); !ok || raw.APIKey != "sk-all" || raw.ProviderID != "deepseek" {
+		t.Fatalf("default entry = %+v (ok=%v), want sk-all/deepseek", raw, ok)
+	}
+
+	// A user created afterwards resolves the default without any per-user write.
+	if key, ok := store.Resolve("newbie"); !ok || key.APIKey != "sk-all" {
+		t.Errorf("newbie resolve = %+v (ok=%v), want the default sk-all", key, ok)
+	}
+
+	// Clearing one user must not fall back to the default.
+	addActor(f, "mfpi", "bob", "STATUS_SUSPENDED", fixedNow)
+	rec = doRequest(s, http.MethodPost, "/api/apikeys/clear", `{"users":["bob"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("subset clear status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if key, ok := store.Resolve("bob"); ok {
+		t.Errorf("bob still resolves after an explicit clear: %+v", key)
+	}
+	if key, ok := store.Resolve("alice"); !ok || key.APIKey != "sk-all" {
+		t.Errorf("alice lost the default after clearing bob: %+v (ok=%v)", key, ok)
+	}
+
+	// Clearing everyone removes the default too.
+	rec = doRequest(s, http.MethodPost, "/api/apikeys/clear", `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear-all status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if key, ok := store.Resolve("another-newbie"); ok {
+		t.Errorf("a new user still resolves a key after clearing everyone: %+v", key)
+	}
+}
+
 func TestBatchClearAPIKeys(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow)
@@ -3373,9 +3439,14 @@ func TestBatchClearAPIKeys(t *testing.T) {
 	if len(resp.Pending) != 1 || resp.Pending[0] != "bob" {
 		t.Errorf("pending = %v, want [bob]", resp.Pending)
 	}
+	// A subset clear leaves an explicit marker (so the deployment default is not
+	// inherited) — what matters is that the effective credential is gone.
 	for _, name := range []string{"alice", "bob"} {
-		if _, ok := store.Get(name); ok {
-			t.Errorf("store[%s] still has a key after clear", name)
+		if key, ok := store.Resolve(name); ok {
+			t.Errorf("store[%s] still resolves a key after clear: %+v", name, key)
+		}
+		if raw, ok := store.Get(name); !ok || !raw.Cleared || raw.APIKey != "" {
+			t.Errorf("store[%s] = %+v (ok=%v), want a clear marker", name, raw, ok)
 		}
 	}
 	if len(auth.clearCalls) != 1 || auth.clearCalls[0] != aliceHost+"|deepseek" {
