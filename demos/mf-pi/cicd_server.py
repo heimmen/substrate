@@ -67,6 +67,80 @@ def snapshot(since):
 # REPO_DIR is the substrate checkout that contains this demo (demos/mf-pi -> ../..).
 REPO_DIR = os.path.dirname(os.path.dirname(DEMO_DIR))
 
+# WORKLOAD_DIR is the miaofang-agent checkout that deploy.sh builds into the
+# workload image (MFPI_WORKLOAD_SOURCE). Showing its commits lets the page tell
+# whether the about-to-be-deployed image already contains a given commit.
+WORKLOAD_DIR = os.environ.get("MFPI_WORKLOAD_SOURCE",
+                              "/home/liuchong/git/miaofang-agent")
+# How many recent commits to surface on the page.
+COMMIT_COUNT = int(os.environ.get("CICD_COMMIT_COUNT", "8"))
+
+
+def git_in(repo, *args):
+    return subprocess.run(["git", "-C", repo] + list(args),
+                          capture_output=True, text=True)
+
+
+def current_branch(repo):
+    if git_in(repo, "rev-parse", "--is-inside-work-tree").returncode != 0:
+        return None
+    return git_in(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "(detached)"
+
+
+def git_commits(repo, n=COMMIT_COUNT):
+    """Last n commits of repo as a list of dicts, or None if not a git checkout."""
+    if git_in(repo, "rev-parse", "--is-inside-work-tree").returncode != 0:
+        return None
+    # Fields split by U+001F; the refs field (%d) may be empty.
+    res = git_in(repo, "log", "-n", str(n),
+                 "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ar%x1f%ad%x1f%d")
+    if res.returncode != 0:
+        return None
+    commits = []
+    for line in res.stdout.splitlines():
+        p = line.split("\x1f")
+        if len(p) < 6:
+            continue
+        commits.append({
+            "hash": p[0], "short": p[1], "subject": p[2],
+            "author": p[3], "rel": p[4], "date": p[5],
+            "refs": p[6] if len(p) > 6 else "",
+        })
+    return commits
+
+
+def repo_status(repo):
+    """Branch, HEAD commits, and how far local is behind its upstream.
+
+    A best-effort `git fetch` refreshes the remote-tracking ref so `behind`
+    reflects what a deploy would pull; fetch failures are reported, never fatal.
+    """
+    branch = current_branch(repo)
+    if branch is None:
+        return {"dir": repo, "branch": None, "commits": None,
+                "behind": None, "error": "not a git checkout"}
+    info = {"dir": repo, "branch": branch, "commits": git_commits(repo)}
+    remote = os.environ.get("CICD_REPO_REMOTE", "origin")
+    fetch = git_in(repo, "fetch", "--prune", remote)
+    if fetch.returncode != 0:
+        info["behind"] = None
+        info["fetch_error"] = (fetch.stderr or fetch.stdout).strip().splitlines()[-1:]
+        return info
+    upstream = "%s/%s" % (remote, branch)
+    if git_in(repo, "rev-parse", "--verify", upstream).returncode != 0:
+        info["behind"] = None
+        return info
+    behind = git_in(repo, "rev-list", "--count", "HEAD..%s" % upstream)
+    ahead = git_in(repo, "rev-list", "--count", "%s..HEAD" % upstream)
+    info["behind"] = int(behind.stdout.strip() or 0) if behind.returncode == 0 else None
+    info["ahead"] = int(ahead.stdout.strip() or 0) if ahead.returncode == 0 else None
+    return info
+
+
+def repos_commits():
+    return {"substrate": repo_status(REPO_DIR),
+            "workload": repo_status(WORKLOAD_DIR)}
+
 
 def pull_repo():
     """Update the substrate checkout (admin/nginx/templates/deploy.sh) before deploy.
@@ -187,6 +261,9 @@ class Handler(BaseHTTPRequestHandler):
             since = int(parse_qs(parsed.query).get("since", ["0"])[0] or 0)
             self._json(200, snapshot(max(0, since)))
             return
+        if parsed.path == "/commits":
+            self._json(200, repos_commits())
+            return
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -269,6 +346,16 @@ PAGE = """<!doctype html>
     display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
   }
   .loghead .muted { margin-left: auto; }
+  .repo { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .repo:last-child { border-bottom: none; }
+  .repo-head { margin-bottom: 6px; }
+  .repo-name { font-weight: 600; }
+  .behind { color: var(--warn); font-size: 12px; margin: 4px 0; }
+  .uptodate { color: var(--ok); font-size: 12px; margin: 4px 0; }
+  .commit-list { list-style: none; margin: 6px 0 0; padding: 0; }
+  .commit-list li { padding: 3px 0; }
+  .commit-list li.head { border-left: 2px solid var(--accent); padding-left: 8px; background: var(--warn-bg); }
+  .commit-list .ch { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -278,6 +365,14 @@ PAGE = """<!doctype html>
   <span class="tag">临时页面</span>
 </header>
 <main>
+  <section class="card">
+    <div class="loghead">
+      <strong>部署代码来源</strong>
+      <button id="refresh-commits" style="margin-left:auto;padding:6px 12px;font-size:12px;">刷新</button>
+    </div>
+    <div id="commits">加载中…</div>
+  </section>
+
   <section class="card">
     <div class="status">
       <span class="dot" id="dot"></span>
@@ -315,6 +410,7 @@ PAGE = """<!doctype html>
   var since = 0;
   var timer = null;
   var startedAt = null;
+  var wasRunning = false;
 
   function esc(s) {
     return String(s).replace(/[&<>]/g, function (c) {
@@ -352,6 +448,54 @@ PAGE = """<!doctype html>
       label.textContent = "空闲";
       meta.textContent = "点按上方按钮开始";
     }
+    if (wasRunning && !state.running && state.rc !== null) { loadCommits(); }
+    wasRunning = state.running;
+  }
+
+  function renderCommits(data) {
+    var html = "";
+    [["substrate", "主仓库 substrate（deploy.sh / admin / nginx / 模板）"],
+     ["workload", "工作负载 miaofang-agent（镜像代码）"]].forEach(function (pair) {
+      var key = pair[0], title = pair[1];
+      var r = data[key] || {};
+      html += '<div class="repo">';
+      html += '<div class="repo-head"><span class="repo-name">' + esc(title) + '</span>';
+      if (r.branch) { html += ' <span class="muted">' + esc(r.dir) + ' · ' + esc(r.branch) + '</span>'; }
+      html += '</div>';
+      if (r.error) {
+        html += '<div class="muted">' + esc(r.error) + '</div>';
+      } else {
+        if (r.behind !== null && r.behind > 0) {
+          html += '<div class="behind">⚠ 远程有 ' + r.behind + ' 个提交未拉取（点 Deploy 前会先 git pull）'
+                + (r.ahead ? '，本地领先 ' + r.ahead : '') + '</div>';
+        } else if (r.behind === 0) {
+          html += '<div class="uptodate">✔ 已与远程同步</div>';
+        }
+        if (r.commits && r.commits.length) {
+          html += '<ul class="commit-list">';
+          r.commits.forEach(function (c) {
+            var head = c.refs && c.refs.indexOf("HEAD") >= 0;
+            html += '<li class="' + (head ? 'head' : '') + '">'
+                  + '<span class="ch">' + esc(c.short) + '</span> '
+                  + '<span class="cs">' + esc(c.subject) + '</span> '
+                  + '<span class="muted">' + esc(c.author) + ' · ' + esc(c.rel) + '</span>'
+                  + '</li>';
+          });
+          html += '</ul>';
+        } else if (r.commits) {
+          html += '<div class="muted">无提交</div>';
+        }
+      }
+      html += '</div>';
+    });
+    document.getElementById("commits").innerHTML = html;
+  }
+
+  function loadCommits() {
+    fetch(BASE + "/commits", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(renderCommits)
+      .catch(function () { document.getElementById("commits").textContent = "无法加载提交信息"; });
   }
 
   function poll() {
@@ -399,6 +543,7 @@ PAGE = """<!doctype html>
     meta.textContent = "已运行 " + Math.max(0, Math.round((Date.now() - startedAt) / 1000)) + " 秒";
   }, 1000);
 
+  loadCommits();
   poll();
 })();
 </script>
