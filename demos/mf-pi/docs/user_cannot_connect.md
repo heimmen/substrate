@@ -4,9 +4,9 @@
 Agent**。本文按「从外到内」的顺序给出可复制命令，每一步都有判定标准和下一步指向；
 不要跳步，前一步的结论决定后一步是否有意义。
 
-> 如果是**所有用户**都连不上，直接看
-> [README → 故障排查](../README.md#故障排查)（golden base 快照损坏等）。
-> 本文只处理“单点用户”。
+> 如果是**所有用户**都连不上，先看
+> [README → 故障排查](../README.md#故障排查)（golden base 快照损坏等）和下文
+> **第 1.5 步**（网关→router 隧道掉线，常见的全局故障）。本文主要处理“单点用户”。
 
 ## 先固定环境变量（每台机器只做一次）
 
@@ -35,6 +35,7 @@ echo "user=$U atespace=$ATESPACE ns=$NS"
 | 反复弹出登录框、401 | 第 2 步（鉴权/密码） |
 | 一直停在“Agent 正在载入”、403 | 第 3、4 步（actor 不存在/没恢复） |
 | 502 / 503 / 504 / 空白页 / connection refused | 第 1、5、6 步 |
+| **多个/所有用户同时**卡在载入页或 502/504，但 actor 全是 `STATUS_RUNNING` | 第 1.5 步（网关→router 隧道掉线） |
 | 页面能打开，但 agent 不回话/模型报错 | 第 9 步（这是 key/模型问题，不是“连不上”） |
 | 提示“用户不存在” | 第 3 步 |
 
@@ -53,8 +54,80 @@ curl -s -o /dev/null -w 'router=%{http_code}\n' "http://$ROUTER/"
 
 - `proxy=000` 或容器不在：`./run-nginx.sh`（测试用 `./run-nginx-test.sh`）重新拉起。
 - `admin=000`：58682 port-forward 掉了，同样重跑 `run-nginx.sh`。
-- `router=000`：58680 port-forward 掉了；还不行看
-  `kubectl -n ate-system get pods -l app=atenet-router`。
+- `router=000`（或 curl 等满 5 秒才返回 000）：58680 port-forward 掉了或处于“半死”
+  状态。先按第 1.5 步处理。
+
+## 第 1.5 步：网关 → router 的 port-forward 隧道掉线（高频）
+
+**现象**：**多个用户（甚至全部）同时**卡在“Agent 正在载入”，或 API 客户端收到
+502/504；但 `kubectl ate get actors -a "$ATESPACE"` 里 actor 全是 `STATUS_RUNNING`。
+浏览器通常看不到裸 502，因为 nginx 把 502/503/504 映射成了载入页（见
+[nginx.conf](../nginx.conf) 的 `error_page 403 502 503 504 = /_mfpi_loading`）。
+
+**原因**：mfpi-nginx 并不直连 router，而是经 `127.0.0.1:58680` 的
+`kubectl port-forward` 连 `svc/atenet-router:80`。router 滚动/重启、节点网络抖动、
+或 port-forward 进程自己退出后，这条隧道就断了；**它不会自动重连**。两种形态：
+
+- **进程没了**：`curl` 立即返回 `000`（connection refused）。
+- **半死**：本地端口仍在 listen、TCP 能连上，但 HTTP 请求超时/被 reset；`curl`
+  同样是 `000`，只是会等满超时。这种最容易被误判成“actor 慢/系统卡”。
+
+**判定**：
+
+```bash
+# 1) 隧道是否可用：000 或超时 = 隧道问题
+curl -s -o /dev/null -w 'tunnel=%{http_code}\n' -m 5 "http://$ROUTER/"
+
+# 2) 有没有 actor 真的不在 RUNNING（排除 actor 侧问题）
+kubectl ate get actors -a "$ATESPACE" | awk 'NR>1 && $4!="STATUS_RUNNING"' | head
+
+# 3) router pod 本身是否正常
+kubectl -n ate-system get pods -l app=atenet-router
+```
+
+第 1 步 `router=000`、而 router pod 是 Running/Ready → 就是隧道掉线。再看 nginx 侧
+证据（官方 nginx 镜像把 error.log 指到 stderr，所以用 `docker logs`）：
+
+```bash
+docker logs mfpi-nginx --since 10m 2>&1 \
+  | grep -E '127\.0\.0\.1:58680|upstream' | tail
+# 典型：connect() failed (111: Connection refused) while connecting to upstream,
+#       ... upstream: "http://127.0.0.1:58680/..."
+```
+
+**修复（一条命令，幂等）**：
+
+```bash
+./run-nginx.sh          # 测试环境：./run-nginx-test.sh
+```
+
+`run-nginx.sh` 会先探测已有隧道（5s 内是否有 HTTP 响应）：健康则复用，**失效或半死
+则杀掉旧 port-forward 并重建**，然后确保 nginx 容器在跑。慢集群可放宽探测超时：
+`MFPI_PROBE_TIMEOUT=15 ./run-nginx.sh`。
+
+只想手工重建 router 这一条隧道时：
+
+```bash
+kubectl port-forward --address 127.0.0.1 \
+  -n ate-system svc/atenet-router 58680:80
+```
+
+> 先停掉占用 58680 的旧进程；`run-nginx.sh` 会自动做这件事，手工重建则要注意
+> `--address 127.0.0.1`（nginx 只连 IPv4 loopback，漏掉它可能出现间歇 502）。
+
+**验证**：
+
+```bash
+curl -s -o /dev/null -w 'tunnel=%{http_code}\n' -m 5 "http://$ROUTER/"
+curl -s -o /dev/null -w 'user=%{http_code} bytes=%{size_download}\n' -m 20 \
+  -H "Host: $U.$ATESPACE.actors.resources.substrate.ate.dev" "http://$ROUTER/"
+```
+
+期望：`tunnel` 非 `000`，`user=200` 且 `bytes>100`。
+
+**预防**：port-forward 没有守护进程，挂了不会自愈。每次 router 发布/重启后都要重跑
+`run-nginx.sh`；长期运行建议用 systemd/supervisor 守护该命令，或生产环境改用
+Ingress/NodePort 暴露 router，不要让网关依赖本机的 kubectl 隧道。
 
 ## 第 2 步：鉴权是否通过
 
@@ -285,6 +358,7 @@ echo "打包完成：$D.tgz"
 | 401 反复 | 密码错/没密码 | `curl -X POST http://$ADMIN/api/users/$U/password` |
 | 403 + 载入页不消失 | actor 未 RUNNING / 恢复失败 | `kubectl ate resume actor "$U" -a "$ATESPACE" --boot` |
 | 503 `no free workers available` | 对应档位的 worker 池满 | `kubectl scale workerpool mf-pi-wp-small -n "$NS" --replicas=<N>`（按档位选池） |
+| 多个用户同时卡载入页/502/504，actor 都 RUNNING | 网关→router 的 port-forward 隧道掉线 | `./run-nginx.sh`（幂等，会替换半死隧道） |
 | 卡 `STATUS_RESUMING` + 容器 spec 不匹配 | 旧快照 vs 新模板 | `./refresh-actor.sh -y "$U"` |
 | 所有用户都挂 + `failed to walk 9p` | golden base 快照损坏 | `./recover-actors.sh -y` |
 | RUNNING 但 worker 日志 ≤3 行 | ateom 卡 boot | 删 worker pod 后 resume（第 5 步） |
