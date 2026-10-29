@@ -36,12 +36,15 @@
 #   ./refresh-actor.sh -y alice bob
 #   ./refresh-actor.sh --dry-run alice
 #   MFPI_ATESPACE=mfpi MFPI_NAMESPACE=ate-demo-mf-pi \
-#     MFPI_PROXY=localhost:58681 ./refresh-actor.sh alice
+#     MFPI_PROXY=localhost:58681 MFPI_ADMIN=127.0.0.1:58682 ./refresh-actor.sh alice
 #
 # Requires a reachable cluster and the production mf-pi deployment applied
 # (./deploy.sh). The nginx proxy (./run-nginx.sh) is only used for a
 # best-effort routing check at the end and is not required for the refresh
-# itself.
+# itself. MFPI_ADMIN points at the mfpi-admin port-forward (run-nginx.sh sets
+# up 127.0.0.1:58682) and is used to replay the stored provider key
+# synchronously; if it is unreachable the key is still recovered by the
+# admin's background reconciler.
 
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -50,6 +53,9 @@ cd "$(dirname "$0")"
 ATESPACE="${MFPI_ATESPACE:-mfpi}"
 NAMESPACE="${MFPI_NAMESPACE:-ate-demo-mf-pi}"
 PROXY="${MFPI_PROXY:-localhost:58681}"
+# mfpi-admin port-forward (run-nginx.sh exposes it at 127.0.0.1:58682). Used to
+# replay the stored provider key synchronously after the recreate.
+ADMIN="${MFPI_ADMIN:-127.0.0.1:58682}"
 # Default fallback template; normally auto-detected from the live actor.
 TEMPLATE_DEFAULT="${MFPI_TEMPLATE:-ate-demo-mf-pi/mf-pi}"
 # Bypass the initial proxy reachability probe (e.g. you run this somewhere
@@ -189,6 +195,24 @@ wait_for_proxy() {
   return 1
 }
 
+# Best-effort: replay the stored per-user provider key onto the fresh instance
+# immediately. A raw create+resume bypasses the admin's create-user flow, so
+# without this the instance would serve model calls with the deployment default
+# key until the admin's 30s reconciler catches up. Non-fatal: the reconciler
+# remains the backstop if this call fails.
+reinject_key() {
+  local user="$1" resp code body
+  resp="$(curl -sS -m 150 -w $'\n%{http_code}' -X POST \
+    "http://${ADMIN}/api/users/${user}/reinject" 2>/dev/null)"
+  code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
+  if [[ "$code" == "200" ]]; then
+    log "  provider key re-injected"
+  else
+    log "  WARN: key re-inject returned HTTP ${code:-000}${body:+: $body} (reconciler will retry)"
+  fi
+}
+
 # --- Optional proxy reachability probe (non-fatal) ------------------------
 if (( ! SKIP_PROXY_CHECK )); then
   if curl -sS -o /dev/null -m 5 "http://${PROXY}/usermanagement/healthz" 2>/dev/null; then
@@ -250,6 +274,9 @@ refresh_one() {
   else
     log "  WARN: proxy not reachable at http://${PROXY}/${user} within timeout (actor is RUNNING; may still be warming up)"
   fi
+
+  # Replay the stored provider key now rather than waiting for the reconciler.
+  reinject_key "${user}"
 
   ok "actor '${user}' refreshed and back to STATUS_RUNNING (user data on the sticky PV should be intact)"
 }

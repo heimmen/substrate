@@ -63,6 +63,36 @@ func TestGateForbidsSuspendedActorAndResumes(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return f.startedResumes() == 1 })
 }
 
+// TestGateInjectsStoredKeyAfterResume verifies the gate's resume path also
+// replays the per-user provider key, instead of leaving the fresh instance on
+// the deployment default key until the 30s reconciler ticks.
+func TestGateInjectsStoredKeyAfterResume(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := gateServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-stored"})
+
+	if rec := doGate(s, gateReq("/alice/", "alice", "s3cret")); rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a SUSPENDED actor", rec.Code)
+	}
+	waitFor(t, time.Second, func() bool {
+		auth.mu.Lock()
+		defer auth.mu.Unlock()
+		return len(auth.setCalls) == 1
+	})
+
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+	if auth.setCalls[0] != aliceHost+"|"+defaultProviderID {
+		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
+	}
+	if got := auth.storedByHost[aliceHost][defaultProviderID]; got != "sk-stored" {
+		t.Errorf("injected key = %q, want sk-stored", got)
+	}
+}
+
 func TestGateForbidsResumingActor(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_RESUMING", fixedNow.Add(-time.Hour))

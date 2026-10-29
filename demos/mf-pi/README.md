@@ -369,10 +369,12 @@ pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优�
 **持久化**：key 同时写入预创建的 Secret `mfpi-user-provider-keys`（username → JSON
 `{"providerId":"...","apiKey":"..."}`；旧版本写入的裸 Key 仍按 `deepseek` 读回，见
 `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽标；Actor 删除
-重建后 key 仍在 Secret 中，重新创建用户时会自动重放注入。此外 `mfpi-admin` 内有
-一个每 30s 的 reconcile 循环：为已 `RUNNING` 但凭据尚未注入的 actor 重放 stored
-key（重试退避按 user+provider 计），因此任何 resume 路径（包括 `refresh-actor.sh`
-的删除重建）都会自动找回 key；删除用户时该 key 一并清除。
+重建后 key 仍在 Secret 中，重新创建用户时会自动重放注入。**恢复即注入**：经
+admin/loading-gate 触发的 resume 在恢复成功后立即重放 key，`refresh-actor.sh`
+重建后也会调用 `POST /api/users/{name}/reinject` 同步注入；此外 `mfpi-admin` 内仍有
+一个每 30s 的 reconcile 循环兜底：为已 `RUNNING` 但凭据尚未注入的 actor 重放 stored
+key（重试退避按 user+provider 计），因此任何 resume 路径（包括不经 admin 的
+`refresh-actor.sh`）最终都会找回 key；删除用户时该 key 一并清除。
 
 **语义**：
 

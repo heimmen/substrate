@@ -501,11 +501,42 @@ func (s *server) handleUserSubresource(w http.ResponseWriter, r *http.Request) {
 		default:
 			http.NotFound(w, r)
 		}
+	case r.Method == http.MethodPost && strings.HasSuffix(rest, "/reinject"):
+		// Replay the stored provider key synchronously. refresh-actor.sh
+		// creates+resumes actors outside the admin's create-user flow, so it
+		// calls this to avoid waiting for the background reconciler.
+		s.handleReinjectKey(w, r, strings.TrimSuffix(rest, "/reinject"))
 	case r.Method == http.MethodDelete:
 		s.handleDeleteUser(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleReinjectKey synchronously replays the stored per-user provider key
+// onto the actor, resuming it first if needed. It exists for refresh paths
+// that create+resume an actor without going through handleCreateUser
+// (refresh-actor.sh): waiting for the 30s reconciler would leave the fresh
+// instance serving with the deployment default key in the meantime.
+func (s *server) handleReinjectKey(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" || strings.Contains(name, "/") || !dns1123Re.MatchString(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法用户名"})
+		return
+	}
+	if _, ok := s.keys.Resolve(name); !ok {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"message": "该用户没有可注入的 provider Key",
+			"name":    name,
+		})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	if warning := s.injectStoredKey(ctx, name, false); warning != "" {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": warning, "name": name})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "provider Key 已注入", "name": name})
 }
 
 // handleListProviders returns the curated provider list the usermanagement UI

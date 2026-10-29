@@ -35,6 +35,11 @@ import (
 // Full-snapshot restore still completes server-side.
 const resumeTriggerTimeout = 3 * time.Minute
 
+// resumeInjectTimeout bounds the key replay that follows a gate-triggered
+// resume. The actor is already resuming, so this only covers waiting for
+// RUNNING plus driving pi-web's in-actor auth flow.
+const resumeInjectTimeout = 2 * time.Minute
+
 // handleGate is the nginx auth_request target for user-scoped requests. It
 // authenticates the user (like handleAuth) and additionally refuses with 403
 // while the actor is not RUNNING, starting a resume in the background.
@@ -96,6 +101,17 @@ func (s *server) triggerResume(name string) {
 		ref := &ateapipb.ObjectRef{Atespace: s.atespace, Name: name}
 		if _, err := s.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref}); err != nil {
 			log.Printf("loading-gate: background resume of %q failed: %v", name, err)
+			return
+		}
+		// Resume succeeded. Replay the stored per-user provider key right here
+		// instead of leaving the fresh instance to serve model calls with the
+		// deployment default key until the 30s background reconciler ticks.
+		// The reconciler remains the backstop for resume paths that never pass
+		// through this gate (e.g. refresh-actor.sh).
+		injectCtx, injectCancel := context.WithTimeout(context.Background(), resumeInjectTimeout)
+		defer injectCancel()
+		if warning := s.injectStoredKey(injectCtx, name, true); warning != "" {
+			log.Printf("loading-gate: key reinjection after resume of %q: %s", name, warning)
 		}
 	}()
 }

@@ -1045,6 +1045,81 @@ func TestHandleSetAPIKeyResumeFailureKeepsStoredKey(t *testing.T) {
 	}
 }
 
+// TestHandleReinjectKeySuspendedResumesThenInjects checks the synchronous
+// replay used by refresh-actor.sh: a fresh (suspended) instance is resumed and
+// gets the stored provider key immediately, without waiting for the reconciler.
+func TestHandleReinjectKeySuspendedResumesThenInjects(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_SUSPENDED", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-stored"})
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/reinject", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.resumed) != 1 || f.resumed[0] != "alice" {
+		t.Errorf("resumed = %v, want [alice]", f.resumed)
+	}
+	if len(auth.setCalls) != 1 || auth.setCalls[0] != aliceHost+"|"+defaultProviderID {
+		t.Errorf("setCalls = %v, want [%s]", auth.setCalls, aliceHost)
+	}
+	if got := auth.storedByHost[aliceHost][defaultProviderID]; got != "sk-stored" {
+		t.Errorf("injected key = %q, want sk-stored", got)
+	}
+}
+
+// TestHandleReinjectKeyNoStoredKey is a no-op success: a user with neither a
+// personal key nor an inherited default has nothing to replay.
+func TestHandleReinjectKeyNoStoredKey(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/reinject", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.resumed) != 0 || len(auth.setCalls) != 0 {
+		t.Errorf("nothing to inject but resumed=%v setCalls=%v", f.resumed, auth.setCalls)
+	}
+}
+
+func TestHandleReinjectKeyInvalidName(t *testing.T) {
+	f := newFake()
+	s := newTestServer(f)
+	auth := s.actors.(*fakeActorAuth)
+
+	rec := doRequest(s, http.MethodPost, "/api/users/Bad_Name/reinject", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.resumed) != 0 || len(auth.setCalls) != 0 {
+		t.Errorf("invalid name must not touch the actor: resumed=%v setCalls=%v", f.resumed, auth.setCalls)
+	}
+}
+
+func TestHandleReinjectKeyInjectFailureReturns502(t *testing.T) {
+	f := newFake()
+	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
+	s := newTestServer(f)
+	store := s.keys.(*fakeKeyStore)
+	auth := s.actors.(*fakeActorAuth)
+	store.Set("alice", providerKey{ProviderID: defaultProviderID, APIKey: "sk-stored"})
+	auth.setErr = errors.New("pi-web not ready")
+
+	rec := doRequest(s, http.MethodPost, "/api/users/alice/reinject", "")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if got, ok := store.Get("alice"); !ok || got.APIKey != "sk-stored" {
+		t.Errorf("stored key = %+v, ok=%v; want still sk-stored", got, ok)
+	}
+}
+
 func TestHandleClearAPIKeyHappyPath(t *testing.T) {
 	f := newFake()
 	addActor(f, "mfpi", "alice", "STATUS_RUNNING", fixedNow.Add(-time.Hour))
