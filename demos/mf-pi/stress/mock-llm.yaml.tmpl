@@ -1,0 +1,80 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OpenAI-compatible mock model for mf-pi load tests.
+#
+# Applied by demos/mf-pi/stress/deploy-mock-llm.sh, which substitutes the
+# ${...} variables and runs `ko apply`. The image is built from
+# tools/mfpi-loadgen (the same binary as the load generator) with the
+# "serve-mock" subcommand.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mfpi-mock-llm
+  namespace: ${NAMESPACE}
+  labels:
+    app: mfpi-mock-llm
+    workload: ${WORKLOAD_LABEL}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mfpi-mock-llm
+  template:
+    metadata:
+      labels:
+        app: mfpi-mock-llm
+        workload: ${WORKLOAD_LABEL}
+    spec:
+      containers:
+        - name: mock-llm
+          image: ko://github.com/agent-substrate/substrate/tools/mfpi-loadgen
+          args:
+            - serve-mock
+            - -addr=:8080
+            - -ttft=${MOCK_TTFT}
+            - -chunk-delay=${MOCK_CHUNK_DELAY}
+            - -chunks=${MOCK_CHUNKS}
+            - -error-rate=${MOCK_ERROR_RATE}
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mfpi-mock-llm
+  namespace: ${NAMESPACE}
+  labels:
+    app: mfpi-mock-llm
+spec:
+  selector:
+    app: mfpi-mock-llm
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
