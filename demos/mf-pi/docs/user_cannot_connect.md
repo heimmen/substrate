@@ -10,20 +10,15 @@ Agent**。本文按「从外到内」的顺序给出可复制命令，每一步�
 
 ## 先固定环境变量（每台机器只做一次）
 
-mf-pi 有生产/测试两套，**atespace 和端口都不同**；串环境是“某个用户莫名连不上”的
-头号原因。
+本手册以 58681 环境为准；排查前先确认你面对的是 `mfpi` 这个 atespace，别对着别的
+atespace 查（用户建错 atespace 是“某个用户莫名连不上”的常见原因）。
 
 ```bash
 cd demos/mf-pi
 export U=<用户名>
 
-# 生产（58681）
 export ATESPACE=mfpi NS=ate-demo-mf-pi
 export PROXY=localhost:58681 ADMIN=127.0.0.1:58682 ROUTER=127.0.0.1:58680
-
-# 测试（59681）——二者只选一套
-# export ATESPACE=mfpi-test NS=ate-demo-mf-pi-test
-# export PROXY=localhost:59681 ADMIN=127.0.0.1:59882 ROUTER=127.0.0.1:59880
 
 echo "user=$U atespace=$ATESPACE ns=$NS"
 ```
@@ -52,7 +47,7 @@ curl -s -o /dev/null -w 'router=%{http_code}\n' "http://$ROUTER/"
 
 **判定**：`proxy=200`、`admin=200`、`router` 不是 `000`（4xx/200 都算活着）。
 
-- `proxy=000` 或容器不在：`./run-nginx.sh`（测试用 `./run-nginx-test.sh`）重新拉起。
+- `proxy=000` 或容器不在：`./run-nginx.sh` 重新拉起。
 - `admin=000`：58682 port-forward 掉了，同样重跑 `run-nginx.sh`。
 - `router=000`（或 curl 等满 5 秒才返回 000）：58680 port-forward 掉了或处于“半死”
   状态。先按第 1.5 步处理。
@@ -98,7 +93,7 @@ docker logs mfpi-nginx --since 10m 2>&1 \
 **修复（一条命令，幂等）**：
 
 ```bash
-./run-nginx.sh          # 测试环境：./run-nginx-test.sh
+./run-nginx.sh
 ```
 
 `run-nginx.sh` 会先探测已有隧道（5s 内是否有 HTTP 响应）：健康则复用，**失效或半死
@@ -161,9 +156,8 @@ kubectl ate get actor "$U" -a "$ATESPACE" -o json \
 
 **判定**：
 
-- 两条都空/NotFound → **最常见**：用户建到了另一套环境（`mfpi` vs `mfpi-test`）。
-  用当前环境重新创建：
-  `./create-user.sh "$U"`（生产）或 `MFPI_ATESPACE=mfpi-test ./create-user.sh "$U"`。
+- 两条都空/NotFound → **最常见**：用户建错了 atespace。确认后在本环境重新创建：
+  `./create-user.sh "$U"`。
 - `STATUS_SUSPENDED` → 正常（首次访问才懒恢复），继续第 4 步。
 - `STATUS_RESUMING` → 恢复卡住，继续第 4 步。
 - `STATUS_RUNNING` → 继续第 5 步。
@@ -269,7 +263,7 @@ kubectl logs "pod/$POD" -n "$NS" --tail=300
 检查 actor 的持久 `/data`（会话、`auth.json`、skills 等）：
 
 ```bash
-./exec-actor.sh "$U"          # 生产；测试加 --test
+./exec-actor.sh "$U"          # 交互式查看
 ./exec-actor.sh "$U" --print  # 只打印节点上的 PV 路径
 ```
 
