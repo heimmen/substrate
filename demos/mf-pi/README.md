@@ -1104,6 +1104,10 @@ cd demos/mf-pi
 
 ## 故障排查
 
+> **只有某一个用户连不上？** 见
+> [单个用户连不上 Agent：一步一诊断](./docs/user_cannot_connect.md)（按现象选入口，
+> 从网关、鉴权、actor 状态、worker、router 到控制面逐层收敛）。
+
 ### 所有用户都连不上（golden base 快照损坏）→ `./recover-actors.sh`
 
 > [!NOTE]
