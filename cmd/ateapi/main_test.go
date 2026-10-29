@@ -15,10 +15,20 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestIssuerScopedURL(t *testing.T) {
@@ -191,6 +201,113 @@ func TestIsInClusterKubernetesIssuer(t *testing.T) {
 				t.Fatalf("isInClusterKubernetesIssuer(%q) = %v, want %v", tt.issuer, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestBuildRedisTLSConfigReloadsClientCertificate guards against pinning the
+// pod-identity credential bundle at startup. Kubelet rotates the bundle in
+// place; the Redis TLS config must re-read it on each handshake, otherwise a
+// long-lived ate-api process keeps presenting an expired client certificate
+// and Valkey rejects it with "remote error: tls: expired certificate".
+func TestBuildRedisTLSConfigReloadsClientCertificate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credential-bundle.pem")
+
+	writeBundle := func(serial int64) *x509.Certificate {
+		t.Helper()
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("generate key: %v", err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(serial),
+			NotBefore:    time.Now().Add(-time.Minute),
+			NotAfter:     time.Now().Add(time.Hour),
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatalf("create certificate: %v", err)
+		}
+		keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			t.Fatalf("marshal private key: %v", err)
+		}
+		var buf bytes.Buffer
+		if err := pem.Encode(&buf, &pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}); err != nil {
+			t.Fatalf("encode private key: %v", err)
+		}
+		if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+			t.Fatalf("encode certificate: %v", err)
+		}
+		if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write bundle: %v", err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatalf("parse certificate: %v", err)
+		}
+		return cert
+	}
+
+	oldCA, oldServerName, oldClientCert := *redisCACerts, *redisTLSServerName, *redisClientCert
+	t.Cleanup(func() {
+		*redisCACerts = oldCA
+		*redisTLSServerName = oldServerName
+		*redisClientCert = oldClientCert
+	})
+	*redisCACerts = ""
+	*redisTLSServerName = ""
+	*redisClientCert = path
+
+	first := writeBundle(111)
+	cfg, err := buildRedisTLSConfig(t.Context())
+	if err != nil {
+		t.Fatalf("buildRedisTLSConfig: %v", err)
+	}
+	if cfg.GetClientCertificate == nil {
+		t.Fatal("GetClientCertificate is nil; client certificate was pinned at startup instead of reloaded")
+	}
+	if len(cfg.Certificates) != 0 {
+		t.Fatalf("tls.Config.Certificates = %d entries, want 0 (must reload from disk)", len(cfg.Certificates))
+	}
+
+	got, err := cfg.GetClientCertificate(&tls.CertificateRequestInfo{})
+	if err != nil {
+		t.Fatalf("GetClientCertificate (first): %v", err)
+	}
+	if got.Leaf == nil {
+		leaf, err := x509.ParseCertificate(got.Certificate[0])
+		if err != nil {
+			t.Fatalf("parse returned certificate: %v", err)
+		}
+		got.Leaf = leaf
+	}
+	if got.Leaf.SerialNumber.Cmp(first.SerialNumber) != 0 {
+		t.Fatalf("first serial = %v, want %v", got.Leaf.SerialNumber, first.SerialNumber)
+	}
+
+	// Simulate kubelet rotating the projected volume in place.
+	second := writeBundle(222)
+	got, err = cfg.GetClientCertificate(&tls.CertificateRequestInfo{})
+	if err != nil {
+		t.Fatalf("GetClientCertificate (after rotation): %v", err)
+	}
+	leaf, err := x509.ParseCertificate(got.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse rotated certificate: %v", err)
+	}
+	if leaf.SerialNumber.Cmp(second.SerialNumber) != 0 {
+		t.Fatalf("rotated serial = %v, want %v (bundle was not re-read)", leaf.SerialNumber, second.SerialNumber)
+	}
+}
+
+func TestBuildRedisTLSConfigRejectsMissingClientBundle(t *testing.T) {
+	oldClientCert := *redisClientCert
+	t.Cleanup(func() { *redisClientCert = oldClientCert })
+	*redisClientCert = filepath.Join(t.TempDir(), "missing.pem")
+
+	if _, err := buildRedisTLSConfig(t.Context()); err == nil {
+		t.Fatal("buildRedisTLSConfig() = nil error for a missing client bundle, want error")
 	}
 }
 

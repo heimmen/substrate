@@ -350,11 +350,18 @@ func buildRedisTLSConfig(ctx context.Context) (*tls.Config, error) {
 		slog.InfoContext(ctx, "Using custom ServerName for Redis TLS verification", slog.String("name", *redisTLSServerName))
 	}
 	if *redisClientCert != "" {
-		cert, err := credbundle.Parse(*redisClientCert)
-		if err != nil {
+		// Fail fast if the bundle is missing or malformed at startup...
+		if _, err := credbundle.Parse(*redisClientCert); err != nil {
 			return nil, fmt.Errorf("parse Redis client credential bundle: %w", err)
 		}
-		tlsConfig.Certificates = []tls.Certificate{*cert}
+		// ...but re-read it on every handshake. The bundle lives in a
+		// pod-certificate projected volume that kubelet rotates in place
+		// roughly daily; pinning the startup certificate here meant an
+		// ate-api process that outlived the rotation kept presenting an
+		// expired client cert, and Valkey rejected it with
+		// "remote error: tls: expired certificate" until the process was
+		// restarted.
+		tlsConfig.GetClientCertificate = credbundle.ClientLoader(*redisClientCert)
 		slog.InfoContext(ctx, "Using client TLS certificate for Redis/Valkey", slog.String("path", *redisClientCert))
 	}
 	return tlsConfig, nil
