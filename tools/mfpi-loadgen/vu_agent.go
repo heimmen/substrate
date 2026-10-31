@@ -104,7 +104,18 @@ func (r *runner) setModel(ctx context.Context, c *userClient, sessionID string) 
 func (r *runner) selectModel(ctx context.Context, c *userClient, sessionID string) error {
 	deadline := time.Now().Add(r.cfg.modelTimeout)
 	last := 0
+	var lastInject time.Time
 	for {
+		// The provider only becomes selectable after (a) the actor's supervisor
+		// merged models.json and (b) mfpi-admin stored a key for it. Both happen
+		// asynchronously (up to ~60s after registration), so retry the injection
+		// here instead of relying on the single startup attempt.
+		if r.cfg.providerAPIKey != "" && time.Since(lastInject) > 15*time.Second {
+			if err := r.ensureProviderKey(ctx, c.user.Name); err != nil {
+				log.Printf("vu (%s): provider key not ready yet: %v", c.user.Name, err)
+			}
+			lastInject = time.Now()
+		}
 		last = r.setModel(ctx, c, sessionID)
 		if last == 200 {
 			return nil
