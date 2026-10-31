@@ -112,7 +112,7 @@ key 的完整设计与实现进度（驱动 actor 内 pi-web api-key 登录流�
 只允许一个，故 gate 合并了鉴权与就绪检查；`auth_request` 的非 2xx/401/403 会被
 nginx 转成 500，所以 gate 用 **403** 而非 503 表达「未就绪」。
 
-**运维注意**：双侧都要更新——nginx 拦截规则在 `nginx.conf` / `nginx-test.conf`
+**运维注意**：双侧都要更新——nginx 拦截规则在 `nginx-qa.conf` / `nginx-test.conf`
 内，改后必须重建容器/镜像；`/_mfpi_gate` 与 `/_mfpi_loading` 是 admin 新端点，旧镜
 像会 404，需重新部署（`./deploy.sh` / `./deploy-test.sh`）。
 
@@ -279,7 +279,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 
 ### 阶段 B：核心清单（ActorTemplate 等）
 - [x] B1. `mf-pi.yaml.tmpl`（生产：Namespace/Secret/RBAC/WorkerPool/ActorTemplate/密码 ConfigMap/ServiceAccount/Deployment(mfpi-admin)/Service；渲染校验通过）
-- [x] B2. `mf-pi-test.yaml.tmpl`（测试：`ate-demo-mf-pi-test`/`mfpi-test`/`workload: mf-pi-test`；渲染校验通过）
+- [x] B2. `mf-pi.yaml.tmpl`（测试：`ate-demo-mf-pi-test`/`mfpi-test`/`workload: mf-pi-test`；渲染校验通过）
 
 ### 阶段 C：admin Go 服务（用户管理 UI + 鉴权）
 - [x] C1. `admin/main.go`（复制 mf-cc 并改名/改默认值/精简 reservedPrefixRe/`_mfpi_auth`/`X-Mfpi-User`）
@@ -287,7 +287,7 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 - [x] C3. `admin/index.html`（标题改「mf-pi 用户管理」）
 
 ### 阶段 D：nginx 反代与镜像
-- [x] D1. `nginx.conf`（生产，listen 58681，转发 58680/58682，cookie `mfpi_user`，atespace `mfpi`；`nginx -t` 通过）
+- [x] D1. `nginx-qa.conf`（生产，listen 58681，转发 58680/58682，cookie `mfpi_user`，atespace `mfpi`；`nginx -t` 通过）
 - [x] D2. `nginx-test.conf`（测试，59681/59880/59882，`mfpi_user_test`，`mfpi-test`；`nginx -t` 通过）
 - [x] D3. `Dockerfile` + `mfpi-admin.htpasswd`
 - [x] D4. `build-image.sh`（`mfpi-nginx` 镜像构建成功）
@@ -337,12 +337,12 @@ harness 方式：`DEEPSEEK_API_KEY=... BUCKET_NAME=... KO_DOCKER_REPO=... ./hack
 ### `demos/mf-pi/`（22 个；设计文档位于 `docs/`）
 1. `docs/mfpi.md`（本文档）
 2. `mf-pi.yaml.tmpl`
-3. `mf-pi-test.yaml.tmpl`
+3. `mf-pi.yaml.tmpl`
 4. `validate-templates.sh`（模板渲染校验辅助脚本）
 4. `deploy.sh`
 5. `deploy-test.sh`
 6. `Dockerfile`
-7. `nginx.conf`
+7. `nginx-qa.conf`
 8. `nginx-test.conf`
 9. `build-image.sh`
 10. `run-nginx.sh`

@@ -53,7 +53,7 @@ mounted at `/data`, so a user's data survives an **actor image-refresh redeploy*
    Secret, in-actor supervisor `pull/push/do_sync` block + `.mfpi-profile-actor`, env
    `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token` Secret +
    RBAC, MinIO `snapshotsConfig` note. ADD: `externalVolumeTemplate` volume + `/data` mount.
-2. `demos/mf-pi/mf-pi-test.yaml.tmpl` — same.
+2. `demos/mf-pi/mf-pi.yaml.tmpl` — same.
 3. `demos/mf-pi/admin/profile.go` — DELETE (entire S3 broker).
 4. `demos/mf-pi/admin/profile_test.go` — DELETE.
 5. `demos/mf-pi/admin/main.go` — remove `profiles`/`profileToken` fields, `MINIO_*` config/env,
@@ -94,7 +94,7 @@ mounted at `/data`, so a user's data survives an **actor image-refresh redeploy*
       `mfpi-minio-admin` Secret, in-actor supervisor `pull/push/do_sync` block + `.mfpi-profile-actor`,
       env `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token`
       Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data` mount.
-- [x] **#11 Update `mf-pi-test.yaml.tmpl` (drop MinIO)** — same changes as #10 for the test template.
+- [x] **#11 Update `mf-pi.yaml.tmpl` (drop MinIO)** — same changes as #10 for the test template.
 - [x] **#12 Delete admin S3 broker** — delete `demos/mf-pi/admin/profile.go` and
       `demos/mf-pi/admin/profile_test.go` (entire `profileStore`/`s3ProfileStore` broker).
 - [x] **#13 Rewire `admin/main.go` + tests** — remove `profiles`/`profileToken` fields, `MINIO_*`

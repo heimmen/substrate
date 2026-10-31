@@ -46,9 +46,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-PREFIX="mfpi"
-ATESPACE="mfpi"
-if [ "$TEST" = 1 ]; then
+PREFIX="${MFPI_ATESPACE:-mfpi}"
+ATESPACE="${MFPI_ATESPACE:-mfpi}"
+if [ "$TEST" = 1 ] && [ -z "${MFPI_ATESPACE:-}" ]; then
   PREFIX="mfpi-test"
   ATESPACE="mfpi-test"
 fi

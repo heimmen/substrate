@@ -41,9 +41,12 @@ if [ -z "$USER_NAME" ]; then
   exit 2
 fi
 
-ATESPACE="mfpi"
-TEMPLATE="ate-demo-mf-pi/mf-pi"
-[ "$TEST" = 1 ] && ATESPACE="mfpi-test" && TEMPLATE="ate-demo-mf-pi-test/mf-pi"
+ATESPACE="${MFPI_ATESPACE:-mfpi}"
+TEMPLATE="${MFPI_TEMPLATE:-${MFPI_NAMESPACE:-ate-demo-mf-pi}/mf-pi}"
+if [ "$TEST" = 1 ] && [ -z "${MFPI_ATESPACE:-}" ]; then
+  ATESPACE="mfpi-test"
+  TEMPLATE="ate-demo-mf-pi-test/mf-pi"
+fi
 
 # kubectl-ate resolution (same convention as the other mf-pi scripts).
 if [[ -n "${KUBECTL_ATE:-}" ]]; then

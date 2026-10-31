@@ -1,4 +1,9 @@
-# mf-pi 压测 · P2 生产（58681）32 并发 Agent 实测
+# mf-pi 压测 · P2 58681（现 qa）32 并发 Agent 实测
+
+> 环境映射：58681 现在是 **qa**（历史 `mfpi` / `ate-demo-mf-pi`），新生产是
+> **57681**（`mfpi-prod` / `ate-demo-mf-pi-prod`）。本文件的容量结论来自 58681
+> 这套资源，**prod 上线后需在 57681 复测**；两者 worker 默认值不同
+> （qa 24 / prod 24 / test 8，见 `docs/environments.md`）。
 
 执行日期：2026-10-29 · 工具：`tools/mfpi-loadgen`（`agent-turn` 场景，`-auth cookie`，
 `-turn-interval 30s`，mock model）· 环境：`ate-demo-mf-pi` / `mfpi`（生产网关 58681）。

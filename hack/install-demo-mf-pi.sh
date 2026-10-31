@@ -6,7 +6,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,16 +16,17 @@
 #
 # This is sourced as part of install-ate.sh. Do not run directly.
 #
-# PRODUCTION environment for the mf-pi demo: deploys into the ate-demo-mf-pi
-# namespace using the mfpi atespace (see demos/mf-pi/mf-pi.yaml.tmpl).
-# Mirror of demos/mf-pi/deploy.sh; keep the two in sync.
+# PRODUCTION environment for the mf-pi demo (entry 57681): namespace
+# ate-demo-mf-pi-prod, atespace mfpi-prod, workload label mf-pi-prod.
+# Defined in demos/mf-pi/env/prod.env; implementation in
+# hack/install-demo-mf-pi-lib.sh (shared by prod/qa/test).
 
-ATE_DEMOS+=(demo-mf-pi) # register demo-mf-pi
+ATE_DEMOS+=(demo-mf-pi) # register demo-mf-pi (production)
 
 demo-mf-pi_cmdline() {
   case "${1}" in
-    --deploy-demo-mf-pi) demo-mf-pi_deploy ;;
-    --delete-demo-mf-pi) demo-mf-pi_delete ;;
+    --deploy-demo-mf-pi) mfpi_install_deploy prod ;;
+    --delete-demo-mf-pi) mfpi_install_delete prod ;;
     *)
       return 1
       ;;
@@ -33,118 +34,6 @@ demo-mf-pi_cmdline() {
   return 0
 }
 
-# Resolve the digest-pinned references for the mf-agent (pi-web) workload and
-# pause images already pushed to ${KO_DOCKER_REPO} (localhost:5001 for kind).
-# The workload images are shared with the test environment.
-#
-# Build the workload image from the miaofang-agent SOURCE so every deploy picks
-# up the latest repo changes (build-image.sh --from-source). Set
-# MFPI_SKIP_WORKLOAD_BUILD=1 to reuse an already-pushed image (offline/CI), and
-# MFPI_WORKLOAD_SOURCE to point at a different checkout.
-build_workload_image() {
-  local repo="${KO_DOCKER_REPO}"
-  if [[ "${MFPI_SKIP_WORKLOAD_BUILD:-0}" == "1" ]]; then
-    return 0
-  fi
-  local src="${MFPI_WORKLOAD_SOURCE:-/home/liuchong/git/miaofang-agent}"
-  if [[ ! -d "${src}/docker" ]]; then
-    echo "workload image source not found at '${src}'" >&2
-    echo "  set MFPI_WORKLOAD_SOURCE to the miaofang-agent checkout, or" >&2
-    echo "  set MFPI_SKIP_WORKLOAD_BUILD=1 to use the already-pushed mf-agent image" >&2
-    return 1
-  fi
-  echo "building workload image from ${src} (latest source) ..."
-  ( cd "${src}" && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source ) \
-    || { echo "workload image build failed (from ${src})" >&2; return 1; }
-  echo "pushing mf-agent:latest to ${repo} ..."
-  docker tag mf-agent:latest "${repo}/mf-agent:latest"
-  docker push "${repo}/mf-agent:latest"
-}
-
-demo-mf-pi_images() {
-  local repo="${KO_DOCKER_REPO}"
-  local piweb pause
-  build_workload_image || return 1
-  piweb="$(docker inspect "${repo}/mf-agent:latest" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
-  pause="$(docker inspect "${repo}/pause:3.10.2" --format='{{index .RepoDigests 0}}' 2>/dev/null || true)"
-  if [[ -z "${piweb}" || -z "${pause}" ]]; then
-    echo "mf-agent or pause image not present in ${repo} after build; push them first:" >&2
-    echo "  cd /home/liuchong/git/miaofang-agent && PI_WEB_IMAGE=mf-agent:latest docker/scripts/build-image.sh --from-source" >&2
-    echo "  docker tag mf-agent:latest ${repo}/mf-agent:latest && docker push ${repo}/mf-agent:latest" >&2
-    echo "  docker tag rancher/mirrored-pause:3.10.2 ${repo}/pause:3.10.2 && docker push ${repo}/pause:3.10.2" >&2
-    return 1
-  fi
-  # Extract the digest part (after '@') from the RepoDigests reference.
-  MF_PI_IMAGE="${piweb}"
-  PAUSE_IMAGE="${pause}"
-  MF_PI_DIGEST="${piweb##*@}"
-  PAUSE_DIGEST="${pause##*@}"
-}
-
-# Render mf-pi.yaml.tmpl. Unset values fall back to placeholders so the output
-# is always valid YAML (the delete path identifies resources by metadata alone).
-demo-mf-pi_render() {
-  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME:-placeholder}|g" \
-      -e "s|\${DEEPSEEK_API_KEY}|${DEEPSEEK_API_KEY:-placeholder}|g" \
-      -e "s|\${MF_PI_DIGEST}|${MF_PI_DIGEST:-placeholder}|g" \
-      -e "s|\${PAUSE_DIGEST}|${PAUSE_DIGEST:-placeholder}|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|${MFPI_WORKER_REPLICAS_SMALL:-32}|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS_MID}|${MFPI_WORKER_REPLICAS_MID:-1}|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|${MFPI_WORKER_REPLICAS_LARGE:-1}|g" \
-      -e "s|\${MFPI_IDLE_TIMEOUT}|${MFPI_IDLE_TIMEOUT:-90m}|g" \
-
-      -e "s|\${MFPI_AUTH_COOKIE_TTL}|${MFPI_AUTH_COOKIE_TTL:-720m}|g" \
-      -e "s|\${MFPI_IDLE_TIERS}|${MFPI_IDLE_TIERS:-small,mid}|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS_BASE}|${MFPI_WORKER_REPLICAS_BASE:-${MFPI_WORKER_REPLICAS:-0}}|g" \
-      demos/mf-pi/mf-pi.yaml.tmpl
-}
-
-demo-mf-pi_deploy() {
-  log_step "demo-mf-pi_deploy"
-  for v in DEEPSEEK_API_KEY BUCKET_NAME KO_DOCKER_REPO; do
-    if [[ -z "${!v:-}" ]]; then
-      echo "$v must be set" >&2
-      return 1
-    fi
-  done
-  if ! demo-mf-pi_images; then
-    return 1
-  fi
-  log_step "  workload image: ${MF_PI_IMAGE}"
-  log_step "  pause image: ${PAUSE_IMAGE}"
-
-  # Number of physical workers; bounds max concurrently-active users.
-  # Defaults to 4 when unset.
-  MFPI_WORKER_REPLICAS_BASE="${MFPI_WORKER_REPLICAS_BASE:-${MFPI_WORKER_REPLICAS:-0}}"
-  log_step "  worker replicas (base tier): ${MFPI_WORKER_REPLICAS_BASE}"
-
-  # Render to a temp file first so the immutable ActorTemplate can be replaced
-  # when its spec changed before ko apply (see ensure_at_recreate_if_changed).
-  local manifest
-  manifest="$(mktemp)"
-  demo-mf-pi_render > "${manifest}"
-  ensure_at_recreate_if_changed "${manifest}" ate-demo-mf-pi mf-pi
-  run_ko apply -f "${manifest}"
-  rm -f "${manifest}"
-
-  # The user-management UI pod is part of the same template; wait for it so
-  # the proxy at /usermanagement/ has an upstream by the time deploy returns.
-  log_step "Waiting for mfpi-admin to be ready..."
-  run_kubectl rollout status deployment/mfpi-admin -n ate-demo-mf-pi --timeout=120s
-}
-
-demo-mf-pi_delete() {
-  log_step "demo-mf-pi_delete"
-  delete_demo_actors ate-demo-mf-pi mf-pi
-  demo-mf-pi_render | run_kubectl delete --ignore-not-found -f -
-}
-
 demo-mf-pi_usage() {
-  echo ""
-  echo "  Required env: DEEPSEEK_API_KEY, BUCKET_NAME, KO_DOCKER_REPO"
-  echo "  Optional env: MFPI_WORKER_REPLICAS_SMALL/_MID/_LARGE (seats per tier);"
-  echo "                MFPI_WORKER_REPLICAS_BASE (default 0; legacy base pool)"
-  echo "  Deploys: mf-agent actors + the mfpi-admin user-management UI (user data persists on a sticky per-actor volume)"
-  echo "  UI access: http://<hostname>:58681/usermanagement/ (via run-nginx.sh)"
-  echo "  See demos/mf-pi/docs/mfpi.md for the walkthrough."
+  mfpi_install_usage prod
 }

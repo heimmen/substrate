@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-# Deploy the mf-pi demo (pi-web actors + the mfpi-admin user-management UI)
-# against an Agent Substrate cluster.
+# Deploy one mf-pi environment (pi-web actors + the mfpi-admin user-management
+# UI) against an Agent Substrate cluster.
+#
+# Three isolated environments are supported; the environment decides the
+# namespace, atespace, workload label and gateway ports (env/<name>.env):
+#
+#   qa    58681   ate-demo-mf-pi      / mfpi        (default)
+#   prod  57681   ate-demo-mf-pi-prod / mfpi-prod
+#   test  59681   ate-demo-mf-pi-test / mfpi-test
 #
 # Usage:
-#   ./deploy.sh            # deploy (default)
-#   ./deploy.sh deploy     # deploy
+#   ./deploy.sh            # deploy qa (historical 58681 behaviour)
+#   ./deploy.sh prod       # deploy production (new 57681)
+#   ./deploy.sh test       # deploy test
+#   ./deploy.sh prod deploy
+#   MFPI_ENV=qa ./deploy.sh
+#   ./deploy-qa.sh         # thin wrapper
 #
 # All configuration is optional and falls back to sensible offline/kind
 # defaults. Override any of them by exporting the variable first:
@@ -12,7 +23,7 @@
 #   BUCKET_NAME           (default ate-snapshots)
 #   DEEPSEEK_API_KEY      (default: read from the mf-pi-provider-config secret)
 #   MFPI_WORKER_REPLICAS_BASE   (default 0; legacy base pool)
-#   MFPI_WORKER_REPLICAS_SMALL  (default 48)
+#   MFPI_WORKER_REPLICAS_SMALL  (default 24 for qa/prod, 8 for test)
 #   MFPI_WORKER_REPLICAS_MID    (default 1)
 #   MFPI_WORKER_REPLICAS_LARGE  (default 1)
 #   KO_DEFAULTBASEIMAGE   (default localhost:5001/distroless-static-debian13)
@@ -26,8 +37,10 @@
 #                          per-user volumes — docs/persistence_gaps.md)
 #   MFPI_ALLOW_MULTI_NODE (set 1 to allow a cluster with more than one node;
 #                          sticky userdata volumes are node-local)
-#   MFPI_SKIP_NGINX      (set 1 to skip rebuilding/recreating the mfpi-nginx
-#                          gateway on 58681 after the cluster deploy)
+#   MFPI_DRY_RUN         (set 1 to render the manifest and stop before applying;
+#                          resolves images but does not touch the cluster)
+#   MFPI_SKIP_NGINX      (set 1 to skip recreating this environment's gateway
+#                          container and port-forwards after the deploy)
 #   MFPI_SKIP_GIT_PULL   (set 1 to leave the miaofang-agent checkout untouched;
 #                          default updates it to its upstream on every deploy,
 #                          independent of MFPI_SKIP_WORKLOAD_BUILD)
@@ -40,18 +53,32 @@
 # The pi-web and pause workload images must be pushed (by digest) to
 # ${KO_DOCKER_REPO}; the script resolves their digests before applying.
 #
-# Note: deploy.sh ONLY deploys the cluster-side resources (ActorTemplates +
-# mfpi-admin). The mfpi-nginx reverse proxy (listening on 58681) is a plain
-# host Docker container with --network host, managed by build-image.sh /
-# run-nginx.sh — NOT a cluster resource. To keep the gateway in sync with
-# nginx.conf, cmd_deploy calls refresh_nginx_gateway() at the end (set
-# MFPI_SKIP_NGINX=1 to opt out).
+# Note: this script ONLY deploys the cluster-side resources (ActorTemplates +
+# mfpi-admin) into the selected environment. Its gateway is a plain host Docker
+# container with --network host, managed by build-image.sh and the environment's
+# run/stop scripts — NOT a cluster resource. cmd_deploy calls
+# refresh_nginx_gateway() at the end (set MFPI_SKIP_NGINX=1 to opt out).
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-NAMESPACE="ate-demo-mf-pi"
+# Environment selection: ./deploy.sh [prod|qa|test] [deploy]. Each environment
+# owns its own namespace, atespace, workload label and gateway ports (see
+# env/<name>.env); nothing is shared, so deploys cannot interfere.
+ENV_ARG=""
+case "${1:-}" in
+  prod|qa|test) ENV_ARG="$1"; shift ;;
+esac
+# shellcheck source=lib/env.sh
+source "$(dirname "$0")/lib/env.sh"
+mfpi_load_env "${ENV_ARG}"
+
+NAMESPACE="${MFPI_NAMESPACE}"
 TEMPLATE="mf-pi.yaml.tmpl"
+
+# Any unexpected failure should be visible on the CI/CD page instead of a bare
+# non-zero exit (the bash -e default prints nothing for a failing assignment).
+trap 'rc=$?; echo "ERROR: deploy.sh [${MFPI_ENV_NAME:-?}] failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
 # Names of the ActorTemplates whose spec changed during this deploy (see
 # ensure_at_recreate_if_changed). Existing users on a changed template are
 # refreshed after the apply (see refresh_existing_users).
@@ -66,9 +93,11 @@ export KO_DOCKER_REPO="${KO_DOCKER_REPO:-localhost:5001}"
 # Provider credential: prefer an already-exported value; otherwise fall back
 # to reading the live secret created by a previous deploy.
 if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+  # A brand-new environment has no secret yet; do not let a failed lookup abort
+  # the whole deploy (set -e + pipefail used to exit here with no message).
   DEEPSEEK_API_KEY="$(
     kubectl get secret mf-pi-provider-config -n "${NAMESPACE}" \
-      -o jsonpath='{.data.DEEPSEEK_API_KEY}' 2>/dev/null | base64 -d
+      -o jsonpath='{.data.DEEPSEEK_API_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true
   )"
 fi
 # Base (legacy) tier: unused by the demo, so it defaults to 0. The old
@@ -77,7 +106,7 @@ fi
 # The small tier is the default tier for mf-pi users and is sized separately
 # (more workers, smaller requests) so it can pack many concurrent users onto
 # one node. See the small WorkerPool in mf-pi.yaml.tmpl.
-: "${MFPI_WORKER_REPLICAS_SMALL:=48}"
+: "${MFPI_WORKER_REPLICAS_SMALL:=24}"
 # mid/large reserve a whole core (or two) per worker, so they default to a
 # single seat each: both tiers share the node with the small pool, and the old
 # shared MFPI_WORKER_REPLICAS default of 16 would have asked for 48 cores.
@@ -112,12 +141,16 @@ render() {
       -e "s|\${DEEPSEEK_API_KEY}|$(esc_repl "${DEEPSEEK_API_KEY:-placeholder}")|g" \
       -e "s|\${MF_PI_DIGEST}|$(esc_repl "${MF_PI_DIGEST}")|g" \
       -e "s|\${PAUSE_DIGEST}|$(esc_repl "${PAUSE_DIGEST}")|g" \
-      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-48}")|g" \
+      -e "s|\${MFPI_WORKER_REPLICAS_SMALL}|$(esc_repl "${MFPI_WORKER_REPLICAS_SMALL:-24}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_MID}|$(esc_repl "${MFPI_WORKER_REPLICAS_MID:-1}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_LARGE}|$(esc_repl "${MFPI_WORKER_REPLICAS_LARGE:-1}")|g" \
       -e "s|\${MFPI_IDLE_TIMEOUT}|$(esc_repl "${MFPI_IDLE_TIMEOUT}")|g" \
       -e "s|\${MFPI_AUTH_COOKIE_TTL}|$(esc_repl "${MFPI_AUTH_COOKIE_TTL}")|g" \
       -e "s|\${MFPI_IDLE_TIERS}|$(esc_repl "${MFPI_IDLE_TIERS}")|g" \
+      -e "s|\${MFPI_NAMESPACE}|$(esc_repl "${MFPI_NAMESPACE}")|g" \
+      -e "s|\${MFPI_ATESPACE}|$(esc_repl "${MFPI_ATESPACE}")|g" \
+      -e "s|\${MFPI_WORKLOAD_LABEL}|$(esc_repl "${MFPI_WORKLOAD_LABEL}")|g" \
+      -e "s|\${MFPI_AUTH_COOKIE}|$(esc_repl "${MFPI_AUTH_COOKIE}")|g" \
       -e "s|\${MFPI_WORKER_REPLICAS_BASE}|$(esc_repl "${MFPI_WORKER_REPLICAS_BASE:-0}")|g" \
       -e "s|\${MFPI_DEPLOY_REV}|$(esc_repl "${MFPI_DEPLOY_REV:-0}")|g" \
       "${TEMPLATE}"
@@ -223,7 +256,7 @@ check_cluster_nodes() {
     return 0
   fi
   local count
-  count="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  count="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)"
   if [[ -n "${count}" && "${count}" -gt 1 ]]; then
     echo "ERROR: this cluster has ${count} nodes, but mf-pi user data lives on" >&2
     echo "  node-local sticky volumes (no CSI, no volume affinity). An actor" >&2
@@ -331,8 +364,8 @@ refresh_existing_users() {
     return 0
   fi
   local actors_json users=() line u ns tpl at
-  if ! actors_json="$(kubectl ate get actor -a "${MFPI_ATESPACE:-mfpi}" -o json 2>&1)"; then
-    echo "WARNING: could not list actors in atespace '${MFPI_ATESPACE:-mfpi}': ${actors_json}" >&2
+  if ! actors_json="$(kubectl ate get actor -a "${MFPI_ATESPACE}" -o json 2>&1)"; then
+    echo "WARNING: could not list actors in atespace '${MFPI_ATESPACE}': ${actors_json}" >&2
     echo "  users on changed template(s) [${CHANGED_ATS[*]}] were NOT refreshed." >&2
     return 0
   fi
@@ -367,52 +400,48 @@ refresh_existing_users() {
   fi
 }
 
-# refresh_nginx_gateway rebuilds the mfpi-nginx image from nginx.conf and then
-# resets the gateway via stop-nginx.sh + run-nginx.sh so the network forwarding
-# is brought into a known-good state at the end of a deploy.
+# refresh_nginx_gateway resets this environment's host gateway via the
+# environment's stop/run scripts, bringing the port-forwards into a known-good
+# state after a deploy.
 #
-# Unlike the cluster resources above, mfpi-nginx is a plain host Docker
-# container (--network host) managed by build-image.sh / run-nginx.sh — it is
-# NOT part of the manifest applied by ko, so a redeploy would otherwise leave
-# a stale proxy running. Rebuilding the image picks up the latest nginx.conf;
-# run-nginx.sh then re-establishes the 58680->atenet-router and
-# 58682->mfpi-admin port-forwards (replacing any stale tunnel left behind by a
-# router pod restart) and recreates the 58681 container. Skipped entirely with
-# MFPI_SKIP_NGINX=1 (e.g. CI where nginx isn't managed here).
+# The gateway is a plain host Docker container (--network host), NOT part of
+# the manifest applied by ko. The image is environment-agnostic: each run script
+# bind-mounts env/<env>.env's nginx conf and htpasswd, so there is no image to
+# rebuild when a conf changes — recreating the container is enough.
+# Skipped with MFPI_SKIP_NGINX=1 (e.g. CI where the gateway isn't managed here).
 refresh_nginx_gateway() {
   if [[ "${MFPI_SKIP_NGINX:-0}" == "1" ]]; then
-    echo "MFPI_SKIP_NGINX=1; skipping the mfpi-nginx gateway refresh."
+    echo "MFPI_SKIP_NGINX=1; skipping the ${MFPI_NGINX_CONTAINER} gateway refresh."
     return 0
   fi
   if ! command -v docker >/dev/null 2>&1; then
-    echo "WARNING: docker not found; skipping mfpi-nginx gateway refresh." >&2
-    echo "  The proxy and its port-forwards are not managed here; set them up" >&2
-    echo "  manually: ./stop-nginx.sh && ./run-nginx.sh" >&2
+    echo "WARNING: docker not found; skipping ${MFPI_NGINX_CONTAINER} gateway refresh." >&2
+    echo "  set it up manually: ./${MFPI_STOP_NGINX_SCRIPT} && ./${MFPI_RUN_NGINX_SCRIPT}" >&2
     return 0
   fi
 
-  # Rebuild the mfpi-nginx image so the proxy picks up the latest nginx.conf
-  # (routes/providers). nginx.conf lives outside ko, so a redeploy would
-  # otherwise leave a stale proxy running.
-  echo "Rebuilding mfpi-nginx image from nginx.conf..."
-  if ! ./build-image.sh; then
-    echo "WARNING: mfpi-nginx image build failed; leaving the running proxy untouched." >&2
-    return 0
-  fi
-
-  # Tear down the gateway (kills the 58680/58682 port-forwards and removes the
-  # 58681 container) and bring it back up via run-nginx.sh, which re-establishes
-  # the port-forwards and recreates the 58681 container. This is the canonical
-  # way to get the network forwarding in a known-good state after a deploy.
-  echo "Resetting the mfpi-nginx gateway and re-establishing port-forwards (58680/58682)..."
-  ./stop-nginx.sh
-  ./run-nginx.sh
-  echo "mfpi-nginx gateway refreshed:"
-  echo "  proxy:      http://localhost:58681/<username>"
-  echo "  management: http://localhost:58681/usermanagement/"
+  echo "Resetting the ${MFPI_ENV_NAME} gateway (${MFPI_NGINX_CONTAINER}, ports ${MFPI_ROUTER_PORT}/${MFPI_ADMIN_PORT})..."
+  ./"${MFPI_STOP_NGINX_SCRIPT}"
+  ./"${MFPI_RUN_NGINX_SCRIPT}"
+  echo "${MFPI_NGINX_CONTAINER} gateway refreshed:"
+  echo "  proxy:      http://localhost:${MFPI_ENTRY_PORT}/<username>"
+  echo "  management: http://localhost:${MFPI_ENTRY_PORT}/usermanagement/"
 }
 
 cmd_deploy() {
+  echo "environment: $(mfpi_env_summary)"
+  # If the target small pool is smaller than the number of existing actors, a
+  # deploy will scale it down and some users may get "no free workers" when
+  # they resume. Warn instead of surprising the operator.
+  local existing_actors
+  existing_actors="$(kubectl ate get actor -a "${MFPI_ATESPACE}" 2>/dev/null | awk 'NR>1 && NF>1' | wc -l | tr -d ' ' || true)"
+  if [[ -n "${existing_actors}" && "${existing_actors}" -gt 0 &&
+        "${MFPI_WORKER_REPLICAS_SMALL:-0}" -lt "${existing_actors}" ]]; then
+    echo "WARNING: atespace ${MFPI_ATESPACE} has ${existing_actors} actors but" >&2
+    echo "  MFPI_WORKER_REPLICAS_SMALL=${MFPI_WORKER_REPLICAS_SMALL} — after this deploy" >&2
+    echo "  only that many can be active at once. Override with e.g." >&2
+    echo "  MFPI_WORKER_REPLICAS_SMALL=${existing_actors} ./deploy.sh" >&2
+  fi
   for v in DEEPSEEK_API_KEY BUCKET_NAME KO_DOCKER_REPO; do
     if [[ -z "${!v:-}" ]]; then
       echo "warning: $v is empty (no exported value and no mf-pi-provider-config secret found)" >&2
@@ -436,11 +465,16 @@ cmd_deploy() {
   fi
   echo "  workload image digest: ${MF_PI_DIGEST}"
   echo "  pause image digest:    ${PAUSE_DIGEST}"
-  echo "  workers (base/small/mid/large): ${MFPI_WORKER_REPLICAS_BASE:-0}/${MFPI_WORKER_REPLICAS_SMALL:-48}/${MFPI_WORKER_REPLICAS_MID:-1}/${MFPI_WORKER_REPLICAS_LARGE:-1}"
+  echo "  workers (base/small/mid/large): ${MFPI_WORKER_REPLICAS_BASE:-0}/${MFPI_WORKER_REPLICAS_SMALL:-24}/${MFPI_WORKER_REPLICAS_MID:-1}/${MFPI_WORKER_REPLICAS_LARGE:-1}"
 
   local manifest
   manifest="$(mktemp)"
   render > "${manifest}"
+  if [[ "${MFPI_DRY_RUN:-0}" == "1" ]]; then
+    echo "MFPI_DRY_RUN=1: rendered ${MFPI_ENV_NAME} manifest at ${manifest}; not applying."
+    echo "  namespace=${NAMESPACE} atespace=${MFPI_ATESPACE} gateway=${MFPI_NGINX_CONTAINER}"
+    return 0
+  fi
   # ActorTemplate specs are immutable, so delete any base/per-tier template
   # whose spec changed before applying (see ensure_at_recreate_if_changed).
   # Base mf-pi (legacy/default) plus one template per resource tier.
@@ -465,18 +499,20 @@ cmd_deploy() {
   # cheap no-op when every template's goldenSnapshot is already empty.
   ensure_no_golden
 
-  # Rebuild the mfpi-nginx image and recreate the 58681 gateway from the
-  # current nginx.conf (the proxy is a host container, not a cluster resource,
-  # so it is not refreshed by the ko apply above). Set MFPI_SKIP_NGINX=1 to skip.
+  # Recreate this environment's gateway container and port-forwards (the proxy
+  # is a host container, not a cluster resource, so it is not refreshed by the
+  # ko apply above). Set MFPI_SKIP_NGINX=1 to skip.
   refresh_nginx_gateway
 
-  echo "mf-pi demo deployed."
-  echo "  management UI: http://localhost:58681/usermanagement/ (see run-nginx.sh for credentials)"
-  echo "  gateway refreshed from nginx.conf on 58681 (unless MFPI_SKIP_NGINX=1)"
+  echo "mf-pi ${MFPI_ENV_NAME} environment deployed."
+  echo "  management UI: http://localhost:${MFPI_ENTRY_PORT}/usermanagement/ (see ${MFPI_RUN_NGINX_SCRIPT} for credentials)"
+  echo "  gateway refreshed from ${MFPI_NGINX_CONF} on ${MFPI_ENTRY_PORT} (unless MFPI_SKIP_NGINX=1)"
 }
 
 usage() {
-  echo "Usage: $0 [deploy]" >&2
+  echo "Usage: $0 [prod|qa|test] [deploy]" >&2
+  echo "  MFPI_ENV also selects the environment (default: qa)." >&2
+  echo "  Wrappers: ./deploy-prod.sh ./deploy-qa.sh ./deploy-test.sh" >&2
   exit 2
 }
 

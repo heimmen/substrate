@@ -98,7 +98,7 @@ RUNNING：
 - `admin/index.html` — 新增「DeepSeek Key」徽标列 + 每行「设置 Key / 清除」按钮与 JS。
 - `admin/main_test.go` — 新增 fake + handler/流程测试（含一个用 `httptest.Server`
   扮演 pi-web 的用例）。
-- `mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl` — 空 Secret + SA Role/RoleBinding +
+- `mf-pi.yaml.tmpl` 与 `mf-pi.yaml.tmpl` — 空 Secret + SA Role/RoleBinding +
   Deployment env（两套 namespace 各一份）。
 - `validate-templates.sh` — 更新精确的 doc-kind 断言列表。
 - `demos/mf-pi/README.md` / `mfpi.md` — 补充文档。
@@ -174,7 +174,7 @@ RUNNING：
     （清除用 `-X DELETE …/apikey`）；打印 JSON。
   - `-test` 变体指向 `ate-demo-mf-pi-test`。admin API 集群内可信、无鉴权（与既有脚本一致）。
 
-### 清单模板（mf-pi.yaml.tmpl / mf-pi-test.yaml.tmpl）
+### 清单模板（mf-pi.yaml.tmpl / mf-pi.yaml.tmpl）
 在 passwords RBAC 块与 Deployment 之间插入：
 
 ```yaml
@@ -253,7 +253,7 @@ ServiceAccount, Role, RoleBinding, Secret, Role, RoleBinding, Deployment, Servic
 - [x] 3. `admin/main.go`：常量 / server 字段 / 配置 env / 路由 / handlers / list/delete/create 集成 / main() 装配
 - [x] 4. `admin/index.html`：DeepSeek Key 徽标列 + 每行「设置 Key / 清除」按钮与 JS
 - [x] 5. `admin/main_test.go`：fake（key store、actor auth）+ handler/流程测试
-- [x] 6. `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl`：空 Secret `mfpi-user-provider-keys` + SA Role/RoleBinding + Deployment env
+- [x] 6. `mf-pi.yaml.tmpl` / `mf-pi.yaml.tmpl`：空 Secret `mfpi-user-provider-keys` + SA Role/RoleBinding + Deployment env
 - [x] 7. `set-user-apikey.sh` / `clear-user-apikey.sh`（及 `-test`）CLI 脚本
 - [x] 8. `validate-templates.sh`：doc-kind 断言列表更新
 - [x] 9. `gofmt`、`go test ./demos/mf-pi/admin/...`、`validate-templates.sh` 通过

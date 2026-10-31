@@ -46,7 +46,9 @@ source "${ROOT}"/hack/install-demo-agent-secret.sh
 source "${ROOT}"/hack/install-demo-multi-template.sh
 source "${ROOT}"/hack/install-demo-mf-cc.sh
 source "${ROOT}"/hack/install-demo-mf-cc-test.sh
+source "${ROOT}"/hack/install-demo-mf-pi-lib.sh
 source "${ROOT}"/hack/install-demo-mf-pi.sh
+source "${ROOT}"/hack/install-demo-mf-pi-qa.sh
 source "${ROOT}"/hack/install-demo-mf-pi-test.sh
 
 # ANSI color codes for prettier output

@@ -1,21 +1,45 @@
 #!/usr/bin/env bash
 # Start/stop the temporary mf-pi CI/CD page backend (a host process).
 #
+# One instance per environment; each runs that environment's deploy script:
+#
+#   ./cicd-server.sh start                  # qa (default, 58690)
+#   ./cicd-server-test.sh start             # test (59690)
+#   ./cicd-server-prod.sh start             # prod (57690)
+#   ./cicd-server.sh prod|qa|test start
+#   MFPI_ENV=test ./cicd-server.sh start
+#
 #   ./cicd-server.sh start     # start it, then open http://<gateway>/_cicd_
 #   ./cicd-server.sh stop
 #   ./cicd-server.sh status
 #   ./cicd-server.sh logs      # tail the server log (deploy output lives in the page)
 #
 # The page itself is served by cicd_server.py; mfpi-nginx exposes it at /_cicd_
-# behind the same Basic Auth as /usermanagement/ (see nginx.conf). Env forwarded
+# behind the same Basic Auth as /usermanagement/ (see this environment's
+# nginx-<env>.conf: /_cicd_ proxies to the per-environment port). Env forwarded
 # to deploy.sh, so e.g. MFPI_SKIP_WORKLOAD_BUILD=1 ./cicd-server.sh start makes
 # the button skip the workload image build.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PIDFILE="${TMPDIR:-/tmp}/mfpi-cicd.pid"
-LOGFILE="${TMPDIR:-/tmp}/mfpi-cicd.log"
-PORT="${CICD_PORT:-58690}"
+
+ENV_ARG=""
+case "${1:-}" in
+  prod|qa|test) ENV_ARG="$1"; shift ;;
+esac
+# shellcheck source=lib/env.sh
+source "${DIR}/lib/env.sh"
+mfpi_load_env "${ENV_ARG}"
+
+# Per-environment pidfile/log/port: three instances can run side by side.
+PIDFILE="${MFPI_CICD_PIDFILE}"
+LOGFILE="${MFPI_CICD_LOG}"
+PORT="${CICD_PORT:-${MFPI_CICD_PORT}}"
+# cicd_server.py reads these at startup. CICD_SCRIPT points at this
+# environment's deploy wrapper so the button deploys the right environment.
+export CICD_PORT="${PORT}"
+export CICD_SCRIPT="${CICD_SCRIPT:-./${MFPI_CICD_SCRIPT}}"
+export MFPI_ENV="${MFPI_ENV_NAME}"
 
 # pid_of reports the runner's pid. The pidfile is authoritative when it still
 # resolves, but a runner started from another shell (or one whose pidfile was
@@ -50,6 +74,16 @@ port_answers() {
 
 case "${1:-start}" in
   start)
+    # The pre-split server used /tmp/mfpi-cicd.pid and ran ./deploy.sh, which
+    # now means *prod*. Starting qa would otherwise silently reuse it.
+    if [[ "${MFPI_ENV_NAME}" == "qa" && -f /tmp/mfpi-cicd.pid ]]; then
+      legacy_pid="$(cat /tmp/mfpi-cicd.pid 2>/dev/null || true)"
+      if [[ -n "${legacy_pid}" ]] && kill -0 "${legacy_pid}" 2>/dev/null; then
+        echo "WARNING: a pre-split CI/CD server is still running (pid ${legacy_pid})." >&2
+        echo "  It would run ./deploy.sh, which is now prod. Stop it first:" >&2
+        echo "    kill ${legacy_pid} && rm -f /tmp/mfpi-cicd.pid" >&2
+      fi
+    fi
     if alive; then
       echo "already running (pid $(pid_of), port ${PORT})"
     elif port_answers; then
@@ -74,7 +108,7 @@ case "${1:-start}" in
       fi
       echo "started (pid $(pid_of), port ${PORT})"
     fi
-    echo "open:  http://127.0.0.1:58681/_cicd_   (prod)  |  http://127.0.0.1:59681/_cicd_  (test)"
+    echo "open:  http://127.0.0.1:${MFPI_ENTRY_PORT}/_cicd_   (${MFPI_ENV_NAME}, deploy=${CICD_SCRIPT})"
     echo "auth:  same credentials as /usermanagement/"
     ;;
   stop)
@@ -108,7 +142,7 @@ case "${1:-start}" in
     tail -n "${2:-40}" "$LOGFILE"
     ;;
   *)
-    echo "usage: $0 {start|stop|status|logs}" >&2
+    echo "usage: $0 [prod|qa|test] {start|stop|status|logs}" >&2
     exit 2
     ;;
 esac

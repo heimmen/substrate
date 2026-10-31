@@ -38,7 +38,7 @@
 
 ## mf-pi 侧（配合改动，替代 MinIO 方案）
 
-- `mf-pi.yaml.tmpl` / `mf-pi-test.yaml.tmpl`：ActorTemplate 声明
+- `mf-pi.yaml.tmpl` / `mf-pi.yaml.tmpl`：ActorTemplate 声明
   `volumes: [{name: userdata, externalVolumeTemplate: {capacity: 5Gi,
   storageClassName: standard}}]`，pi-web 容器 `volumeMounts` 挂载到
   `/data`；supervisor 脚本去掉 `pull/push/do_sync` 同步逻辑；**删除**
@@ -105,7 +105,7 @@
       `mfpi-minio-admin` Secret, in-actor supervisor `pull/push/do_sync` block + `.mfpi-profile-actor`,
       env `MFPI_ADMIN_URL`/`MFPI_PROFILE_TOKEN`/`MFPI_PROFILE_PUSH_INTERVAL`, `mfpi-profile-token`
       Secret + RBAC, MinIO `snapshotsConfig` note; ADD `externalVolumeTemplate` volume + `/data` mount.
-- [x] **#11 Update `mf-pi-test.yaml.tmpl` (drop MinIO)** — same changes as #10 for the test template.
+- [x] **#11 Update `mf-pi.yaml.tmpl` (drop MinIO)** — same changes as #10 for the test template.
 - [x] **#12 Delete admin S3 broker** — delete `demos/mf-pi/admin/profile.go` and
       `demos/mf-pi/admin/profile_test.go` (entire `profileStore`/`s3ProfileStore` broker).
 - [x] **#13 Rewire `admin/main.go` + tests** — remove `profiles`/`profileToken` fields, `MINIO_*`

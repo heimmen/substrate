@@ -34,12 +34,25 @@ import (
 )
 
 const (
-	authCookieName       = "mfpi_auth"
-	defaultAuthCookieTTL = 720 * time.Minute
+	defaultAuthCookieName = "mfpi_auth"
+	defaultAuthCookieTTL  = 720 * time.Minute
 	// authCookieHeader is read by nginx via auth_request_set. It is only ever
 	// used on the auth subrequest, whose other headers are discarded.
 	authCookieHeader = "X-Mfpi-Auth-Cookie"
 )
+
+// authCookieName is the browser-facing "stay signed in" cookie. Cookies do not
+// distinguish ports, so qa/prod/test gateways on the same host would otherwise
+// overwrite each other's session cookie. AUTH_COOKIE_NAME lets each deployment
+// pick a distinct name (deploy.sh renders it from env/<env>.env).
+var authCookieName = authCookieNameFromEnv()
+
+func authCookieNameFromEnv() string {
+	if v := strings.TrimSpace(os.Getenv("AUTH_COOKIE_NAME")); v != "" {
+		return v
+	}
+	return defaultAuthCookieName
+}
 
 // authCookieToken mints "user|exp|mac" for a user and their password hash.
 func authCookieToken(user, passwordHash string, exp time.Time) string {

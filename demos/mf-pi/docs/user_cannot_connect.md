@@ -57,7 +57,7 @@ curl -s -o /dev/null -w 'router=%{http_code}\n' "http://$ROUTER/"
 **现象**：**多个用户（甚至全部）同时**卡在“Agent 正在载入”，或 API 客户端收到
 502/504；但 `kubectl ate get actors -a "$ATESPACE"` 里 actor 全是 `STATUS_RUNNING`。
 浏览器通常看不到裸 502，因为 nginx 把 502/503/504 映射成了载入页（见
-[nginx.conf](../nginx.conf) 的 `error_page 403 502 503 504 = /_mfpi_loading`）。
+[nginx-qa.conf](../nginx-qa.conf) 的 `error_page 403 502 503 504 = /_mfpi_loading`）。
 
 **原因**：mfpi-nginx 并不直连 router，而是经 `127.0.0.1:58680` 的
 `kubectl port-forward` 连 `svc/atenet-router:80`。router 滚动/重启、节点网络抖动、
@@ -358,3 +358,48 @@ echo "打包完成：$D.tgz"
 | RUNNING 但 worker 日志 ≤3 行 | ateom 卡 boot | 删 worker pod 后 resume（第 5 步） |
 | admin 报 `tls: expired certificate` | ate-api 客户端证书过期 | `kubectl rollout restart deployment/ate-api-server -n ate-system`，并升级镜像 |
 | 页面能开、模型报错 | key/模型配置 | `curl -X POST http://$ADMIN/api/users/$U/reinject` |
+
+---
+
+## 管理页报 Valkey TLS `expired certificate`（控制面，不是用户 Actor）
+
+**现象**：`/usermanagement/` 列出用户失败：
+
+```
+列出用户失败: rpc error: code = Internal desc = internal server error:
+while listing actors in db: while scanning shard
+valkey-cluster-5.valkey-cluster-service.ate-system.svc:6379:
+remote error: tls: expired certificate
+```
+
+同时 `valkey-cluster-5` 日志反复出现
+`Error accepting a client connection: ... certificate verify failed (addr=<ate-api-server IP>)`。
+
+**原因**：`ate-api-server` 旧版本在**启动时**把 Valkey 客户端证书加载进
+`tls.Config.Certificates` 并一直复用。kubelet 会每天轮换 projected
+`podCertificate`（`/run/podidentity.../credential-bundle.pem`）；旧进程继续出示
+**已过期**的客户端证书，Valkey（`tls-auth-clients yes`）拒绝它，Go 侧就报
+`remote error: tls: expired certificate`。与用户 Actor、nginx、atespace 无关。
+
+**修复**（代码修复已包含 `15071aa2 fix(ateapi): reload the Valkey client certificate on rotation`）：
+
+```bash
+# 临时止血：重启后进程会重新读取当前有效证书
+kubectl rollout restart deployment/ate-api-server -n ate-system
+
+# 根治：用包含上述提交的 HEAD 重建并滚动 ate-api-server
+KO_DOCKER_REPO=localhost:5001 \
+KO_DEFAULTBASEIMAGE=localhost:5001/distroless-static-debian13 \
+  ko apply -f manifests/ate-install/ate-api-server.yaml
+```
+
+**验证**：
+
+```bash
+kubectl ate get actors -A                      # 全 shard 可列出，无 TLS 错误
+kubectl logs -n ate-system valkey-cluster-5 --since=3m | grep -c "certificate verify failed"  # 0
+curl -u admin:'mf@pass2026' http://127.0.0.1:57681/usermanagement/api/users  # 200
+```
+
+> 只重启不重建只能撑到下一次证书轮换（约每天一次）；必须升级到含
+> `15071aa2` 的镜像。

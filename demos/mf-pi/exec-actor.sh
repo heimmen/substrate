@@ -62,8 +62,8 @@ if [ -z "$ACTOR" ]; then
   exit 2
 fi
 
-PREFIX="mfpi"
-[ "$TEST" = 1 ] && PREFIX="mfpi-test"
+PREFIX="${MFPI_ATESPACE:-mfpi}"
+if [ "$TEST" = 1 ] && [ -z "${MFPI_ATESPACE:-}" ]; then PREFIX="mfpi-test"; fi
 
 NODE="${NODE:-kind-control-plane}"
 

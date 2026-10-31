@@ -23,10 +23,11 @@
 # supervisor pulls it into /data/models.json within ~60s.
 #
 # Usage:
-#   ./deploy-mock-llm.sh [--test|--prod] [--delete] [--no-register]
+#   ./deploy-mock-llm.sh [--prod|--qa|--test] [--delete] [--no-register]
 #
-#   --test          use the test environment (59681 / mfpi-test / ate-demo-mf-pi-test)
-#   --prod          use production (default: 58681 / mfpi / ate-demo-mf-pi)
+#   --prod          use production   (57681 / mfpi-prod / ate-demo-mf-pi-prod)
+#   --qa            use qa           (58681 / mfpi / ate-demo-mf-pi)
+#   --test          use test         (59681 / mfpi-test / ate-demo-mf-pi-test)
 #   --delete        remove the Deployment/Service and the provider registration
 #   --no-register   only deploy the workload; skip POST /api/providers
 #
@@ -53,27 +54,26 @@ REGISTER=1
 for arg in "$@"; do
   case "${arg}" in
     --test) ENVIRONMENT="test" ;;
+    --qa) ENVIRONMENT="qa" ;;
     --prod) ENVIRONMENT="prod" ;;
     --delete) DELETE=1 ;;
     --no-register) REGISTER=0 ;;
     -h|--help)
-      sed -n '/^# Deploy (or remove) the mf-pi mock LLM/,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '/^# Deploy (or remove) the mf-pi mock LLM/,/^set -euo/p' "${SCRIPT_DIR}/deploy-mock-llm.sh" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown argument: ${arg}" >&2; exit 2 ;;
   esac
 done
 
-if [[ "${ENVIRONMENT}" == "test" ]]; then
-  NAMESPACE="ate-demo-mf-pi-test"
-  WORKLOAD_LABEL="mf-pi-test"
-  ENTRY_PORT="59681"
-else
-  NAMESPACE="ate-demo-mf-pi"
-  WORKLOAD_LABEL="mf-pi"
-  ENTRY_PORT="58681"
-fi
-ENTRY="${MOCK_ENTRY:-http://127.0.0.1:${ENTRY_PORT}}"
+# Environment constants (namespace, workload label, entry port) come from the
+# shared env files so the mock never lands in the wrong environment.
+# shellcheck source=../lib/env.sh
+source "${SCRIPT_DIR}/../lib/env.sh"
+mfpi_load_env "${ENVIRONMENT}"
+NAMESPACE="${MFPI_NAMESPACE}"
+WORKLOAD_LABEL="${MFPI_WORKLOAD_LABEL}"
+ENTRY="${MOCK_ENTRY:-http://127.0.0.1:${MFPI_ENTRY_PORT}}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-mf@pass2026}"
 PROVIDER_ID="${MOCK_PROVIDER_ID:-mock}"
@@ -164,5 +164,5 @@ Run an agent-turn scenario (wait ~60s first so actors pick up models.json):
     -scenario agent-turn -vus 4 -duration 5m \\
     -provider ${PROVIDER_ID} -model ${MODEL_ID}
 
-Remove it with: $0 ${ENVIRONMENT:+--${ENVIRONMENT}} --delete
+Remove it with: $0 --${ENVIRONMENT} --delete
 EOF

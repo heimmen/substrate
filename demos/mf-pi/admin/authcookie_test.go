@@ -136,3 +136,14 @@ func TestAuthenticateCookieDisabled(t *testing.T) {
 		t.Errorf("cookie header set although disabled: %q", got)
 	}
 }
+
+func TestAuthCookieNameFromEnv(t *testing.T) {
+	t.Setenv("AUTH_COOKIE_NAME", "")
+	if got := authCookieNameFromEnv(); got != defaultAuthCookieName {
+		t.Fatalf("empty AUTH_COOKIE_NAME = %q, want %q", got, defaultAuthCookieName)
+	}
+	t.Setenv("AUTH_COOKIE_NAME", "mfpi_auth_prod")
+	if got := authCookieNameFromEnv(); got != "mfpi_auth_prod" {
+		t.Fatalf("AUTH_COOKIE_NAME = %q, want mfpi_auth_prod", got)
+	}
+}

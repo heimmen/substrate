@@ -255,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", ""):
-            self._send(200, PAGE, "text/html; charset=utf-8")
+            self._send(200, PAGE.replace("__CICD_SCRIPT__", SCRIPT), "text/html; charset=utf-8")
             return
         if parsed.path == "/state":
             since = int(parse_qs(parsed.query).get("since", ["0"])[0] or 0)
@@ -361,7 +361,7 @@ PAGE = """<!doctype html>
 <body>
 <header>
   <h1>秒方 CI/CD</h1>
-  <span class="sub">主机 <code>demos/mf-pi</code> · 运行 <code>./deploy.sh</code></span>
+  <span class="sub">主机 <code>demos/mf-pi</code> · 运行 <code>__CICD_SCRIPT__</code></span>
   <span class="tag">临时页面</span>
 </header>
 <main>
@@ -381,7 +381,7 @@ PAGE = """<!doctype html>
     </div>
     <div class="row">
       <button id="deploy">Deploy latest code</button>
-      <span class="muted">点击后在部署机（本机）执行 <code>./deploy.sh</code>，输出实时显示在下方。</span>
+      <span class="muted">点击后在部署机（本机）执行 <code>__CICD_SCRIPT__</code>，输出实时显示在下方。</span>
     </div>
     <div class="hint">
       临时工具：任何人通过 <code>/usermanagement/</code> 的管理员口令都能触发一次部署。
@@ -564,8 +564,9 @@ def main(argv):
             "  ./cicd-server.sh start|stop|status|logs\n"
             "(note the dash: cicd-server.sh, not cicd_server.py)\n")
         return 2
-    if not os.path.exists(os.path.join(DEMO_DIR, "deploy.sh")):
-        sys.stderr.write("deploy.sh not found next to this script (%s)\n" % DEMO_DIR)
+    script_path = os.path.join(DEMO_DIR, os.path.basename(SCRIPT))
+    if not os.path.exists(script_path):
+        sys.stderr.write("deploy script %r not found (%s)\n" % (SCRIPT, DEMO_DIR))
         return 1
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)

@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
-# Start the two port-forwards the demo needs (router + admin UI), then run
-# the mfpi-nginx container. A local port that is already in use is reused if
-# its tunnel is healthy, and replaced if the tunnel has gone stale (it still
-# accepts TCP but never answers — this happens when a tunnel is left running
-# across a router pod restart), so the script is re-runnable without leaving
-# dead tunnels behind.
+# Start the two port-forwards an mf-pi environment needs (router + admin UI),
+# then run that environment's gateway container.
 #
-#   58680 -> svc/atenet-router:80     (actor traffic)
-#   58682 -> svc/mfpi-admin:8080      (user-management UI)
+# Three isolated environments are supported (env/<name>.env):
+#
+#   ./run-nginx.sh            # qa (default): 58680/58682/58681  (historical)
+#   ./run-nginx-test.sh       # test:         59880/59882/59681
+#   ./run-nginx-prod.sh       # prod:         57680/57682/57681
+#   ./run-nginx.sh qa|test|prod
+#   MFPI_ENV=test ./run-nginx.sh
+#
+# Each environment gets its own container, port-forwards, nginx conf and
+# htpasswd path, so starting/stopping one never touches the others.
+#
+# A local port that is already in use is reused if its tunnel is healthy, and
+# replaced if the tunnel has gone stale (it still accepts TCP but never answers
+# — this happens when a tunnel is left running across a router pod restart), so
+# the script is re-runnable without leaving dead tunnels behind.
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+ENV_ARG=""
+case "${1:-}" in
+  prod|qa|test) ENV_ARG="$1"; shift ;;
+esac
+# shellcheck source=lib/env.sh
+source "$(dirname "$0")/lib/env.sh"
+mfpi_load_env "${ENV_ARG}"
 
 # Seconds to wait for an HTTP response before declaring an existing tunnel
 # stale. Override for slow clusters: MFPI_PROBE_TIMEOUT=15 ./run-nginx.sh
@@ -42,7 +59,7 @@ stop_port_forward() {
       *port-forward*) kill_pids="${kill_pids} ${pid}" ;;
     esac
   done
-  if [ -z "$kill_pids" ]; then
+  if [[ -z "$kill_pids" ]]; then
     echo "error: port ${port} is in use by a non-port-forward process; free it and re-run" >&2
     exit 1
   fi
@@ -86,8 +103,8 @@ port_forward() {
   sleep 1
 }
 
-port_forward 58680 ate-system atenet-router 80
-port_forward 58682 ate-demo-mf-pi mfpi-admin 8080
+port_forward "${MFPI_ROUTER_PORT}" ate-system atenet-router 80
+port_forward "${MFPI_ADMIN_PORT}" "${MFPI_NAMESPACE}" mfpi-admin 8080
 
 # Fixed credentials for the /usermanagement/ Basic Auth. Override via env:
 #   ADMIN_USER=... ADMIN_PASSWORD=... ./run-nginx.sh
@@ -95,18 +112,40 @@ ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-mf@pass2026}"
 
 # Generate an htpasswd file and bind-mount it over the baked-in default so the
-# env-overridden credentials take effect. Use a stable path (must outlive the
-# container) and make it world-readable (0644): the nginx worker runs as a
-# non-root user and cannot read a mktemp-created 0600 file.
-HTPASSWD_FILE="${TMPDIR:-/tmp}/mfpi-admin.htpasswd"
+# env-overridden credentials take effect. One path per environment (the file
+# must outlive the container) and 0644: the nginx worker runs as a non-root
+# user and cannot read a mktemp-created 0600 file.
+HTPASSWD_FILE="${MFPI_HTPASSWD}"
 printf '%s:%s\n' "$ADMIN_USER" "$(openssl passwd -apr1 "$ADMIN_PASSWORD")" > "$HTPASSWD_FILE"
 chmod 644 "$HTPASSWD_FILE"
 
-docker rm -f mfpi-nginx 2>/dev/null || true
-docker run -d -p 58681:58681 --name mfpi-nginx --network host \
-  -v "$HTPASSWD_FILE:/etc/nginx/mfpi-admin.htpasswd:ro" \
-  mfpi-nginx
+CONF_FILE="$(pwd)/${MFPI_NGINX_CONF}"
+if [[ ! -f "${CONF_FILE}" ]]; then
+  echo "error: gateway config not found: ${CONF_FILE}" >&2
+  exit 1
+fi
 
-echo "mfpi-nginx running."
-echo "  users:          http://localhost:58681/<username>"
-echo "  management UI:  http://localhost:58681/usermanagement/ (login: ${ADMIN_USER}/${ADMIN_PASSWORD})"
+NGINX_IMAGE="${MFPI_NGINX_IMAGE:-mfpi-nginx}"
+if ! docker image inspect "${NGINX_IMAGE}" >/dev/null 2>&1; then
+  echo "gateway image ${NGINX_IMAGE} not present; building it with ./build-image.sh"
+  ./build-image.sh
+fi
+
+# Migration: before the environment split the qa gateway was named "mfpi-nginx"
+# and baked its config into the image. Remove that legacy container so the new
+# per-environment one can bind the same port (qa only; prod/test never used it).
+if [[ "${MFPI_ENV_NAME}" == "qa" ]] &&
+   docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'mfpi-nginx'; then
+  echo "removing legacy 'mfpi-nginx' container (pre-split qa gateway)"
+  docker rm -f mfpi-nginx >/dev/null
+fi
+
+docker rm -f "${MFPI_NGINX_CONTAINER}" 2>/dev/null || true
+docker run -d --name "${MFPI_NGINX_CONTAINER}" --network host \
+  -v "${CONF_FILE}:/etc/nginx/conf.d/default.conf:ro" \
+  -v "${HTPASSWD_FILE}:/etc/nginx/mfpi-admin.htpasswd:ro" \
+  "${NGINX_IMAGE}"
+
+echo "${MFPI_NGINX_CONTAINER} running (${MFPI_ENV_NAME})."
+echo "  users:          http://localhost:${MFPI_ENTRY_PORT}/<username>"
+echo "  management UI:  http://localhost:${MFPI_ENTRY_PORT}/usermanagement/ (login: ${ADMIN_USER}/${ADMIN_PASSWORD})"

@@ -6,7 +6,17 @@ cd "$(dirname "$0")"
 
 DIGEST="sha256:364a73cf0fe44fea69b3de0fdcb2b439e7e7153e66724de35c9c9e06fcb8759f"
 
-for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
+# One parameterized template serves prod/qa/test; render it once per environment
+# with the values from env/<env>.env so a missing/incorrect placeholder is caught
+# here rather than during a deploy.
+for env in prod qa test; do
+  case "${env}" in
+    prod) NS=ate-demo-mf-pi-prod; AT=mfpi-prod; WL=mf-pi-prod; CK=mfpi_auth_prod ;;
+    qa)   NS=ate-demo-mf-pi;      AT=mfpi;      WL=mf-pi;      CK=mfpi_auth_qa ;;
+    test) NS=ate-demo-mf-pi-test; AT=mfpi-test; WL=mf-pi-test; CK=mfpi_auth_test ;;
+    *) echo "bad env ${env}" >&2; exit 1 ;;
+  esac
+  t=mf-pi.yaml.tmpl
   sed -e "s|\${DEEPSEEK_API_KEY}|sk-test|g" \
       -e "s|\${BUCKET_NAME}|ate-snapshots|g" \
       -e "s|\${MF_PI_DIGEST}|${DIGEST}|g" \
@@ -19,10 +29,14 @@ for t in mf-pi.yaml.tmpl mf-pi-test.yaml.tmpl; do
       -e "s|\${MFPI_AUTH_COOKIE_TTL}|720m|g" \
       -e "s|\${MFPI_IDLE_TIERS}|small,mid|g" \
       -e "s|\${MFPI_DEPLOY_REV}|0|g" \
-      "$t" > /tmp/mfpi-render-check.yaml
-  python3 - /tmp/mfpi-render-check.yaml "$t" <<'PYEOF'
+      -e "s|\${MFPI_NAMESPACE}|${NS}|g" \
+      -e "s|\${MFPI_ATESPACE}|${AT}|g" \
+      -e "s|\${MFPI_WORKLOAD_LABEL}|${WL}|g" \
+      -e "s|\${MFPI_AUTH_COOKIE}|${CK}|g" \
+      "$t" > "/tmp/mfpi-render-check-${env}.yaml"
+  python3 - "/tmp/mfpi-render-check-${env}.yaml" "$t (${env})" "${WL}" "${NS}" "${AT}" "${CK}" <<'PYEOF'
 import sys, json, yaml
-path, name = sys.argv[1], sys.argv[2]
+path, name, wl, ns, at, ck = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 with open(path) as f:
     docs = [d for d in yaml.safe_load_all(f) if d]
 from collections import Counter
@@ -51,6 +65,20 @@ raw = open(path).read()
 for banned in ("minio", "MinIO", "MINIO", "MFPI_PROFILE_TOKEN", "mfpi-profile-token",
                "MFPI_ADMIN_URL", "internal/actor"):
     assert banned not in raw, "leftover %r in %s" % (banned, path)
+
+# Every namespaced resource must live in this environment's namespace, and the
+# admin must be pointed at this environment's atespace / cookie. This is what
+# makes prod/qa/test independent.
+for d in docs:
+    md = d.get("metadata", {})
+    if "namespace" in md:
+        assert md["namespace"] == ns, (d["kind"], md.get("name"), md["namespace"], ns)
+assert next(d for d in docs if d["kind"] == "Namespace")["metadata"]["name"] == ns
+admin = next(d for d in docs if d["kind"] == "Deployment")
+admin_env = {e["name"]: e.get("value") for e in admin["spec"]["template"]["spec"]["containers"][0]["env"]}
+assert admin_env["ATESPACE"] == at, admin_env.get("ATESPACE")
+assert admin_env["AUTH_COOKIE_NAME"] == ck, admin_env.get("AUTH_COOKIE_NAME")
+assert ("/ate-snapshots/%s/" % ns) in raw, "snapshot path does not contain the environment namespace"
 
 # ActorTemplates (base + per-tier): sticky userdata volume mounted at
 # /data, and each tier template listed in the base template set.
@@ -125,7 +153,7 @@ for at in atl_all:
     if at["metadata"]["name"] == "mf-pi":
         base_worker_label = worker
     else:
-        assert worker.startswith("mf-pi-"), (at["metadata"]["name"], worker)
+        assert worker.startswith(wl + "-"), (at["metadata"]["name"], worker)
         assert worker != base_worker_label, (at["metadata"]["name"], worker)
     assert base_worker_label is not None
 
@@ -135,7 +163,7 @@ for tier in ("small", "mid", "large"):
     wp = wps["mf-pi-wp-" + tier]
     res = wp["spec"]["template"]["resources"]
     assert res.get("requests") and res.get("limits"), (tier, res)
-    assert wp["metadata"]["labels"]["workload"] == ("mf-pi-%s-test" % tier if "test" in name else "mf-pi-" + tier), wp
+    assert wp["metadata"]["labels"]["workload"] == "%s-%s" % (wl, tier), wp
 
 # The small tier is the default tier for mf-pi users, so it is sized for
 # concurrency: many workers with a small CPU request (what the scheduler

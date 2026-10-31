@@ -15,8 +15,8 @@
 # list-users-test.sh):
 #   ./release-small-agents.sh         # PRODUCTION (atespace mfpi, entry 58681)
 #   ./release-small-agents-test.sh    # TEST (atespace mfpi-test, entry 59681)
-# You can also pass `--prod` / `--test`, or set MFPI_ATESPACE explicitly
-# (e.g. `MFPI_ATESPACE=mfpi-test ./release-small-agents.sh`).
+# You can also pass `--prod` / `--qa` / `--test`, or set MFPI_ATESPACE
+# explicitly (e.g. `MFPI_ATESPACE=mfpi-test ./release-small-agents.sh`).
 #
 # Behavior:
 #   * By default it suspends every small-tier agent that is RUNNING (only
@@ -48,7 +48,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --force)   FORCE=1 ;;
     --dry-run|-n) DRY=1 ;;
-    --prod|-p) export MFPI_ATESPACE="${MFPI_ATESPACE:-mfpi}" ;;
+    --prod|-p) export MFPI_ATESPACE="${MFPI_ATESPACE:-mfpi-prod}" ;;
+    --qa|-q)   export MFPI_ATESPACE="${MFPI_ATESPACE:-mfpi}" ;;
     --test|-t) export MFPI_ATESPACE="${MFPI_ATESPACE:-mfpi-test}" ;;
     -h|--help) grep '^#' "$0" | sed 's/^#\{1,2\} //' | sed '/^$/q'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;

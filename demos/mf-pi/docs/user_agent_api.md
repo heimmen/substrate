@@ -3,7 +3,7 @@
 > 面向**外部组件开发者**的接口文档：第三方服务、自动化脚本、CI/CD、独立管理后台等。
 >
 > - 适用组件：`mfpi-admin`（平台管理面，本仓库 `demos/mf-pi`）+ `pi-web`（用户 Agent 面，默认镜像 `@jmfederico/pi-web 1.202609.0`）
-> - 网关：`demos/mf-pi/nginx.conf`（生产）/ `nginx-test.conf`（测试）
+> - 网关：`nginx-prod.conf`（prod 57681）/ `nginx-qa.conf`（qa 58681）/ `nginx-test.conf`（test 59681）
 > - 文档中的 `file:line` 引用均指向本仓库或 `pi-web` 源码，便于核对。
 
 ---
@@ -66,7 +66,7 @@ mf-pi 把「平台」和「用户 Agent」拆成两个独立的 HTTP 服务，�
 
 `<host>` 是运行 `run-nginx.sh` / `run-nginx-test.sh` 的机器地址；nginx 以 `--network host` 监听，防火墙放行即可被外部访问。
 
-**网关的三个路径规则**（`demos/mf-pi/nginx.conf:95-163`）：
+**网关的三个路径规则**（`demos/mf-pi/nginx-qa.conf:95-163`）：
 
 | 路径 | 行为 |
 |---|---|
@@ -223,7 +223,7 @@ done
 
 ### 3.3 网关对错误码的改写规则（**外部组件必读**）
 
-nginx 的 `location ~ ^/<user>/` 配置了 `proxy_intercept_errors on; error_page 403 502 503 504 = /_mfpi_loading;`（`nginx.conf:124-150`）。而 `/_mfpi_loading` 内部逻辑是：
+nginx 的 `location ~ ^/<user>/` 配置了 `proxy_intercept_errors on; error_page 403 502 503 504 = /_mfpi_loading;`（`nginx-qa.conf:124-150`）。而 `/_mfpi_loading` 内部逻辑是：
 
 ```nginx
 if ($http_accept !~* "text/html") { return 503; }
@@ -2436,7 +2436,7 @@ curl -u alice:secret -X POST -H 'content-type: application/json' \
 
 #### mf-pi 网关的 WebSocket 转发
 
-mf-pi 的 nginx 对用户路径显式转发升级头（`demos/mf-pi/nginx.conf:124-139`）：
+mf-pi 的 nginx 对用户路径显式转发升级头（`demos/mf-pi/nginx-qa.conf:124-139`）：
 
 ```nginx
 location ~ ^/(?<username>[a-z0-9-]+)/(?<rest>.*)$ {
@@ -2449,12 +2449,12 @@ location ~ ^/(?<username>[a-z0-9-]+)/(?<rest>.*)$ {
 }
 ```
 
-即 `Upgrade` / `Connection` 会原样传给 atenet-router 后端（`nginx.conf:132-133`），WebSocket 升级不会被 nginx 中断。要点：
+即 `Upgrade` / `Connection` 会原样传给 atenet-router 后端（`nginx-qa.conf:132-133`），WebSocket 升级不会被 nginx 中断。要点：
 
-- 路径前缀 `/<username>` 由 nginx 用 `proxy_pass http://127.0.0.1:58680/$rest$is_args$args;` 剥掉，后端看到的就是 `/api/sessions/...`（`nginx.conf:129`）。
-- 用户路径的鉴权/就绪检查是 `auth_request /_mfpi_gate`（`nginx.conf:125`），该子请求把 `Authorization` 与 `mfpi_user` cookie 转给 admin（`nginx.conf:81-89`）。
-- 若 actor 未 RUNNING 或上游 502/503/504，nginx 会把响应改写到 `/_mfpi_loading`；对非 `text/html` 的 Accept（API/WebSocket 客户端）该位置直接返回 `503`（`nginx.conf:128,142-149`）。
-- `client_max_body_size 512m`（`nginx.conf:54`），所以附件/上传不会被 nginx 的 1m 默认值挡掉。
+- 路径前缀 `/<username>` 由 nginx 用 `proxy_pass http://127.0.0.1:58680/$rest$is_args$args;` 剥掉，后端看到的就是 `/api/sessions/...`（`nginx-qa.conf:129`）。
+- 用户路径的鉴权/就绪检查是 `auth_request /_mfpi_gate`（`nginx-qa.conf:125`），该子请求把 `Authorization` 与 `mfpi_user` cookie 转给 admin（`nginx-qa.conf:81-89`）。
+- 若 actor 未 RUNNING 或上游 502/503/504，nginx 会把响应改写到 `/_mfpi_loading`；对非 `text/html` 的 Accept（API/WebSocket 客户端）该位置直接返回 `503`（`nginx-qa.conf:128,142-149`）。
+- `client_max_body_size 512m`（`nginx-qa.conf:54`），所以附件/上传不会被 nginx 的 1m 默认值挡掉。
 
 从浏览器连接（`wss`/`ws` 会自动跟随页面协议与 base，`resolveAppWebSocketUrl`）：
 
@@ -2828,7 +2828,7 @@ export function sendWorkspaceRequestError(reply, error, fallbackStatus): Fastify
 
 以下 `curl` 示例统一针对 **mf-pi 多用户网关**：
 
-- 入口：`http://<host>:58681/<username>`，每个用户的流量按 URL 路径前缀路由到对应 actor（`<substrate>/demos/mf-pi/nginx.conf`；端口 58681/59681 见 `<substrate>/demos/mf-pi/docs/mfpi.md`）。
+- 入口：`http://<host>:58681/<username>`，每个用户的流量按 URL 路径前缀路由到对应 actor（`<substrate>/demos/mf-pi/nginx-qa.conf`；端口 58681/59681 见 `<substrate>/demos/mf-pi/docs/mfpi.md`）。
 - 鉴权：HTTP Basic，`-u <username>:<password>`（nginx `auth_request` 校验每用户密码）。
 - 网关会剥离 `/<username>` 前缀，因此后端看到的仍是 `/api/...`。
 - 非网关（直连 pi-web）部署把 `http://<host>:58681/<username>` 换成实际监听地址即可（Basic 认证可省略）。
@@ -3124,7 +3124,7 @@ curl -u alice:secret \
   - 任意匹配 `/^([a-z]+\/[a-z0-9.+-]+)$/` 的类型 → `Buffer`（例如 `image/png`）。
 - **不要用 `application/json`**：Fastify 默认 JSON 解析器会把它解析成对象，而 handler 需要 `Buffer`（`Body: Buffer`，workspaceExplorerRoutes.ts:41），写文件会失败。<!-- TODO: unverified：JSON Content-Type 下客户端实际看到的错误码/消息未在测试中固定 -->
 - 最大体积：Fastify 实例级 `bodyLimit`，由 `maxUploadBytes()` 决定，默认 **64 MiB**（`DEFAULT_MAX_UPLOAD_BYTES = 64 * 1024 * 1024`，config.ts:51,142-150；server/index.ts:6；app.ts:174）；可用 `PI_WEB_MAX_UPLOAD_BYTES` 或配置项 `maxUploadBytes` 覆盖。超限由 Fastify 返回 `413`。<!-- TODO: unverified：413 响应体在 pi-web 中的形状未在源码中显式定义 -->
-- mf-pi 网关的 nginx `client_max_body_size 512m`（demos/mf-pi/nginx.conf），因此实际生效上限是上面这个应用级限制。
+- mf-pi 网关的 nginx `client_max_body_size 512m`（demos/mf-pi/nginx-qa.conf），因此实际生效上限是上面这个应用级限制。
 - `path` 指向已存在目录时返回 400（fileContentService.ts:56，app.workspaceFiles.test.ts 断言）。
 - 路径安全：**不支持绝对路径**（write 走 `resolveInsideWorkspace` / `resolveParentInsideWorkspace`，pathSafety.ts:4-22，不允许 `..` 穿越）；父目录 symlink 会被 `realpath` 解析并再次做工作区包含校验（fileContentService.ts:71-74）。
 
@@ -4975,12 +4975,12 @@ WS     /api/machines/local/events
 
 | 内容 | 位置 |
 |---|---|
-| 网关路由与鉴权 | `demos/mf-pi/nginx.conf`（生产）、`nginx-test.conf`（测试） |
+| 网关路由与鉴权 | `demos/mf-pi/nginx-qa.conf`（生产）、`nginx-test.conf`（测试） |
 | 管理面实现 | `demos/mf-pi/admin/main.go`、`apikey.go`、`providers.go`、`providermodels.go`、`expiry.go`、`idle.go`、`tier.go`、`skills.go`、`gate.go`、`loading.go` |
 | 管理面路由注册 | `demos/mf-pi/admin/main.go:1656-1677` |
 | 管理面单测（含响应结构断言） | `demos/mf-pi/admin/main_test.go`、`skills_test.go` |
 | 用户 Agent 服务（pi-web） | 独立仓库 `cliu-pi-web`：`src/server/app.ts`（路由注册）、`src/server/sessions/*`、`src/server/sessiond.ts` |
-| 部署清单 | `demos/mf-pi/mf-pi.yaml.tmpl`、`mf-pi-test.yaml.tmpl` |
+| 部署清单 | `demos/mf-pi/mf-pi.yaml.tmpl`、`mf-pi.yaml.tmpl` |
 | 演示总览 | `demos/mf-pi/README.md`、`demos/mf-pi/docs/mfpi.md`、`demos/mf-pi/docs/actor_inside.md` |
 | Skill 分发设计 | `demos/mf-pi/docs/deploy_skill_to_actor.md` |
 | 专属 Key（provider 通用）设计 | `demos/mf-pi/docs/injectDeepsseekKey.md`、`demos/mf-pi/admin/providers.go` |

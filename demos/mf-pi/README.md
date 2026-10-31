@@ -13,6 +13,23 @@ supervisor 同时运行两者（与 pi-web 仓库 `docker/scripts/run-container.
 
 面向外部组件开发的完整 HTTP/WebSocket 接口说明见 [`docs/user_agent_api.md`](./docs/user_agent_api.md)（管理面 REST + 用户 Agent pi-web API，含参数、示例、返回值与错误处理）。
 
+> [!IMPORTANT]
+> **三套完全隔离的环境**（详见 [`docs/environments.md`](./docs/environments.md)）：
+>
+> | 环境 | 入口 | namespace / atespace |
+> |---|---|---|
+> | **prod** | **57681** | `ate-demo-mf-pi-prod` / `mfpi-prod` |
+> | **qa** | **58681** | `ate-demo-mf-pi` / `mfpi`（沿用历史资源名与已有数据） |
+> | **test** | **59681** | `ate-demo-mf-pi-test` / `mfpi-test` |
+>
+> **三个独立入口脚本**：`./deploy.sh` = **qa（58681，和以前一样）**；
+> `./deploy-test.sh` = **test（59681）**；`./deploy-prod.sh` = **prod（57681）**。
+> 启动/停止同理：`./run-nginx.sh`（qa）、`./run-nginx-test.sh`、`./run-nginx-prod.sh`。
+> 也接受 `./deploy.sh prod|qa|test` 形式（脚本化用）。
+> **本文档历史章节里把 58681 称作「生产」的地方，现在对应的是 qa 环境；新生产是
+> 57681。** 所有环境常量都在 `env/<env>.env`，模板只有一份
+> `mf-pi.yaml.tmpl`。
+
 ## 前提条件
 
 - 已安装 Agent Substrate 的 k8s 集群
@@ -295,7 +312,7 @@ Agent 路径（`/<username>/...`）的凭据是 **HTTP Basic**：nginx 每个请
 
 实现细节：`auth_request` 子请求的响应头会被 nginx 丢弃，所以 Cookie 由 admin 通过
 `X-Mfpi-Auth-Cookie` 头返回，nginx 用 `auth_request_set $upstream_http_x_mfpi_auth_cookie`
-+ `add_header Set-Cookie` 转发给浏览器（见 `nginx.conf` / `nginx-test.conf`）。
++ `add_header Set-Cookie` 转发给浏览器（见 `nginx-qa.conf` / `nginx-test.conf`）。
 启动日志会打印 `mfpi-admin agent session cookie (mfpi_auth): valid for 12h0m0s`，便于确认。
 
 > 注意：`/_cicd_` 与 `/usermanagement/` 用的是另一套 Basic（管理员口令），不受此 Cookie
@@ -368,7 +385,7 @@ pi-web 每次模型调用都会重读该凭据文件，**已存储的凭据优�
 
 **持久化**：key 同时写入预创建的 Secret `mfpi-user-provider-keys`（username → JSON
 `{"providerId":"...","apiKey":"..."}`；旧版本写入的裸 Key 仍按 `deepseek` 读回，见
-`mf-pi.yaml.tmpl` 与 `mf-pi-test.yaml.tmpl`）。UI 据此显示徽标；Actor 删除
+`mf-pi.yaml.tmpl` 与 `mf-pi.yaml.tmpl`）。UI 据此显示徽标；Actor 删除
 重建后 key 仍在 Secret 中，重新创建用户时会自动重放注入。**恢复即注入**：经
 admin/loading-gate 触发的 resume 在恢复成功后立即重放 key，`refresh-actor.sh`
 重建后也会调用 `POST /api/users/{name}/reinject` 同步注入；此外 `mfpi-admin` 内仍有
@@ -419,7 +436,7 @@ UI 的 provider 选择器用的是「内置列表 + 注册表」合并后的结�
   声明式定义会覆盖 catalog 条目并丢掉这些能力。
 
 **注册表位置与写入方**：ConfigMap `mfpi-provider-models` 的 `provider-models.json` 键，内容
-是一份 `models.json` 文档（生产模板 `mf-pi.yaml.tmpl` 与测试模板 `mf-pi-test.yaml.tmpl` 各
+是一份 `models.json` 文档（生产模板 `mf-pi.yaml.tmpl` 与测试模板 `mf-pi.yaml.tmpl` 各
 一份）。`mfpi-admin` 经 Kubernetes API server 读写它（RBAC `mfpi-admin-providers` 授予
 `get` / `update`）。管理面操作：`/usermanagement/` 顶部**唯一**的「**模型设置**」按钮打开一个
 对话框，含两个标签页。「**模型端点**」标签页列出内置 provider（只读，带「内置」标记，由部署的
@@ -831,7 +848,7 @@ cd demos/mf-pi
 
 > [!IMPORTANT]
 > 提示页需要**两侧都更新**，缺一会看到旧行为（白屏数秒后出现真实页面）：
-> * **nginx**：拦截规则在 `nginx.conf` / `nginx-test.conf` 内，**改后必须重建
+> * **nginx**：拦截规则在 `nginx-qa.conf` / `nginx-test.conf` 内，**改后必须重建
 >   `mfpi-nginx` 镜像并重启容器**（`./build-image.sh && docker rm -f mfpi-nginx &&
 >   ./run-nginx.sh`；测试环境用 `./run-nginx-test.sh`，它 bind-mount 配置文件，
 >   重建容器即可）。
@@ -876,7 +893,7 @@ http://<host>:58681/_cicd_        # 生产网关（测试环境为 :59681）
 **为什么跑在宿主机**：`deploy.sh` 需要仓库、`ko`、`docker` 和 `kubectl`（还要重建
 `mfpi-nginx` 镜像），这些只有宿主机有；admin 跑在 pod 里做不了。所以页面由宿主机
 进程 `cicd_server.py` 提供，nginx 用 `/_cicd_` 反代到 `127.0.0.1:58690` 并复用
-同一份 htpasswd（`nginx.conf` / `nginx-test.conf` 里的 `location ^~ /_cicd_/`）。
+同一份 htpasswd（`nginx-qa.conf` / `nginx-test.conf` 里的 `location ^~ /_cicd_/`）。
 
 
 > 名字容易打错：`cicd-server.sh`（**连字符**）是启停包装器；`cicd_server.py`（下划线）是
@@ -999,38 +1016,29 @@ go test -cover ./...
 > 一次真实推理验证。provider 既可以来自 pi-web 内置注册表，也可以只在 agent 目录的
 > `models.json` 里定义（自定义 OpenAI 兼容端点）。
 
-## 测试环境（Test Environment）
+## 三环境（prod / qa / test）
 
-除了上面的生产环境外，还提供了一套与生产**完全隔离**的测试环境，入口端口为
-`59681`（生产 `58681`）。两者可同时运行在同一台机器 / 同一个集群上，互不冲突。
+三套环境**完全隔离**，完整矩阵、隔离保证与运维命令见
+[`docs/environments.md`](./docs/environments.md)。要点：
 
-### 隔离概览
-
-| 项 | 生产 | 测试 |
-|---|---|---|
-| 入口端口 | `58681` | `59681` |
-| Namespace | `ate-demo-mf-pi` | `ate-demo-mf-pi-test` |
-| Atespace | `mfpi` | `mfpi-test` |
-| Router port-forward | `58680` | `59880` |
-| Admin port-forward | `58682` | `59882` |
-| Cookie 名 | `mfpi_user` | `mfpi_user_test` |
-| nginx 容器名 | `mfpi-nginx` | `mfpi-nginx-test` |
-| 工作负载标签 | `workload: mf-pi` | `workload: mf-pi-test` |
-| 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi/` | `gs://${BUCKET_NAME}/ate-demo-mf-pi-test/` |
-| userdata 持久卷 | sticky per-actor 卷（随 ActorTemplate） | 同左（test ns 内） |
-| `MFPI_WORKER_REPLICAS_BASE` 默认 | `0` | `0` |
-| `MFPI_WORKER_REPLICAS_SMALL` 默认 | `32` | `8`（共用节点；独占大节点可调 32） |
+| 项 | **prod**（新） | **qa**（原 58681） | **test** |
+|---|---|---|---|
+| 入口端口 | `57681` | `58681` | `59681` |
+| Namespace | `ate-demo-mf-pi-prod` | `ate-demo-mf-pi` | `ate-demo-mf-pi-test` |
+| Atespace | `mfpi-prod` | `mfpi` | `mfpi-test` |
+| Router / Admin port-forward | `57680` / `57682` | `58680` / `58682` | `59880` / `59882` |
+| User / 会话 cookie | `mfpi_user_prod` / `mfpi_auth_prod` | `mfpi_user_qa` / `mfpi_auth_qa` | `mfpi_user_test` / `mfpi_auth_test` |
+| nginx 容器 / 配置 | `mfpi-nginx-prod` / `nginx-prod.conf` | `mfpi-nginx-qa` / `nginx-qa.conf` | `mfpi-nginx-test` / `nginx-test.conf` |
+| 工作负载标签 | `workload: mf-pi-prod` | `workload: mf-pi` | `workload: mf-pi-test` |
+| 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi-prod/` | `.../ate-demo-mf-pi/` | `.../ate-demo-mf-pi-test/` |
+| small worker 默认 | `24` | `26`（=现有 actor 数） | `8` |
 
 > [!NOTE]
-> **为什么需要这些隔离**：Atespace 是集群级资源；nginx cookie 忽略端口（同一宿主
-> 上 `58681` 与 `59681` 共享 `mfpi_user` cookie）；worker 按标签调度且匹配范围是整
-> 个集群；路由器按 Host 头的 atespace 路由。因此测试环境必须使用不同的 atespace、
-> cookie 名、worker 标签和快照路径，才能与生产互不干扰。
->
-> **持久化相关开关**（两套部署共用）：
-> `MFPI_KEEP_GOLDEN=1` 保留 controller 生成的 golden base 快照（不推荐，见上文）；
-> `MFPI_ALLOW_MULTI_NODE=1` 允许在 >1 节点集群部署（sticky 卷是节点本地，风险自担）；
-> `MFPI_DEPLOY_REV` 部署版本戳（渲染进 `PI_WEB_DEPLOY_REV`，用于强制一次模板变更）。
+> **为什么这样隔离**：Atespace 是集群级资源；浏览器 cookie **不区分端口**（同一
+> 宿主上三套环境若同名 cookie 会串）；worker 按标签在整集群匹配；路由器按 Host 头
+> 的 atespace 路由。所以三套环境必须使用不同的 namespace/atespace、cookie 名、
+> worker 标签和快照路径。所有常量都在 `env/<env>.env`，模板只有一份
+> `mf-pi.yaml.tmpl`。
 
 ### 部署
 
@@ -1267,7 +1275,7 @@ kubectl ate resume actor <u> -a <atespace>
 **原因**：nginx 的 `client_max_body_size` 内置默认是 **1m**；超过就会被 nginx 直接
 以 `413` 拒绝，请求根本到不了 pi-web / mfpi-admin。
 
-**当前配置**：`nginx.conf` 与 `nginx-test.conf` 的 server 块都显式设为
+**当前配置**：`nginx-qa.conf` 与 `nginx-test.conf` 的 server 块都显式设为
 **`client_max_body_size 512m;`**（覆盖 pi-web 上传与管理 UI 的 skill 包；mfpi-admin
 自身对 skill 包的限额是 64MiB/包、32MiB/文件）。要调整上限就改这两处，然后重建
 nginx 容器/镜像。
@@ -1290,7 +1298,7 @@ docker rm -f mfpi-nginx-test && ./run-nginx-test.sh
 
 ### `/usermanagement/` 打不开（404 或被当作用户路径路由）
 
-**原因**：`mfpi-nginx` 镜像是根据 `nginx.conf` 构建的。修改 `nginx.conf` 后**必须
+**原因**：`mfpi-nginx` 镜像是根据 `nginx-qa.conf` 构建的。修改 `nginx-qa.conf` 后**必须
 重新构建并重启该容器**，否则容器内仍是旧配置。
 
 **解决**：

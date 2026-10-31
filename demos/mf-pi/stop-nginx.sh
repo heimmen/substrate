@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
-# Tear down what run-nginx.sh started: kill the kubectl port-forwards holding
-# the demo ports and remove the mfpi-nginx container. Safe to run repeatedly
-# and when nothing is running (free ports / no container are reported and
-# skipped). This clears a stale "port already in use" so run-nginx.sh can be
-# re-run cleanly.
+# Tear down what run-nginx.sh started for ONE environment: kill that
+# environment's kubectl port-forwards and remove its gateway container.
 #
-#   58680 -> svc/atenet-router:80     (actor traffic)
-#   58682 -> svc/mfpi-admin:8080      (user-management UI)
-#   58681 -> mfpi-nginx container     (docker, --network host)
+#   ./stop-nginx.sh            # qa (default, historical 58681)
+#   ./stop-nginx-test.sh       # test (59681)
+#   ./stop-nginx-prod.sh       # prod (57681)
+#   ./stop-nginx.sh qa|test|prod
+#   MFPI_ENV=test ./stop-nginx.sh
+#
+# Safe to run repeatedly and when nothing is running (free ports / no container
+# are reported and skipped). Only this environment's ports/container are
+# touched, so stopping qa never disturbs prod or test.
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+ENV_ARG=""
+case "${1:-}" in
+  prod|qa|test) ENV_ARG="$1"; shift ;;
+esac
+# shellcheck source=lib/env.sh
+source "$(dirname "$0")/lib/env.sh"
+mfpi_load_env "${ENV_ARG}"
 
 # kill_port finds and kills the process listening on the given TCP port.
 # Prefers lsof, falls back to fuser; a free port is not an error.
@@ -35,14 +46,21 @@ kill_port() {
   fi
 }
 
-kill_port 58680
-kill_port 58682
+kill_port "${MFPI_ROUTER_PORT}"
+kill_port "${MFPI_ADMIN_PORT}"
 
-if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'mfpi-nginx'; then
-  echo "removing mfpi-nginx container (port 58681)"
+# Pre-split qa gateway (see run-nginx.sh).
+if [[ "${MFPI_ENV_NAME}" == "qa" ]] &&
+   docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'mfpi-nginx'; then
+  echo "removing legacy mfpi-nginx container (pre-split qa gateway)"
   docker rm -f mfpi-nginx >/dev/null
-else
-  echo "mfpi-nginx container not present; nothing to clean"
 fi
 
-echo "done. run-nginx.sh can now start fresh."
+if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${MFPI_NGINX_CONTAINER}"; then
+  echo "removing ${MFPI_NGINX_CONTAINER} container (port ${MFPI_ENTRY_PORT})"
+  docker rm -f "${MFPI_NGINX_CONTAINER}" >/dev/null
+else
+  echo "${MFPI_NGINX_CONTAINER} container not present; nothing to clean"
+fi
+
+echo "done. run-nginx.sh can now start ${MFPI_ENV_NAME} fresh."

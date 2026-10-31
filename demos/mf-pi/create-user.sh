@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 
 # atespace name; change if the demo uses a different atespace.
 ATESPACE="${MFPI_ATESPACE:-mfpi}"
-TEMPLATE="ate-demo-mf-pi/mf-pi"
+TEMPLATE="${MFPI_TEMPLATE:-${MFPI_NAMESPACE:-ate-demo-mf-pi}/mf-pi}"
 
 # Validate username against DNS-1123 (same rule as Substrate actor names).
 DNS1123='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'

@@ -1,5 +1,8 @@
 # mf-pi 压测 · P1 测试环境（59681）校准结果
 
+> 环境映射：test = 59681，qa = 58681（历史 `mfpi`），prod = 57681（`mfpi-prod`）。
+> 本文件不受改名影响（一直是 test）。
+
 执行日期：2026-10-29 · 工具：`tools/mfpi-loadgen`（`idle-browser` 场景，
 `-auth cookie`，`-think 3s-8s`）· 环境：`ate-demo-mf-pi-test` / `mfpi-test`。
 
