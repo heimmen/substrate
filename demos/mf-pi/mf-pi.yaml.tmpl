@@ -110,7 +110,11 @@ spec:
         memory: 1Gi
       limits:
         cpu: "1"
-        memory: 1Gi
+        # 1Gi was too tight once a user ran long turns / heavy tools: the
+        # container (ateom + runsc + the agent) shares this cgroup, and an
+        # OOM kill leaves the actor stranded on a blank worker. Measured
+        # steady-state is ~250-300MiB; 2Gi leaves headroom for spikes.
+        memory: 2Gi
 
 ---
 

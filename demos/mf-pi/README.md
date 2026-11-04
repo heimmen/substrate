@@ -1116,6 +1116,18 @@ cd demos/mf-pi
 > [单个用户连不上 Agent：一步一诊断](./sop/user_cannot_connect.md)（按现象选入口，
 > 从网关、鉴权、actor 状态、worker、router 到控制面逐层收敛）。
 
+### 想让它自愈：装 watchdog（推荐）
+
+```bash
+./install-watchdog.sh start qa     # root+systemd -> 60s timer；普通用户 -> nohup 循环
+./install-watchdog.sh status qa
+```
+
+`watchdog.sh` 每分钟做两件事：router/admin 隧道掉了自动重跑 `run-nginx.sh`；
+发现“worker OOM 重启后 actor 仍 RUNNING 但探活非 200”时，自动删坏 worker →
+等 `STATUS_SUSPENDED` → `resume`。日志在 `/tmp/mfpi-logs/watchdog-<env>.log`。
+prod/test 同理：`./install-watchdog.sh start prod test`。
+
 ### 所有用户都连不上（golden base 快照损坏）→ `./recover-actors.sh`
 
 > [!NOTE]

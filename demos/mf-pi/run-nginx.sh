@@ -33,6 +33,12 @@ mfpi_load_env "${ENV_ARG}"
 # stale. Override for slow clusters: MFPI_PROBE_TIMEOUT=15 ./run-nginx.sh
 PROBE_TIMEOUT="${MFPI_PROBE_TIMEOUT:-5}"
 
+# Keep the port-forward output: when a tunnel dies it prints the reason here
+# ("lost connection to pod", "error: unable to forward port", ...). Without
+# this the process exit is silent and postmortems are impossible.
+LOG_DIR="${MFPI_LOG_DIR:-/tmp/mfpi-logs}"
+mkdir -p "${LOG_DIR}"
+
 # True if something is listening on 127.0.0.1:<port>.
 port_in_use() {
   ss -ltn 2>/dev/null | grep -q "127.0.0.1:${1}[[:space:]]"
@@ -95,10 +101,12 @@ port_forward() {
   # end up listening on [::1] alone (e.g. when a previous forward left the IPv6
   # socket behind), which the health probe above does not catch and which shows
   # up as intermittent 502s from nginx.
+  local pf_log="${LOG_DIR}/port-forward-${MFPI_ENV}-${local_port}.log"
   nohup kubectl port-forward --address 127.0.0.1 \
     -n "${namespace}" "svc/${service}" "${local_port}:${remote_port}" \
-    >/dev/null 2>&1 &
+    >"${pf_log}" 2>&1 &
   disown
+  echo "  (log: ${pf_log})"
   # Give the tunnel a moment to establish before nginx starts proxying to it.
   sleep 1
 }

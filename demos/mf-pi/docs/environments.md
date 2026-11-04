@@ -183,6 +183,11 @@ MFPI_WORKER_REPLICAS_SMALL=8 MFPI_WORKER_REPLICAS_MID=0 MFPI_WORKER_REPLICAS_LAR
 当前单节点 24 核。三套同时在线时：qa 30 + prod 8 + test 8 = 46 个 small
 worker（11.5 核 requests）+ prod 的 mid/large 3 核 ≈ 15 核，留出较充裕的
 kube/其它组件余量；qa/test 的 mid/large 为 0。prod 的容量按需再扩。
+
+small worker 的 `limits.memory` 为 **2Gi**（2026-11 从 1Gi 提高）：容器内
+ateom + runsc + agent 共享该 cgroup，1Gi 时长 turn/重工具会 OOM，杀掉后 actor
+会悬空。提高该值会滚动重建该池全部 worker（其上 actor 被释放后冷启动），
+应安排窗口。
 加上三套 mid/large（各 1 核 + 2 核）共 9 核，再加 kube-system/otel 等，节点
 CPU requests 会接近或略超 24 核。**真正部署前**建议：
 

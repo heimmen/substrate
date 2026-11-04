@@ -3,6 +3,9 @@
 > 本文件位于 `demos/mf-pi/sop/`；同目录有诊断脚本副本（`check_agent_access.sh`、
 > `refresh-actor.sh`、`recover-actors.sh`、`exec-actor.sh` 等）。部署脚本
 > （`run-nginx.sh`、`create-user.sh` 等）在上一级 `demos/mf-pi/`。
+>
+> **只是想尽快恢复？** 先看 [README 的 A/B 两条路径](./README.md)：它用 3 条命令区分
+> “整个环境坏了”还是“单个用户坏了”，并给出可直接粘贴的修复命令。本文是逐层深挖版。
 
 适用场景：**装完环境后，其他用户都正常，只有某一个用户（系统账号）打不开自己的
 Agent**。本文按「从外到内」的顺序给出可复制命令，每一步都有判定标准和下一步指向；
@@ -14,7 +17,9 @@ Agent**。本文按「从外到内」的顺序给出可复制命令，每一步�
 
 ## 先固定环境变量（每台机器只做一次）
 
-下面所有命令都使用这组变量。**默认值只是本仓库 demo 的常见部署**；如果你的
+下面所有命令都使用这组变量。不知道 `ATESPACE/NS/端口` 填什么时，
+[README](./README.md) 里有反查命令。注意**同名用户可能存在于多个 atespace**，
+反查会列出多行，必须选对你要排查的那一套。**默认值只是本仓库 demo 的常见部署**；如果你的
 atespace、namespace、端口或网关容器名不同，按实际部署替换即可——不要拿另一套
 部署的值来排查。
 
@@ -134,9 +139,10 @@ curl -s -o /dev/null -w 'user=%{http_code} bytes=%{size_download}\n' -m 20 \
 
 期望：`tunnel` 非 `000`，`user=200` 且 `bytes>100`。
 
-**预防**：port-forward 没有守护进程，挂了不会自愈（曾出现该进程消失、整个环境的
-用户都卡在载入页）。每次 router 发布/重启后都要重跑 `./"$NGINX_SCRIPT"`；长期运行
-建议用 systemd/supervisor 守护该命令，或改用 Ingress/NodePort 暴露 router。
+**预防**：port-forward 没有内建守护，挂了不会自愈（曾出现该进程消失、整个环境的
+用户都卡在载入页）。本仓库已提供 `watchdog.sh`（每分钟探测并自动重建隧道，
+`./install-watchdog.sh start <env>` 安装）；也可以自己用 systemd/supervisor 守护
+`run-nginx.sh`，或改用 Ingress/NodePort 暴露 router。
 
 ## 第 2 步：鉴权是否通过
 
@@ -321,8 +327,10 @@ done
   要安排窗口（或新建模板名，避免影响存量）。
 - 周期性跑 `./check_agent_access.sh "$ATESPACE" "$NS"`：它会把 `RESTARTS>0` 和
   “ateom 卡 boot”判为异常并打印修复提示。
-- 平台侧正确修法：worker **容器重启**时也释放/重建其 actor（当前只在 pod 删除时
-  处理），否则会长期悬空。
+- 平台侧已修：syncer 现在检测到 worker **容器重启**（restartCount 增长）也会释放
+  actor 并把 worker 放回空闲池；升级到含该修复的 ate-api 镜像即可。
+- `watchdog.sh` 会每分钟自动执行上面的“删坏 worker → 等 SUSPENDED → resume”，
+  装上后这类悬空通常无需人工介入。
 
 ## 第 6 步：绕过 nginx 直连 router（区分网关问题和平台问题）
 
