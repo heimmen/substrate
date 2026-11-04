@@ -1033,6 +1033,14 @@ go test -cover ./...
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi-prod/` | `.../ate-demo-mf-pi/` | `.../ate-demo-mf-pi-test/` |
 | small worker 默认 | `8` | `30`（=28 actor + 2 余量） | `8` |
 
+用一条命令看三套环境的实时状态（用户数 / RUNNING / 悬空 actor / 网关 / worker）：
+
+```bash
+./status-all.sh             # 汇总表
+./status-all.sh --detail    # 再加每个用户一行
+./status-all.sh --watch 5   # 每 5 秒刷新
+```
+
 > [!NOTE]
 > **为什么这样隔离**：Atespace 是集群级资源；浏览器 cookie **不区分端口**（同一
 > 宿主上三套环境若同名 cookie 会串）；worker 按标签在整集群匹配；路由器按 Host 头

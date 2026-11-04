@@ -4,6 +4,9 @@
 > 需要逐层深挖时，再翻 [user_cannot_connect.md](./user_cannot_connect.md)。
 >
 > 下面的命令默认在 `demos/mf-pi/sop/` 目录执行（`run-nginx.sh` 例外，它在上一级）。
+>
+> **先看全局**：`./status-all.sh` 一屏列出三套环境的用户数、RUNNING/SUSPENDED、
+> 网关、worker 就绪数和“悬空 actor”数；`--detail` 看每个用户，`--watch 5` 持续刷新。
 
 ---
 
@@ -242,6 +245,7 @@ done
 
 | 脚本 | 用途 |
 |---|---|
+| `status-all.sh` | **一屏看三套环境**：用户数/RUNNING/SUSPENDED、网关、worker、悬空 actor；`--detail` / `--watch N` |
 | `watchdog.sh` | 每分钟自愈：隧道掉了自动重建；发现“OOM 后 actor 悬空”自动删 worker→等 SUSPENDED→resume |
 | `install-watchdog.sh` | 安装/启动/停止/查看 watchdog（root+systemd 用 60s timer；否则 nohup 循环） |
 | `check_agent_access.sh` | **先跑这个**：体检某 atespace 的全部用户（状态 / worker Ready / restarts / 最近活动） |

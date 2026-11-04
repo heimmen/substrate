@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 FILES=(
+  status-all.sh
   watchdog.sh
   install-watchdog.sh
   check_agent_access.sh
