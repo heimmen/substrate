@@ -19,6 +19,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"sync"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -36,6 +37,16 @@ type WorkerPoolSyncer struct {
 	persistence      store.Interface
 	workerInformer   cache.SharedIndexInformer
 	workerPoolLister listersv1alpha1.WorkerPoolLister
+
+	// restartMu guards restartCounts, which tracks the last observed container
+	// restart count per worker pod UID. A worker pod can restart its container
+	// in place (OOM/crash): the pod object survives, so the DeleteFunc never
+	// runs and the actor bound to that worker would otherwise stay
+	// STATUS_RUNNING on a worker whose sandbox is gone. The counts are
+	// in-memory on purpose: a freshly started ateapi has no history and must
+	// not mass-release actors; it only records the current counts.
+	restartMu     sync.Mutex
+	restartCounts map[string]int32
 }
 
 // NewWorkerPoolSyncer creates a new WorkerPoolSyncer.
@@ -44,6 +55,7 @@ func NewWorkerPoolSyncer(persistence store.Interface, workerInformer cache.Share
 		persistence:      persistence,
 		workerInformer:   workerInformer,
 		workerPoolLister: workerPoolLister,
+		restartCounts:    make(map[string]int32),
 	}
 }
 
@@ -52,10 +64,15 @@ func (s *WorkerPoolSyncer) Start(ctx context.Context) {
 	s.workerInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*corev1.Pod)
+			s.observeRestart(pod)
 			s.syncWorkerToStore(ctx, pod)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			pod := newObj.(*corev1.Pod)
+			if s.observeRestart(pod) {
+				s.handleWorkerRestart(ctx, pod)
+				return
+			}
 			s.syncWorkerToStore(ctx, pod)
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -74,6 +91,7 @@ func (s *WorkerPoolSyncer) Start(ctx context.Context) {
 				slog.ErrorContext(ctx, "Unknown object type in delete handler", slog.Any("obj", obj))
 				return
 			}
+			s.forgetRestart(pod)
 			slog.InfoContext(ctx, "Syncer: removing worker from store", slog.String("worker", pod.Namespace+"/"+pod.Name))
 			if err := s.releaseActorOnDeadWorker(ctx, pod.Namespace, pod.Labels[workerPodLabel], pod.Name); err != nil {
 				slog.ErrorContext(ctx, "Failed to release actor bound to deleted worker", slog.Any("err", err))
@@ -95,6 +113,7 @@ func (s *WorkerPoolSyncer) Start(ctx context.Context) {
 		objs := s.workerInformer.GetIndexer().List()
 		for _, obj := range objs {
 			pod := obj.(*corev1.Pod)
+			s.observeRestart(pod)
 			s.syncWorkerToStore(ctx, pod)
 		}
 	}()
@@ -179,6 +198,59 @@ func (s *WorkerPoolSyncer) syncWorkerToStore(ctx context.Context, pod *corev1.Po
 			slog.ErrorContext(ctx, "Failed to update worker in store", slog.Any("err", err))
 		}
 	}
+}
+
+// workerRestartCount returns the largest container restart count in the pod.
+func workerRestartCount(pod *corev1.Pod) int32 {
+	var max int32
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.RestartCount > max {
+			max = cs.RestartCount
+		}
+	}
+	return max
+}
+
+// observeRestart records the pod's restart count and reports whether it grew
+// since the previous observation. The first observation only records.
+func (s *WorkerPoolSyncer) observeRestart(pod *corev1.Pod) bool {
+	uid := string(pod.UID)
+	if uid == "" {
+		return false
+	}
+	rc := workerRestartCount(pod)
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+	prev, seen := s.restartCounts[uid]
+	s.restartCounts[uid] = rc
+	return seen && rc > prev
+}
+
+func (s *WorkerPoolSyncer) forgetRestart(pod *corev1.Pod) {
+	if uid := string(pod.UID); uid != "" {
+		s.restartMu.Lock()
+		delete(s.restartCounts, uid)
+		s.restartMu.Unlock()
+	}
+}
+
+// handleWorkerRestart reacts to a container restart inside a surviving worker
+// pod: the sandbox is gone, so release the actor (SUSPENDED, with its data on
+// the sticky volume) and re-materialise the worker as free. The next request
+// resumes the actor with a cold boot.
+func (s *WorkerPoolSyncer) handleWorkerRestart(ctx context.Context, pod *corev1.Pod) {
+	poolName := pod.Labels[workerPodLabel]
+	slog.InfoContext(ctx, "Syncer: worker container restarted; releasing its actor",
+		slog.String("worker", pod.Namespace+"/"+pod.Name),
+		slog.Int("restartCount", int(workerRestartCount(pod))))
+	if err := s.releaseActorOnDeadWorker(ctx, pod.Namespace, poolName, pod.Name); err != nil {
+		slog.ErrorContext(ctx, "Failed to release actor bound to restarted worker", slog.Any("err", err))
+	}
+	if err := s.persistence.DeleteWorker(ctx, pod.Namespace, poolName, pod.Name); err != nil {
+		slog.ErrorContext(ctx, "Failed to delete restarted worker from store", slog.Any("err", err))
+	}
+	// Re-add the blank worker as free. If it has no IP yet, a later update does.
+	s.syncWorkerToStore(ctx, pod)
 }
 
 func isWorkerEligible(pod *corev1.Pod) bool {

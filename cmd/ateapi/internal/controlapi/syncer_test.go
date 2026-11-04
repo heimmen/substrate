@@ -360,3 +360,116 @@ func TestSyncer_OmittedFields(t *testing.T) {
 		t.Fatalf("Worker state check failed: %v", err)
 	}
 }
+
+func TestSyncer_WorkerContainerRestart_ReleasesActor(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ns, pool, podName, ip := "ns-restart", "pool1", "worker-restart", "10.0.0.2"
+	workerPool := &atev1alpha1.WorkerPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pool,
+			Namespace: ns,
+			Labels:    map[string]string{"foo": "bar"},
+		},
+		Spec: atev1alpha1.WorkerPoolSpec{SandboxClass: "gvisor"},
+	}
+
+	persistence, fakeK8s, _, cleanup := setupSyncerTest(t, ctx, workerPool)
+	defer cleanup()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: ns,
+			UID:       "08675309-4a65-6e6e-7973-6e756d62657a",
+			Labels:    map[string]string{workerPodLabel: pool},
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   "node1",
+			Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+		},
+	}
+	if _, err := fakeK8s.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	// Give the pod an IP and a zero restart count; this materialises the worker.
+	running := pod.DeepCopy()
+	running.Status = corev1.PodStatus{
+		Phase:             corev1.PodRunning,
+		PodIP:             ip,
+		PodIPs:            []corev1.PodIP{{IP: ip}},
+		ContainerStatuses: []corev1.ContainerStatus{{Name: "main", RestartCount: 0}},
+	}
+	if _, err := fakeK8s.CoreV1().Pods(ns).Update(ctx, running, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update pod: %v", err)
+	}
+	if err := wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 2*time.Second, true, func(c context.Context) (bool, error) {
+		_, gerr := persistence.GetWorker(c, ns, pool, podName)
+		return gerr == nil, nil
+	}); err != nil {
+		t.Fatalf("worker row not materialised: %v", err)
+	}
+
+	// Bind an actor to that worker, like a running resume would.
+	actorName := "actor-restart"
+	if _, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+		Metadata:               &ateapipb.ResourceMetadata{Name: actorName, Atespace: "team-restart"},
+		ActorTemplateNamespace: ns, ActorTemplateName: "tmpl",
+		Status:            ateapipb.Actor_STATUS_RUNNING,
+		AteomPodNamespace: ns, AteomPodName: podName, AteomPodIp: ip,
+	}); err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	w, err := persistence.GetWorker(ctx, ns, pool, podName)
+	if err != nil {
+		t.Fatalf("get worker: %v", err)
+	}
+	w.Assignment = &ateapipb.Assignment{
+		ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: ns, Name: "tmpl"},
+		Actor:         &ateapipb.ObjectRef{Name: actorName, Atespace: "team-restart"},
+	}
+	if err := persistence.UpdateWorker(ctx, w, w.Version); err != nil {
+		t.Fatalf("update worker: %v", err)
+	}
+
+	// Simulate an in-place container restart (OOM kill) without deleting the pod.
+	restarted := running.DeepCopy()
+	restarted.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:         "main",
+		RestartCount: 1,
+		LastTerminationState: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137},
+		},
+	}}
+	if _, err := fakeK8s.CoreV1().Pods(ns).Update(ctx, restarted, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update pod with restart: %v", err)
+	}
+
+	var got *ateapipb.Actor
+	if err := wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 2*time.Second, true, func(c context.Context) (bool, error) {
+		a, gerr := persistence.GetActor(c, "team-restart", actorName)
+		if gerr != nil {
+			return false, gerr
+		}
+		got = a
+		return a.GetStatus() == ateapipb.Actor_STATUS_SUSPENDED, nil
+	}); err != nil {
+		t.Fatalf("actor not reset to SUSPENDED after worker restart: %v", err)
+	}
+	if got.AteomPodName != "" || got.AteomPodNamespace != "" || got.AteomPodIp != "" {
+		t.Errorf("bind fields not cleared: %+v", got)
+	}
+
+	// The blank worker must be back in the free pool, not still assigned.
+	if err := wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 2*time.Second, true, func(c context.Context) (bool, error) {
+		nw, gerr := persistence.GetWorker(c, ns, pool, podName)
+		if gerr != nil {
+			return false, nil
+		}
+		return nw.Assignment == nil, nil
+	}); err != nil {
+		t.Fatalf("worker was not re-added as free after restart: %v", err)
+	}
+}
