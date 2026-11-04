@@ -1038,6 +1038,7 @@ go test -cover ./...
 ```bash
 ./status-all.sh             # 汇总表
 ./status-all.sh --detail    # 再加每个用户一行
+./status-all.sh --fix       # 对异常环境跑一次 watchdog（隧道/悬空 actor）
 ./status-all.sh --watch 5   # 每 5 秒刷新
 ```
 

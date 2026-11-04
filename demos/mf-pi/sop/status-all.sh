@@ -4,6 +4,7 @@
 # Usage:
 #   ./status-all.sh             # summary: users, gateway, workers, stale actors
 #   ./status-all.sh --detail    # + one line per user
+#   ./status-all.sh --fix       # repair unhealthy envs once (watchdog --once)
 #   ./status-all.sh --watch 5   # refresh every 5 seconds
 #
 # "stale" = actor is STATUS_RUNNING but its worker container restarted
@@ -26,6 +27,7 @@ if [[ ! -f "${ROOT}/lib/env.sh" ]]; then
 fi
 
 DETAIL=0
+FIX=0
 WATCH=""
 
 usage() {
@@ -36,6 +38,7 @@ usage() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --detail) DETAIL=1 ;;
+    --fix)    FIX=1 ;;
     --watch)  WATCH="${2:-5}"; shift ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
@@ -61,11 +64,12 @@ report_env() {
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$MFPI_NGINX_CONTAINER"; then
     container=up
   fi
-  local entry router
+  local entry router admin
   entry="$(http_code "http://127.0.0.1:${MFPI_ENTRY_PORT}/")"
   router="$(http_code "http://127.0.0.1:${MFPI_ROUTER_PORT}/")"
+  admin="$(http_code "http://127.0.0.1:${MFPI_ADMIN_PORT}/healthz")"
   local gw=ok
-  if [[ "$container" != up || "$entry" == "000" || "$router" == "000" ]]; then
+  if [[ "$container" != up || "$entry" == "000" || "$router" == "000" || "$admin" != "200" ]]; then
     gw=DOWN
   fi
 
@@ -119,12 +123,37 @@ report_env() {
 }
 
 run_once() {
+  if ! kubectl get --raw=/readyz --request-timeout=3s >/dev/null 2>&1; then
+    echo "error: Kubernetes API 不可达（整个集群挂了？）" >&2
+    echo "  1) docker ps -a --filter name=kind-control-plane" >&2
+    echo "  2) docker start kind-control-plane" >&2
+    echo "  3) 等 kubectl get nodes 变 Ready 后重跑" >&2
+    return 2
+  fi
+
   print_header
   local bad=0 env
+  BAD_ENVS=()
   while read -r env; do
     # Subshell: each env export must not leak MFPI_PROXY/MFPI_ADMIN into the next.
-    ( report_env "$env" ) || bad=1
+    if ! ( report_env "$env" ); then
+      bad=1
+      BAD_ENVS+=("$env")
+    fi
   done < <(mfpi_envs)
+
+  if [[ "$FIX" == "1" && ${#BAD_ENVS[@]} -gt 0 ]]; then
+    for env in "${BAD_ENVS[@]}"; do
+      echo "--- fixing $env (watchdog --once) ---"
+      "${ROOT}/watchdog.sh" --once --env "$env" || echo "watchdog failed for $env (see $LOG_DIR/watchdog-$env.log)"
+    done
+    echo "--- after fix ---"
+    print_header
+    bad=0
+    for env in "${BAD_ENVS[@]}"; do
+      ( report_env "$env" ) || bad=1
+    done
+  fi
   return "$bad"
 }
 

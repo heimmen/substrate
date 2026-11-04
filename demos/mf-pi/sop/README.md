@@ -6,9 +6,23 @@
 > 下面的命令默认在 `demos/mf-pi/sop/` 目录执行（`run-nginx.sh` 例外，它在上一级）。
 >
 > **先看全局**：`./status-all.sh` 一屏列出三套环境的用户数、RUNNING/SUSPENDED、
-> 网关、worker 就绪数和“悬空 actor”数；`--detail` 看每个用户，`--watch 5` 持续刷新。
+> 网关、worker 就绪数和“悬空 actor”数；`--detail` 看每个用户，`--fix` 对异常环境
+> 修一次，`--watch 5` 持续刷新。
 
 ---
+
+## status-all 显示异常时怎么修
+
+| 显示 | 含义 | 修复 |
+|---|---|---|
+| 某环境 `GW=DOWN` | 网关容器/隧道/admin 至少一个不通 | `./status-all.sh --fix`；或 `./run-nginx.sh <env>`；反复掉就确认 watchdog 在跑（`./install-watchdog.sh status <env>`） |
+| `STALE>0` | actor 悬在“容器重启过”的 worker 上 | `./status-all.sh --fix`（删 worker→等 `SUSPENDED`→`resume`），watchdog 也会每分钟做 |
+| 整表报 `Kubernetes API 不可达` | 整个 kind 集群挂了 | `docker ps -a --filter name=kind-control-plane` → `docker start kind-control-plane` → 等 `kubectl get nodes` Ready 再重跑 |
+| `WORKERS` 的 ready < desired | worker 起不来（Pending/ImagePull/容量） | `kubectl get pods -n <ns>` 看原因；容量不够见下面的 `no free workers` |
+| `SUSP` 很多、`RUN` 很少 | 无人使用，actor 已休眠（正常） | 无需处理，下次访问冷启动 |
+
+一键修：`./status-all.sh --fix`（对 `GW=DOWN` 或 `STALE>0` 的环境各跑一次
+`watchdog.sh --once`，然后重新体检）。
 
 ## 30 秒判断：一个人坏，还是一群人坏？
 
