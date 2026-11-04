@@ -1031,7 +1031,7 @@ go test -cover ./...
 | nginx 容器 / 配置 | `mfpi-nginx-prod` / `nginx-prod.conf` | `mfpi-nginx-qa` / `nginx-qa.conf` | `mfpi-nginx-test` / `nginx-test.conf` |
 | 工作负载标签 | `workload: mf-pi-prod` | `workload: mf-pi` | `workload: mf-pi-test` |
 | 快照路径 | `gs://${BUCKET_NAME}/ate-demo-mf-pi-prod/` | `.../ate-demo-mf-pi/` | `.../ate-demo-mf-pi-test/` |
-| small worker 默认 | `24` | `26`（=现有 actor 数） | `8` |
+| small worker 默认 | `8` | `30`（=28 actor + 2 余量） | `8` |
 
 > [!NOTE]
 > **为什么这样隔离**：Atespace 是集群级资源；浏览器 cookie **不区分端口**（同一

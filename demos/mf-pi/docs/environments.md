@@ -19,7 +19,7 @@ workload 标签、入口端口、网关容器和 cookie 名；启动 / 部署 / 
 | nginx 配置 | `nginx-prod.conf` | `nginx-qa.conf` | `nginx-test.conf` |
 | 用户 cookie | `mfpi_user_prod` | `mfpi_user_qa` | `mfpi_user_test` |
 | 会话 cookie | `mfpi_auth_prod` | `mfpi_auth_qa` | `mfpi_auth_test` |
-| small worker 默认 | 24 | 26（=现有 actor 数） | 8 |
+| small worker 默认 | 8 | 30（=现有 28 个 actor + 2 余量） | 8 |
 | mid / large 默认 | 1 / 1 | **0 / 0**\* | **0 / 0**\* |
 
 > **为什么 qa 保留 `mfpi` / `ate-demo-mf-pi` 这些老名字**：atespace、actor 名和
@@ -180,9 +180,9 @@ MFPI_WORKER_REPLICAS_SMALL=8 MFPI_WORKER_REPLICAS_MID=0 MFPI_WORKER_REPLICAS_LAR
 
 ## 资源与容量提醒
 
-当前单节点 24 核。三套同时在线时：qa 26 + prod 24 + test 8 = 58 个 small
-worker（14.5 核 requests）+ prod 的 mid/large 3 核 ≈ 18 核，留出 kube/其它组件
-余量；qa/test 的 mid/large 为 0。若需要恢复 mid/large，先腾资源。
+当前单节点 24 核。三套同时在线时：qa 30 + prod 8 + test 8 = 46 个 small
+worker（11.5 核 requests）+ prod 的 mid/large 3 核 ≈ 15 核，留出较充裕的
+kube/其它组件余量；qa/test 的 mid/large 为 0。prod 的容量按需再扩。
 加上三套 mid/large（各 1 核 + 2 核）共 9 核，再加 kube-system/otel 等，节点
 CPU requests 会接近或略超 24 核。**真正部署前**建议：
 
