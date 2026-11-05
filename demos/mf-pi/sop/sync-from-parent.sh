@@ -9,6 +9,8 @@ cd "$(dirname "$0")"
 
 FILES=(
   status-all.sh
+  idle-reaper.sh
+  install-idle-reaper.sh
   watchdog.sh
   install-watchdog.sh
   check_agent_access.sh

@@ -1137,6 +1137,14 @@ cd demos/mf-pi
 等 `STATUS_SUSPENDED` → `resume`。日志在 `/tmp/mfpi-logs/watchdog-<env>.log`。
 prod/test 同理：`./install-watchdog.sh start prod test`。
 
+用户很多、想释放长期不活动用户的 worker（数据保留，下次冷启动）：
+
+```bash
+./idle-reaper.sh --idle 12h                 # dry-run，列出候选
+./idle-reaper.sh --apply --idle 12h --max 5 # 真正释放
+MFPI_IDLE_REAPER_IDLE=12h ./install-idle-reaper.sh start qa   # 每小时自动
+```
+
 ### 所有用户都连不上（golden base 快照损坏）→ `./recover-actors.sh`
 
 > [!NOTE]

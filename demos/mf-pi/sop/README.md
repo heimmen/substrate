@@ -245,6 +245,36 @@ done
 > 平台的 syncer 修复（worker 容器重启也释放 actor）随镜像发布，不需要安装步骤。
 > 如果只能做一件事：**装 watchdog**。
 
+## 用户太多 / 长时间不活动：释放资源
+
+```bash
+# 先看候选（默认 dry-run，不会动任何人）
+./idle-reaper.sh --idle 12h
+
+# 真正释放（每次最多 5 个，只动 small/mid 档）
+./idle-reaper.sh --apply --idle 12h --max 5
+
+# 装成每小时自动跑（推荐）
+MFPI_IDLE_REAPER_IDLE=12h ./install-idle-reaper.sh start qa
+./install-idle-reaper.sh status qa
+```
+
+**释放的是什么**：删掉该用户的 worker pod，syncer 把 actor 置为 `SUSPENDED`
+（**不写快照**），worker pod 变回空白空闲；下次访问时 router 懒恢复、冷启动
+（约 25–40s，loading 页覆盖）。用户数据在 sticky 卷上，**不会丢**。
+
+**不释放什么**：worker **Pod 本身仍保留**（只是不再挂 actor），所以：
+- 会释放运行中的 sandbox 占用的**内存/CPU**，并腾出 worker 名额给新用户；
+- **不会减少 Pod 数 / CPU requests**。要进一步省节点资源，需要再缩 WorkerPool
+  ——那要配套“没空闲 worker 时自动扩容”，目前没做，建议先只做 idle 释放。
+
+**活动判定**：来自网关 access log（每个已登录请求都会记 `<user>` 和
+`请求时间`），首次运行会回填最近 7 天的日志；从未在日志里出现过的用户按
+“现在”起算（保守，避免误杀新用户）。所以发布后大约闲置满阈值才会被释放。
+
+**阈值建议**：交互型 agent 用 `6h`～`12h`；`--idle 2h` 会更激进，用户回来冷启动
+更频繁。
+
 ## 安全须知（别踩坑）
 
 - **删 worker pod 前**确认这个 pod 上只有目标用户（活跃 actor 与 worker 是 1:1）。
@@ -260,6 +290,8 @@ done
 | 脚本 | 用途 |
 |---|---|
 | `status-all.sh` | **一屏看三套环境**：用户数/RUNNING/SUSPENDED、网关、worker、悬空 actor；`--detail` / `--watch N` |
+| `idle-reaper.sh` | 释放长期不活动用户的 worker（默认 dry-run；`--apply` 真正释放） |
+| `install-idle-reaper.sh` | 每小时自动跑 idle reaper（root+systemd 用 timer；否则 nohup） |
 | `watchdog.sh` | 每分钟自愈：隧道掉了自动重建；发现“OOM 后 actor 悬空”自动删 worker→等 SUSPENDED→resume |
 | `install-watchdog.sh` | 安装/启动/停止/查看 watchdog（root+systemd 用 60s timer；否则 nohup 循环） |
 | `check_agent_access.sh` | **先跑这个**：体检某 atespace 的全部用户（状态 / worker Ready / restarts / 最近活动） |
