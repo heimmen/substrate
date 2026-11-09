@@ -51,6 +51,13 @@ source "${ROOT}/lib/env.sh"
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' -m 3 "$1" 2>/dev/null || true; }
 
+# actor_probe <user>: router status for the actor, bypassing nginx auth.
+actor_probe() {
+  curl -s -o /dev/null -w '%{http_code}' -m 4 \
+    -H "Host: ${1}.${MFPI_ATESPACE}.actors.resources.substrate.ate.dev" \
+    "http://127.0.0.1:${MFPI_ROUTER_PORT}/" 2>/dev/null || true
+}
+
 print_header() {
   printf '%-5s %-6s %6s %6s %6s %-4s %9s %6s\n' \
     ENV ENTRY USERS RUN SUSP GW WORKERS STALE
@@ -95,15 +102,23 @@ report_env() {
   done < <(kubectl get pods -n "$MFPI_NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].restartCount}{"\n"}{end}' 2>/dev/null || true)
 
   local stale=0 i
+  local -a probes=()
   for i in "${!users[@]}"; do
     case "${statuses[$i]}" in
       STATUS_RUNNING) running=$((running + 1)) ;;
       STATUS_SUSPENDED) suspended=$((suspended + 1)) ;;
       *) other=$((other + 1)) ;;
     esac
+    probes[$i]="-"
     if [[ "${statuses[$i]}" == STATUS_RUNNING ]]; then
       local rc="${restarts[${pods[$i]}]:-0}"
-      [[ "${rc:-0}" != "0" ]] && stale=$((stale + 1))
+      if [[ "${rc:-0}" != "0" ]]; then
+        # A restart count may predate the current actor (the pod was restarted
+        # while free, then served a new actor). Only a failed probe means the
+        # actor is actually stranded.
+        probes[$i]="$(actor_probe "${users[$i]}")"
+        [[ "${probes[$i]}" != "200" ]] && stale=$((stale + 1))
+      fi
     fi
   done
 
@@ -113,9 +128,9 @@ report_env() {
   if [[ "$DETAIL" == "1" ]]; then
     for i in "${!users[@]}"; do
       local rc="${restarts[${pods[$i]}]:-0}" mark=" "
-      [[ "${statuses[$i]}" == STATUS_RUNNING && "${rc:-0}" != "0" ]] && mark="!"
-      printf '  %s %-36s %-18s pod=%-38s restarts=%s\n' \
-        "$mark" "${users[$i]}" "${statuses[$i]}" "${pods[$i]:-<none>}" "${rc:-0}"
+      [[ "${probes[$i]:--}" != "-" && "${probes[$i]}" != "200" ]] && mark="!"
+      printf '  %s %-36s %-18s pod=%-38s restarts=%s probe=%s\n' \
+        "$mark" "${users[$i]}" "${statuses[$i]}" "${pods[$i]:-<none>}" "${rc:-0}" "${probes[$i]:--}"
     done
   fi
 
